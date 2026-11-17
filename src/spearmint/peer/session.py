@@ -27,6 +27,7 @@ BOUNDED_REPLIES = {
     "grove.login.continuity.v5": 2 * CATALOG, "grove.members.admit.get": CATALOG,
     "grove.login.roles.get": CATALOG,
     "security.evidence.list": CATALOG, "security.evidence.part": CATALOG,
+    "grove.update.v1": 132 * 1024,
     "grove.seed.catalog": CATALOG, "grove.seed.catalog.v2": CATALOG, "grove.seed.catalog.v3": CATALOG,
 }
 RELAY_QUEUE_CIRCUITS = 16
@@ -227,7 +228,8 @@ class Session:
         self.pending[request_id] = (method, result)
         try:
             self.send({"type": "request", "id": request_id, "method": method, "params": params})
-            timeout = 5 if method == "service.logs" else DEADLINE
+            bulk_update = method == "grove.update.v1" and params.get("action") == "chunk"
+            timeout = 10 if bulk_update else 5 if method == "service.logs" else DEADLINE
             if self.latency.fresh(self.loop.time()):
                 # The responder's handler keeps its own DEADLINE. Leave a
                 # bounded allowance for the already measured network round trip.

@@ -64,6 +64,14 @@ Set up a browser-accessible HTTPS address and a local reverse proxy to `127.0.0.
 2. To install Spearmint on a new device, open node seeding. Pick a member that can reach the target over SSH, test the connection, then browse to the installation directory. Extract the release's `seed-packages-*.zip` to the initiator's state directory so that `seed-packages/index.json` is next to the archives.
 3. In service management, choose the local or remote node where the service runs and register it. For an existing container or system service, use observe mode to check its status and logs before switching to manage mode.
 
+### Update Grove nodes
+
+Once the nodes run native packages with group update support, sign in as a Grove administrator and open **Deployments → Grove group update**. Check for a signed GitHub release and start the update. Each node first tries to download the archive for its platform from GitHub, then tries other members of the same Grove over Mesh. The installer restarts the panel, and the update page shows each node’s result. Offline nodes receive the update when they reconnect while the job is active.
+
+Automatic updates support native panels installed as Linux systemd user services or Windows scheduled tasks. Releases with database schema changes require a manual migration. For a private GitHub repository, at least one GitHub-reachable Grove panel needs a read-only `SPEARMINT_GITHUB_TOKEN` in its process environment.
+
+To publish a group update, run `python -m scripts.sign_update <archive-directory> --tag <release-tag> --commit <full-commit> --key <private-key-path>` and upload the resulting `update-index.json` alongside the three platform archives in the same GitHub release. Keep the signing key in a private directory on the release machine.
+
 ### State and backups
 
 The default state directory is `~/.local/state/spearmint/` on Linux and `%LOCALAPPDATA%\spearmint\` on Windows. Set `SPEARMINT_STATE_DIR` to use a different absolute path. Stop the panel and run `spearmint backup <backup-directory>` as its service account, then verify it with `spearmint verify-backup <backup-directory>`. To restore, keep the panel stopped and run `spearmint restore <backup-directory>`. Use `spearmint.exe` on Windows.

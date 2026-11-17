@@ -133,6 +133,7 @@ class PeerServices:
         self.grove_sync_requested = asyncio.Event()
         self.mesh_enrollment_policy = None
         self.seed_wizard = None
+        self.grove_updates = None
         self.service_setup = None
         self.grove_directory_issuer: str | None = None
         self.grove_issuer_connection_id: str | None = None
@@ -446,6 +447,8 @@ class PeerServices:
             return await self.work(self.grove_role_rpc, pair, method, params, rpc=True)
         if method in {grove_admission.BALLOT, grove_admission.GET, grove_admission.APPLY, grove_admission.JOIN}:
             return await self.work(self.grove_admission_rpc, pair, method, params, rpc=True)
+        if self.grove_updates is not None and method == self.grove_updates.method:
+            return await self.grove_updates.dispatch(pair, params)
         if self.seed_wizard is not None:
             if method == self.seed_wizard.method:
                 return await self.seed_wizard.dispatch(pair, params)

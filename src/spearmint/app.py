@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, grove, grove_admission, grove_login, grove_metadata, grove_password, grove_quorum_join, grove_web_join, mesh_enrollment, onboarding, passkeys, seed_admission, seed_wizard
+from . import auth, grove, grove_updates, grove_admission, grove_login, grove_metadata, grove_password, grove_quorum_join, grove_web_join, mesh_enrollment, onboarding, passkeys, seed_admission, seed_wizard
 from .build_info import deployment_host, deployment_web, running_build
 from .catalog import RegistrationError, TargetAlreadyRegistered, get_service, list_services
 from .config import Config
@@ -371,6 +371,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     remote.mesh_enrollment_policy = enrollment_policy
     remote.manager.use_system_egress = bool(enrollment_policy and enrollment_policy.bind_ip)
     host = deployment_host(capabilities(), schema)
+    updates = grove_updates.UpdateCoordinator(store, remote, config, build, host)
+    remote.grove_updates = updates
 
     def deployment_status() -> dict:
         return {'build': build, 'web': deployment_web(config.web_dir, packaged_web), 'host': host, **package}
@@ -398,11 +400,13 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         with controller.running(), metrics.running():
             async with remote.running():
                 task = asyncio.create_task(synchronize_enrollment())
+                rollout = asyncio.create_task(updates.run())
                 try:
                     yield
                 finally:
                     task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
+                    rollout.cancel()
+                    await asyncio.gather(task, rollout, return_exceptions=True)
                     wizard.shutdown()
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -635,6 +639,19 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         if result == 'unavailable':
             raise PeerError('OFFLINE', 'No current Grove directory could be retrieved')
         return Response(status_code=204)
+
+    @app.get('/api/v1/grove/updates/release')
+    async def grove_update_release(actor: auth.Actor = Depends(require_admin)):
+        await remote.work(updates.identity, actor)
+        return await updates.find_release()
+
+    @app.get('/api/v1/grove/updates')
+    def grove_update_status(_actor: auth.Actor = Depends(require_admin)):
+        return updates.group_status()
+
+    @app.post('/api/v1/grove/updates', status_code=202)
+    async def grove_start_update(body: grove_updates.StartUpdate, actor: auth.Actor = Depends(require_admin_write)):
+        return await updates.start(body, actor)
 
     @app.post('/api/v1/grove/seed-wizard/{source}/{job}/{action}')
     async def seed_wizard_request(source: str, job: str, action: str, request: Request,

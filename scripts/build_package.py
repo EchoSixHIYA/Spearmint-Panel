@@ -136,7 +136,7 @@ def main():
         raise RuntimeError("Build the frontend before packaging")
     manifest = {"version": installed_version, "commit": commit, "os": system, "architecture": arch,
                 "python": platform.python_version(), "schema": len(MIGRATIONS),
-                "format": "native-executable-with-runtime-and-web", "web_files": web_files}
+                "format": "native-executable-with-runtime-and-web", "grove_update": 1, "web_files": web_files}
     manifest_path = WORK / "build-manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--name", "spearmint",

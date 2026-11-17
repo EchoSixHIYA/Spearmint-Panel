@@ -2,6 +2,7 @@ import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
 import { useConsole, refreshConsole, type NodeInfo, type NodeView } from './console-data'
 import { ApiError, api, READ_TIMEOUT_MS, timestamp, usePoll } from './api'
 import { pathLabel, reachabilityReports } from './connection-status'
+import { GroveUpdatePanel } from './grove-updates'
 import { DeploymentReportPanel } from './deployment-report-panel'
 import { reportCandidate } from './deployment-report'
 import { useGroveDirectorySync } from './grove-auth'
@@ -196,6 +197,7 @@ export function DeploymentsPage({ targetId }: { targetId?: string }) {
         if (sample && verifiedWeb) saveDeploymentReport(new Date(), reportSource, groveDetails?.realm?.id, candidate)
       }}><Icon name="download" size={15} />下载本机核对报告</button>
     </PageHeading>
+    {!targetId && grove.data?.realm && <GroveUpdatePanel />}
     <div className="columns-2">
       <Panel title="运行中的后端">
         {local.error && <Notice tone="amber">无法读取后端构建信息。{local.error}</Notice>}

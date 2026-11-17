@@ -247,6 +247,10 @@ export function useConsole() {
 export function refreshConsole() { window.dispatchEvent(new Event('spearmint:refresh')) }
 
 const events: Record<string, string> = {
+  'grove.update.started': '发起 Grove 更新',
+  'grove.update.accepted': '接收 Grove 更新',
+  'grove.update.succeeded': 'Grove 节点已更新',
+  'grove.update.failed': 'Grove 节点更新失败',
   'node.initialized': '节点已初始化', 'session.login': '账户登录成功', 'session.logout': '账户已退出',
   'session.revoked': '登录会话已撤销', 'service.registered': '服务已登记', 'service.unregistered': '服务已移除',
   'service.details.updated': '服务信息已更新',

@@ -9,6 +9,9 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     root = Path(sys.executable).resolve().parent
     os.environ.setdefault("SPEARMINT_WEB_DIR", str(root / "web"))
+    if sys.argv[1:2] == ["--internal-grove-updater"]:
+        from spearmint.update_worker import main as update
+        raise SystemExit(update(*sys.argv[2:]))
     if sys.argv[1:2] == ["--internal-supervisor"]:
         from spearmint.native_process import supervise
         raise SystemExit(supervise(*sys.argv[2:]))

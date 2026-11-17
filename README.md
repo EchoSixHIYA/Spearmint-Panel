@@ -64,6 +64,14 @@
 2. 安装还没有面板的设备时，打开「节点播种」。选一台能通过 SSH 到达目标的成员，测试连接后逐层选择目录并安装。将对应发布的 `seed-packages-*.zip` 解包到发起节点的状态目录中，使 `seed-packages/index.json` 和归档位于同一目录。
 3. 在「服务管理」选择本机或远程节点并登记服务。登记已有容器或系统服务时，可先选择观察模式核对状态及日志，再按需切换到管理模式。
 
+### 更新 Grove 节点
+
+安装支持群组更新的原生部署包后，使用 Grove 管理员账号打开「应用部署 → Grove 群组更新」。检查已签名的 GitHub 发布并发起更新。每个节点先尝试从 GitHub 下载适合自己平台的包，无法下载时会尝试通过 Mesh 从同一 Grove 的节点取得包。安装完成后面板自动重启，页面显示逐节点结果。离线节点在任务有效期内重新连线后会继续接收更新。
+
+通过 Linux systemd 用户服务或 Windows 计划任务安装的面板可以自动升级。涉及数据库 schema 变更的发布仍需手动迁移。GitHub 仓库为私有时，至少让一台能访问 GitHub 的 Grove 节点的面板进程拥有只读的 `SPEARMINT_GITHUB_TOKEN`。
+
+发布供群组更新使用的版本时，用 `python -m scripts.sign_update <原生包目录> --tag <发布标签> --commit <完整提交> --key <签名私钥路径>` 生成 `update-index.json`，将它与三个平台的归档一起上传到同一个 GitHub Release。签名私钥保留在发布机的私有目录。
+
 ### 状态与备份
 
 默认状态目录为 Linux `~/.local/state/spearmint/`、Windows `%LOCALAPPDATA%\spearmint\`。用 `SPEARMINT_STATE_DIR` 指定独立绝对路径。以面板运行账号停止面板后执行 `spearmint backup <备份目录>`，使用 `spearmint verify-backup <备份目录>` 校验；恢复时保持面板停止并执行 `spearmint restore <备份目录>`。Windows 将命令名换成 `spearmint.exe`。
