@@ -49,10 +49,12 @@ def admin_revision(db, member_realm: str, user_id: str) -> list:
             password['generation'] if password else 0]
 
 
-def source_identity(state, local_id: str, pair: Pair, actor: auth.Actor) -> list:
+def source_identity(state, local_id: str, pair: Pair | None, actor: auth.Actor) -> list:
     with state.connect() as db:
         db.execute('BEGIN')
-        members = require_member(db, local_id, pair)
+        members = require_member(db, local_id, pair) if pair else trusted_members(db, local_id)
+        if members is None:
+            raise PeerError('OFFLINE', 'This panel is waiting for a current Grove directory')
         session = account_admin(db, actor)
         user = session['grove_user']
         if user is None and db.execute('SELECT 1 FROM grove_realm WHERE is_issuer=1').fetchone():
@@ -60,6 +62,24 @@ def source_identity(state, local_id: str, pair: Pair, actor: auth.Actor) -> list
         if user is None or session['mfa_at'] is None or session['mfa_at'] > int(time.time()):
             raise PeerError('DENIED', 'Sign in with a verified Grove administrator account')
         return admin_revision(db, members.realm_id, user)
+
+
+def parse_identity(identity) -> list:
+    if (not isinstance(identity, list) or len(identity) != 5
+            or not all(isinstance(value, str) and 1 <= len(value) <= 64 for value in identity[:2])
+            or any(type(value) is not int or not 0 <= value < 2**63 for value in identity[2:])):
+        raise PeerError('INVALID_REQUEST', 'Invalid Grove account identity')
+    return identity
+
+
+def require_admin_identity(db, local_id: str, pair: Pair | None, identity) -> list:
+    identity = parse_identity(identity)
+    members = require_member(db, local_id, pair) if pair else trusted_members(db, local_id)
+    if members is None:
+        raise PeerError('OFFLINE', 'This panel is waiting for a current Grove directory')
+    if identity != admin_revision(db, members.realm_id, identity[1]):
+        raise PeerError('CONFLICT', 'Grove account permissions changed. Retry after the identity directory synchronizes')
+    return identity
 
 
 @dataclass(frozen=True)
@@ -70,11 +90,7 @@ class GroveServiceAdmin:
 
     @classmethod
     def from_wire(cls, local_id: str, peer: Pair, identity) -> "GroveServiceAdmin":
-        if (not isinstance(identity, list) or len(identity) != 5
-                or not all(isinstance(value, str) and 1 <= len(value) <= 64 for value in identity[:2])
-                or any(type(value) is not int or not 0 <= value < 2**63 for value in identity[2:])):
-            raise PeerError('INVALID_REQUEST', 'Invalid Grove account identity')
-        return cls(local_id, peer, identity)
+        return cls(local_id, peer, parse_identity(identity))
 
     @property
     def operation_actor(self) -> str:
@@ -85,9 +101,7 @@ class GroveServiceAdmin:
         return self.peer.node_id
 
     def require(self, db) -> None:
-        members = require_member(db, self.local_id, self.peer)
-        if self.identity != admin_revision(db, members.realm_id, self.operation_actor):
-            raise PeerError('CONFLICT', 'Grove account permissions changed. Retry after the identity directory synchronizes')
+        require_admin_identity(db, self.local_id, self.peer, self.identity)
 
     def operation_key(self, version: int, request_id: str) -> str:
         return f'grove-admin:{version}:{operation_revision(self.peer, self.identity)}:{request_id}'

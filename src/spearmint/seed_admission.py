@@ -4,46 +4,43 @@ import sys
 
 from . import grove, grove_admission, grove_continuity, grove_quorum_join, mesh_enrollment, onboarding
 from .peer import quarantine
+from .peer.grove_service_admin import require_admin_identity
 from .peer.mesh_policy import member_allowed
-from .peer.policy import require_pair
 from .peer.protocol import PeerError, wire_b64
 from .state import private_path
 
 
-METHOD = 'grove.seed.admission'
+METHOD = 'grove.seed.admission.v2'
 PENDING = 'seed-admission.json'
 LIMIT = grove_quorum_join.LIMIT + 32 * 1024
 
 
-def handle(state, policy, pair, params, user: str | None = None, delegates=frozenset()):
-    node = pair.node_id if pair else state.identity()[0]
+def handle(state, policy, pair, params):
+    local_id = state.identity()[0]
+    node = pair.node_id if pair else local_id
     action = params.get('action')
+    fields = {'invitation': {'action', 'identity'}, 'vote': {'action', 'identity', 'request'},
+              'commit': {'action', 'identity', 'request', 'certificate'}}
+    if not isinstance(action, str) or params.keys() != fields.get(action):
+        raise PeerError('INVALID_REQUEST', 'Invalid SSH deployment admission request')
     with state.connect(write=action == 'vote') as db:
-        if pair:
-            require_pair(db, pair)
         envelope, anchor = grove_quorum_join.current_voter(db, state, policy)
-        active = db.execute('SELECT 1 FROM grove_member WHERE node_id=? AND enabled=1', (node,)).fetchone()
-        if (node not in anchor['voters'] and node not in delegates or
-                not active or not grove_continuity.admitted(db, anchor, node) or quarantine.contains(db, node) or
-                not member_allowed(db, policy.mesh, node)):
-            raise PeerError('DENIED', 'This Grove member is not authorized to sponsor an SSH deployment')
-        if action == 'vote' and params.keys() == {'action', 'request', 'actor'}:
-            actor = params['actor']
-            if not isinstance(actor, str) or not actor.isprintable() or not 1 <= len(actor) <= 100:
-                raise PeerError('INVALID_REQUEST', 'Invalid SSH deployment actor')
+        identity = require_admin_identity(db, local_id, pair, params['identity'])
+        if quarantine.contains(db, node) or not member_allowed(db, policy.mesh, node):
+            raise PeerError('DENIED', 'This Grove member cannot sponsor an SSH deployment')
+        if action == 'vote':
             data = mesh_enrollment.request_data(policy, params['request'])
             if quarantine.contains(db, data['node_id']) or not member_allowed(db, policy.mesh, data['node_id']):
                 raise PeerError('DENIED', 'The target is blocked by local Mesh policy')
             ballot = grove_admission.record_ballot(db, state, data['node_id'], data['origin'], envelope, anchor,
-                                                   user or actor, node)
+                                                   identity[1], node)
             return {'ballot': ballot}
-    if action == 'invitation' and params.keys() == {'action'}:
+    if action == 'invitation':
         code = grove_quorum_join.invitation(state, policy)
         if code is not None:
             return {'code': code}
-    if action == 'commit' and params.keys() == {'action', 'request', 'certificate'}:
-        return grove_quorum_join.commit(state, policy, params['request'], params['certificate'])
-    raise PeerError('INVALID_REQUEST', 'Invalid SSH deployment admission request')
+        raise PeerError('SEED_QUORUM', 'This voter cannot provide an SSH deployment invitation')
+    return grove_quorum_join.commit(state, policy, params['request'], params['certificate'])
 
 
 def pending(state):

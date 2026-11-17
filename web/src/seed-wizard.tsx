@@ -22,6 +22,12 @@ const problems: Record<string, string> = {
   SEED_SYSTEM: '目标系统、架构或 SSH 账号不满足原生安装条件。', SEED_PACKAGE: '发起节点暂无对应系统和架构的可校验部署包。',
   SEED_DIRECTORY: '暂时无法读取该目录。', SEED_INSTALL: '安装器未确认服务启动。', SEED_QUORUM: '当前 Grove 多数成员未能完成入网。',
   SEED_SERVICE: 'SSH 账号无法启用 Linux 用户服务的开机运行。',
+  SEED_GROVE_STATE: '面板正在等待 Grove 成员目录或签发状态同步。',
+  SEED_SOURCE_OFFLINE: '当前面板通过 Mesh 联系不上所选发起节点。',
+  DENIED: '请用当前 Grove 的管理员账号登录。发起节点也应是 Grove 的有效成员。',
+  CONFLICT: 'Grove 管理员权限已变化，请刷新后重新开始播种。',
+  UNSUPPORTED_METHOD: '所选发起节点版本过旧，请先升级它。',
+  NOT_FOUND: '播种任务已过期、发起节点未配对或已重启。',
 }
 const storageKey = 'spearmint-seed-wizard'
 
@@ -51,10 +57,8 @@ export function SeedWizard({ follow }: { follow: (origin: string, nodeId?: strin
 
   function report(failure: unknown) {
     if (failure instanceof ApiError && failure.status === 401) onUnauthorized()
-    else setError(failure instanceof ApiError && failure.code === 'DENIED' ? '这个发起节点未授权从当前面板委派播种。'
-      : failure instanceof ApiError && failure.code === 'OFFLINE' ? '所选发起节点或 Grove 多数成员暂时不可用。'
-      : failure instanceof ApiError && failure.code === 'NOT_FOUND' ? '播种任务已过期或发起节点重启。'
-      : '暂时无法取得发起节点的回执，请稍后重试。')
+    else setError(failure instanceof ApiError && failure.code && problems[failure.code]
+      || '暂时无法取得发起节点的回执，请稍后重试。')
   }
 
   const poll = useEffectEvent(async (target: Job) => {

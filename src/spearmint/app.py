@@ -663,14 +663,23 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         fields = {'start': {'connection'}, 'verify': {'fingerprint'}, 'directory': {'path'}, 'install': {'path'}, 'status': set()}
         if body.keys() != fields[action]:
             raise PeerError('INVALID_REQUEST', 'Invalid seed wizard request body')
-        info = await run_in_threadpool(grove.describe, store)
-        if not info.get('configured') or info.get('frozen') or not info.get('issuer_retired'):
-            raise PeerError('OFFLINE', 'SSH seeding needs a Grove with active voting members')
-        params = body | {'action': action, 'job': job, 'realm': info['realm']['id'], 'actor': actor.operation_actor,
+        pair = None if source == node_id else remote.pair_for(source)
+        try:
+            identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+        except PeerError as error:
+            if error.code == 'OFFLINE':
+                raise PeerError('SEED_GROVE_STATE', 'This panel is waiting for a current Grove directory') from error
+            raise
+        params = body | {'action': action, 'job': job, 'identity': identity,
                          'owner': auth.digest(actor.token_hash.hex()).hex()[:32]}
-        if source == node_id:
+        if pair is None:
             return await wizard.dispatch(None, params)
-        return await remote.call(source, seed_wizard.METHOD, params, diagnostic=True)
+        try:
+            return await remote.call(source, seed_wizard.METHOD, params, diagnostic=True)
+        except PeerError as error:
+            if error.code in {'OFFLINE', 'NO_ROUTE', 'ROUTE_LOST', 'TIMEOUT'}:
+                raise PeerError('SEED_SOURCE_OFFLINE', 'The selected executor is not reachable over Mesh') from error
+            raise
 
     @app.post('/api/v1/peers/{node_id}/service-setup/{action}')
     async def remote_service_setup(node_id: str, action: Literal['kinds', 'candidates', 'register', 'manage'],

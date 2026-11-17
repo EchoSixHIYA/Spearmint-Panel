@@ -16,14 +16,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from paramiko import SSHException
 
 from . import grove, grove_admission, grove_continuity, grove_quorum_join, mesh_enrollment, seed_admission, seed_packages, seed_ssh, seed_transport
-from .peer.credentials import NODE_ID, RANDOM_ID
+from .peer.credentials import RANDOM_ID
+from .peer.grove_service_admin import require_admin_identity
 from .peer.pairing import configured
-from .peer.policy import require_pair
 from .peer.protocol import PeerError
-from .state import StateError, audit, private_path
+from .state import StateError, audit
 
 
-METHOD = 'grove.seed.wizard'
+METHOD = 'grove.seed.wizard.v2'
 logger = logging.getLogger(__name__)
 WAITING = {'host-check', 'ssh-login', 'package', 'reading', 'installing', 'admitting'}
 LINUX_LOCATION = r'''
@@ -64,24 +64,10 @@ class SSHInput(BaseModel):
     fingerprint: str = Field(default='', max_length=60)
 
 
-def allowed_nodes(state, file):
-    path = state.directory / file
-    try:
-        private_path(path, 0o600)
-        with path.open('rb') as stream:
-            nodes = json.loads(stream.read(8192))
-        if isinstance(nodes, list) and len(nodes) <= 64:
-            return {node for node in nodes if isinstance(node, str) and NODE_ID.fullmatch(node)}
-    except (OSError, StateError, ValueError):
-        pass
-    return set()
-
-
 @dataclass
 class Job:
     owner: tuple[str, str]
-    actor: str
-    realm: str
+    identity: list
     host: str
     port: int
     status: str = 'host-check'
@@ -99,6 +85,14 @@ class Job:
     state: str | None = None
     node: str | None = None
     error: str | None = None
+
+    @property
+    def actor(self) -> str:
+        return self.identity[1]
+
+    @property
+    def realm(self) -> str:
+        return self.identity[0]
 
     def view(self):
         return {'status': self.status, 'fingerprint': self.connection.fingerprint if self.connection else None,
@@ -121,17 +115,25 @@ class SeedWizard:
         self.lock = RLock()
         self.workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix='ssh-seed')
 
-    def authorize(self, pair, realm):
+    def authorize(self, pair, identity):
         with self.state.connect(read_only=True) as db:
-            current = grove_continuity.read_anchor(db)
-            if current is None or current[1]['realm_id'] != realm:
-                raise PeerError('OFFLINE', 'A current Grove quorum is required for SSH seeding')
-            if pair:
-                require_pair(db, pair)
-                active = db.execute('SELECT 1 FROM grove_member WHERE node_id=? AND enabled=1', (pair.node_id,)).fetchone()
-                if not active or pair.legacy or pair.node_id not in allowed_nodes(self.state, 'seed-delegates.json'):
-                    raise PeerError('DENIED', 'This panel cannot delegate SSH seeding to the chosen node')
-        return current[1]
+            db.execute('BEGIN')
+            try:
+                require_admin_identity(db, self.remote.local_id, pair, identity)
+            except PeerError as error:
+                if error.code == 'OFFLINE':
+                    raise PeerError('SEED_GROVE_STATE', 'The executor is waiting for a current Grove directory') from error
+                raise
+            current = db.execute('SELECT anchor,recovery_proof FROM grove_login_continuity').fetchone()
+            if current is None:
+                raise PeerError('SEED_GROVE_STATE', 'The executor is waiting for its Grove quorum authorization')
+            realm = db.execute('SELECT * FROM grove_realm WHERE id=?', (identity[0],)).fetchone()
+            try:
+                kind = 'login-continuity' if current['recovery_proof'] is None else 'login-recovery'
+                directory = grove.directory_data(json.loads(realm['manifest']), grove.realm_data(realm), allow_expired=True)
+                return grove_continuity.snapshot_authorization(realm, directory, json.loads(current['anchor']), kind)
+            except (KeyError, ValueError, TypeError, PeerError) as error:
+                raise PeerError('SEED_GROVE_STATE', 'The executor is waiting for its Grove quorum authorization') from error
 
     async def dispatch(self, pair, params):
         loop = asyncio.get_running_loop()
@@ -139,17 +141,16 @@ class SeedWizard:
         return value
 
     def receive(self, pair, params, loop):
-        action, realm, actor, owner, job_id = (params.get(key) for key in ('action', 'realm', 'actor', 'owner', 'job'))
-        if (not isinstance(actor, str) or not actor.isprintable() or len(actor) > 100
-                or not isinstance(owner, str) or not RANDOM_ID.fullmatch(owner)
+        action, identity, owner, job_id = (params.get(key) for key in ('action', 'identity', 'owner', 'job'))
+        if (not isinstance(owner, str) or not RANDOM_ID.fullmatch(owner)
                 or not isinstance(job_id, str) or not RANDOM_ID.fullmatch(job_id)):
             raise PeerError('INVALID_REQUEST', 'Invalid SSH seed request')
-        anchor = self.authorize(pair, realm)
-        key = (pair.node_id if pair else self.state.identity()[0], owner)
+        anchor = self.authorize(pair, identity)
+        key = (pair.node_id if pair else self.remote.local_id, owner)
         with self.lock:
             self.reap()
             job = self.jobs.get(job_id)
-            if job and (job.owner != key or job.realm != realm):
+            if job and (job.owner != key or job.identity != identity):
                 raise PeerError('DENIED', 'The seed request belongs to a different session')
             if action == 'start' and job is None:
                 if len(self.jobs) >= 32 or sum(item.status not in ('failed', 'joined', 'uncertain') for item in self.jobs.values()) >= 8:
@@ -165,7 +166,7 @@ class SeedWizard:
                     raise PeerError('INVALID_REQUEST', 'Invalid SSH connection details') from None
                 if any(item.host == host and item.port == info.port and item.status in ('installing', 'admitting') for item in self.jobs.values()):
                     raise PeerError('BUSY', 'A job is already installing on this SSH host')
-                job = self.jobs[job_id] = Job(key, actor, realm, host, info.port, login=info)
+                job = self.jobs[job_id] = Job(key, identity, host, info.port, login=info)
                 self.schedule(job, self.probe)
             elif job is None:
                 raise PeerError('NOT_FOUND', 'The seed request has expired or the executor restarted')
@@ -211,9 +212,8 @@ class SeedWizard:
             for job in self.jobs.values():
                 job.close()
 
-    def admission(self, pair, params, actor=None):
-        return seed_admission.handle(self.state, self.remote.mesh_enrollment_policy, pair, params, actor,
-                                     allowed_nodes(self.state, 'seed-admission-sources.json'))
+    def admission(self, pair, params):
+        return seed_admission.handle(self.state, self.remote.mesh_enrollment_policy, pair, params)
 
     def schedule(self, job, function, *args):
         def perform():
@@ -288,11 +288,11 @@ class SeedWizard:
         with self.state.connect(write=True) as db:
             audit(db, job.actor, job.owner[0], 'seed.wizard.' + event, job.node or job_id)
 
-    async def voters(self, nodes, params, actor):
+    async def voters(self, nodes, params):
         async def request(node):
             try:
                 if node == self.remote.local_id:
-                    result = await self.remote.work(self.admission, None, params, actor)
+                    result = await self.remote.work(self.admission, None, params)
                 else:
                     result = await self.remote.call(node, seed_admission.METHOD, params, diagnostic=True)
                 return node, result
@@ -302,7 +302,7 @@ class SeedWizard:
 
     def install(self, job, job_id, anchor, loop, delegated):
         def voters(params):
-            future = asyncio.run_coroutine_threadsafe(self.voters(anchor['voters'], params, job.actor), loop)
+            future = asyncio.run_coroutine_threadsafe(self.voters(anchor['voters'], {**params, 'identity': job.identity}), loop)
             return future.result(timeout=25)
 
         invitations = voters({'action': 'invitation'})
@@ -313,12 +313,13 @@ class SeedWizard:
         realm, envelope, invitation, policy = grove_quorum_join.read_invitation(code)
         if anchor != invitation or realm['id'] != job.realm:
             raise PeerError('SEED_QUORUM', 'The deployment Grove authorization has changed')
+        requester = None
         if delegated:
             with self.state.connect(read_only=True) as db:
                 requester = configured(db, job.owner[0])
             if requester is None:
                 raise PeerError('DENIED', 'The delegation source is no longer paired')
-            self.authorize(requester, job.realm)
+        self.authorize(requester, job.identity)
         job.connection.writable(job.platform, job.current)
         windows = {}
         path = seed_ssh.path_type(job.platform)(job.install)
@@ -364,7 +365,7 @@ class SeedWizard:
                 raise PeerError('SEED_IDENTITY', 'SSH bootstrap does not match the newly installed node')
             digest = grove_continuity.anchor_digest(envelope)
             certificate = []
-            replies = voters({'action': 'vote', 'request': proof, 'actor': job.actor})
+            replies = voters({'action': 'vote', 'request': proof})
             for node, reply in replies.items():
                 try:
                     ballot = reply['ballot']
