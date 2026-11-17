@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spearmint-panel"
+version = "0.4.0"
+description = "Spearmint authenticated server management mesh"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "argon2-cffi>=25,<26",
+    "cryptography>=46,<52",
+    "fastapi>=0.128,<1",
+    "fido2>=2.2.1,<3",
+    "paramiko>=5.1,<6",
+    "psutil>=7.2,<8",
+    "pyotp>=2.9,<3",
+    "uvicorn>=0.40,<1",
+    "pywin32>=312,<313; sys_platform == 'win32'",
+]
+
+[project.scripts]
+spearmint = "spearmint.cli:main"
+spearmint-mesh = "spearmint.peer.workstation:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,15 @@
+[Unit]
+Description=Spearmint native management panel
+
+[Service]
+Type=exec
+WorkingDirectory=%h/.local/opt/spearmint/current
+EnvironmentFile=%h/.config/spearmint/environment
+ExecStart=%h/.local/opt/spearmint/current/spearmint serve
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,7 @@
+.seed-wizard h3 { margin: 0; font-size: 15px; }
+.seed-directory { padding: 14px; border: 1px solid #dce9df; border-radius: 12px; }
+.seed-directory-path { overflow-wrap: anywhere; }
+.seed-directory-list { display: grid; gap: 6px; max-height: 240px; overflow-y: auto; }
+.seed-directory-list .btn { justify-content: flex-start; text-align: left; width: 100%; }
+.seed-directory-list .btn svg:last-child { margin-left: auto; }
+.seed-wizard dd { overflow-wrap: anywhere; }
