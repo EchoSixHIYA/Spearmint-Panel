@@ -21,6 +21,7 @@ WORK = ROOT / "work/tmp/package-build"
 DEPLOYMENT_DOCS = {
     "README.md": "DEPLOYMENT.md",
     "README.en.md": "DEPLOYMENT.en.md",
+    "LICENSE": "LICENSE",
 }
 DEPLOYMENT_EXAMPLES = {"deploy/nginx.conf.example": "nginx.conf.example"}
 

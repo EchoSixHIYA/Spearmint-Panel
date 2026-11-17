@@ -2,3 +2,4 @@ scripts/*.py text eol=lf
 deploy/*.py text eol=lf
 deploy/package/* text eol=lf
 web/src/*.svg text eol=lf
+LICENSE text eol=lf

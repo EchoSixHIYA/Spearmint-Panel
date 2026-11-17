@@ -83,3 +83,7 @@ spearmint --web-dir web/dist --origin https://127.0.0.1:18443 serve --bind 127.0
 ```
 
 Windows 可用 `py -3.12 -m venv .venv`、`.\.venv\Scripts\Activate.ps1` 执行等效步骤。本机 HTTPS 沿用上文的 Caddy 示例，源码路径为 [deploy/package/Caddyfile.local](deploy/package/Caddyfile.local)。要在目标平台生成原生归档，在已准备好的环境中安装 `pyinstaller==6.22.3`，运行 `python scripts/build_package.py`。归档输出到 `work/tmp/package-build/artifacts/`。
+
+## 许可证
+
+Spearmint 使用 [GNU Affero 通用公共许可证第 3 版](LICENSE)（AGPL-3.0-only）。

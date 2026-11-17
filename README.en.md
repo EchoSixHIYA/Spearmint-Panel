@@ -83,3 +83,7 @@ spearmint --web-dir web/dist --origin https://127.0.0.1:18443 serve --bind 127.0
 ```
 
 On Windows, use `py -3.12 -m venv .venv` and `.\.venv\Scripts\Activate.ps1` for the equivalent setup. For local HTTPS, use the same Caddy instructions with [deploy/package/Caddyfile.local](deploy/package/Caddyfile.local). To build a native package on its target platform, install `pyinstaller==6.22.3` in the prepared environment and run `python scripts/build_package.py`. Archives are written to `work/tmp/package-build/artifacts/`.
+
+## License
+
+Spearmint is licensed under the [GNU Affero General Public License, version 3](LICENSE) (AGPL-3.0-only).

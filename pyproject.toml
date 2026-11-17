@@ -7,6 +7,8 @@ name = "spearmint-panel"
 version = "0.4.0"
 description = "Spearmint authenticated server management mesh"
 requires-python = ">=3.12,<3.13"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
 dependencies = [
     "argon2-cffi>=25,<26",
     "cryptography>=46,<52",
