@@ -309,7 +309,25 @@ def snapshot(state: State, db, realm_id: str, recipient: str) -> dict:
     return {'authorization': authorization, 'manifest': manifest, 'records': records}
 
 
-def import_snapshot(state: State, bundle: dict, source: str, origin: str, authorize, admission_certificate=None) -> None:
+def retired_member_authorization(db, actor: auth.Actor, local: str, origin: str) -> tuple[dict, dict]:
+    grove.require_recent(db, actor)
+    realm = db.execute('SELECT * FROM grove_realm').fetchone()
+    installed = db.execute('SELECT sequence,anchor,recovery_proof FROM grove_login_continuity').fetchone()
+    if (realm is None or not realm['is_issuer'] or not realm['issuer_paused'] or realm['frozen']
+            or realm['issuer_node'] != local or not realm['manifest'] or installed is None
+            or installed['sequence'] != realm['sequence'] or installed['recovery_proof'] is not None):
+        raise PeerError('CONFLICT', 'This panel has no completed issuer retirement to restore')
+    directory = grove.directory_data(json.loads(realm['manifest']), grove.realm_data(realm), allow_expired=True)
+    if not any(member['enabled'] and member['node_id'] == local and member['origin'] == origin
+               for member in directory['members']):
+        raise PeerError('CONFLICT', 'This panel does not match the former issuer in the Grove directory')
+    envelope = json.loads(installed['anchor'])
+    anchor = snapshot_authorization(realm, directory, envelope, 'login-continuity')
+    return envelope, anchor
+
+
+def import_snapshot(state: State, bundle: dict, source: str, origin: str, authorize, admission_certificate=None,
+                    *, retired_actor: auth.Actor | None = None) -> None:
     from . import grove_admission
 
     if not isinstance(bundle, dict) or bundle.keys() != {'authorization', 'manifest', 'records'}:
@@ -321,7 +339,11 @@ def import_snapshot(state: State, bundle: dict, source: str, origin: str, author
     with state.lock('maintenance.lock'), state.connect(write=True) as db:
         authorize(db)
         realm = db.execute('SELECT * FROM grove_realm').fetchone()
-        if realm is None or realm['is_issuer'] or realm['issuer_paused'] or realm['frozen'] not in {'', 'restore'}:
+        if retired_actor is not None:
+            retirement, _ = retired_member_authorization(db, retired_actor, local, origin)
+            if recovered or retirement != envelope:
+                raise PeerError('CONFLICT', 'Recovery does not match the local issuer retirement')
+        elif realm is None or realm['is_issuer'] or realm['issuer_paused'] or realm['frozen'] not in {'', 'restore'}:
             raise PeerError('DENIED', 'This node has no recoverable Grove membership')
         directory = grove.directory_data(bundle['manifest'], grove.realm_data(realm), allow_expired=True)
         anchor = snapshot_authorization(realm, directory, envelope, 'login-recovery' if recovered else 'login-continuity')
@@ -347,7 +369,8 @@ def import_snapshot(state: State, bundle: dict, source: str, origin: str, author
             if prior['sequence'] == realm['sequence'] and grove_login.snapshot_digest(prior) != anchor['directory_sha256']:
                 raise PeerError('CONFLICT', 'Recovery conflicts with the current Grove identity version')
         installed = db.execute('SELECT anchor FROM grove_login_continuity').fetchone()
-        if installed is not None and (json.loads(installed['anchor']) != envelope or realm['frozen'] != 'restore'):
+        if installed is not None and (json.loads(installed['anchor']) != envelope
+                                      or (retired_actor is None and realm['frozen'] != 'restore')):
             raise PeerError('CONFLICT', 'This node already has a Grove continuity authorization')
         ballot = db.execute('SELECT anchor_digest FROM grove_login_recovery_vote').fetchone()
         if ballot is not None and (not recovered or ballot['anchor_digest'] != anchor_digest(envelope)):
@@ -370,12 +393,16 @@ def import_snapshot(state: State, bundle: dict, source: str, origin: str, author
                       NOT EXISTS (SELECT 1 FROM grove_member_departure d WHERE d.node_id=a.node_id)
                       FROM grove_member_admission a''')
         db.execute('UPDATE grove_member SET enabled=0 WHERE node_id IN (SELECT node_id FROM grove_member_departure)')
-        db.execute("UPDATE grove_realm SET sequence=?,manifest=?,frozen=''", (anchor['sequence'], json.dumps(bundle['manifest'])))
+        db.execute("UPDATE grove_realm SET sequence=?,manifest=?,frozen='',is_issuer=0,issuer_paused=0",
+                   (anchor['sequence'], json.dumps(bundle['manifest'])))
         db.execute('''INSERT INTO grove_login_continuity(singleton,sequence,anchor,recovery_proof) VALUES (1,?,?,?)
                       ON CONFLICT(singleton) DO UPDATE SET sequence=excluded.sequence,anchor=excluded.anchor,
                       recovery_proof=excluded.recovery_proof,lease_until=0''',
                    (anchor['sequence'], json.dumps(envelope), json.dumps(document['votes']) if recovered else None))
-        audit(db, 'grove', source, 'grove.snapshot_recovered', realm['id'])
+        if retired_actor is not None:
+            audit(db, retired_actor.operation_actor, retired_actor.address, 'grove.retired_issuer_restored', local)
+        else:
+            audit(db, 'grove', source, 'grove.snapshot_recovered', realm['id'])
 
 
 def recovery_realm(state: State) -> str | None:

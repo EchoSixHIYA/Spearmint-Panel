@@ -17,6 +17,7 @@ BALLOT = 'grove.members.admit.ballot'
 APPLY = 'grove.members.admit.apply'
 JOIN = 'grove.members.admit.join'
 GET = 'grove.members.admit.get'
+RESTORE_RETIRED = 'grove.members.admit.restore'
 KIND = 'member-admission'
 MAX_ADMISSIONS = 64
 MAX_ORIGIN_LENGTH = 270
@@ -76,22 +77,25 @@ def validate_certificate(certificate: list, anchor: dict, digest: str) -> tuple[
     return subjects.pop()
 
 
-def eligible(db, subject: str, origin: str) -> None:
+def eligible(db, subject: str, origin: str, *, retired_issuer: bool = False) -> None:
     if db.execute('SELECT 1 FROM grove_member_departure WHERE node_id=?', (subject,)).fetchone():
         raise PeerError('DENIED', 'This node has left the Grove')
     current = db.execute('SELECT origin,enabled FROM grove_member WHERE node_id=?', (subject,)).fetchone()
-    if current is not None and (not current['enabled'] or current['origin'] != origin
-                                or db.execute('SELECT 1 FROM grove_realm WHERE issuer_node=?', (subject,)).fetchone()):
+    original_issuer = db.execute('SELECT 1 FROM grove_realm WHERE issuer_node=?', (subject,)).fetchone() is not None
+    if original_issuer and (not retired_issuer or current is None or baseline_origin(db, subject) != origin):
+        raise PeerError('CONFLICT', 'The original issuer requires a retirement membership approval')
+    if current is not None and (not current['enabled'] or current['origin'] != origin):
         raise PeerError('CONFLICT', 'This node already has a different Grove membership')
     if db.execute('SELECT 1 FROM grove_member WHERE origin=? AND node_id!=? AND enabled=1', (origin, subject)).fetchone():
         raise PeerError('CONFLICT', 'This HTTPS origin already belongs to another Grove member')
-    if current is None and db.execute('SELECT count(*) FROM grove_member_admission').fetchone()[0] >= MAX_ADMISSIONS:
+    if (db.execute('SELECT count(*) FROM grove_member_admission').fetchone()[0] >= MAX_ADMISSIONS
+            and not db.execute('SELECT 1 FROM grove_member_admission WHERE node_id=?', (subject,)).fetchone()):
         raise PeerError('LIMIT', 'Grove admission limit reached')
 
 
 def admit(db, certificate: list, anchor: dict, envelope: dict, source: str) -> bool:
     subject, origin = validate_certificate(certificate, anchor, grove_continuity.anchor_digest(envelope))
-    eligible(db, subject, origin)
+    eligible(db, subject, origin, retired_issuer=True)
     inserted = db.execute('INSERT OR IGNORE INTO grove_member_admission VALUES (?,?,?)',
                           (subject, origin, json.dumps(certificate))).rowcount
     if inserted:
@@ -124,8 +128,8 @@ def approve(state: State, actor: auth.Actor, subject: str, origin: str, *, befor
         return ballot, anchor['voters']
 
 
-def record_ballot(db, state, subject, origin, envelope, anchor, actor, source):
-    eligible(db, subject, origin)
+def record_ballot(db, state, subject, origin, envelope, anchor, actor, source, *, retired_issuer=False):
+    eligible(db, subject, origin, retired_issuer=retired_issuer)
     prior = db.execute('SELECT node_id,origin,ballot FROM grove_member_admission_vote WHERE node_id=? OR origin=?',
                        (subject, origin)).fetchall()
     digest = grove_continuity.anchor_digest(envelope)
@@ -151,6 +155,36 @@ def baseline_origin(db, subject):
     directory = grove.verified('directory', json.loads(realm['manifest']), realm['public_key'])
     return next((member['origin'] for member in directory['members']
                  if member['enabled'] and member['node_id'] == subject), None)
+
+
+def restore_retired_reply(state: State, pair, params: dict) -> dict:
+    if (params.keys() not in ({'anchor'}, {'anchor', 'certificate'}) or not isinstance(params['anchor'], str)
+            or not grove_continuity.ANCHOR_DIGEST.fullmatch(params['anchor'])):
+        raise PeerError('INVALID_REQUEST', 'Expected the installed Grove retirement authorization')
+    with state.connect(write=True) as db:
+        require_pair(db, pair)
+        subject = pair.node_id
+        current = grove_continuity.read_anchor(db)
+        realm = db.execute('SELECT issuer_node FROM grove_realm').fetchone()
+        if (pair.legacy or quarantine.contains(db, subject) or current is None or realm['issuer_node'] != subject
+                or state.identity()[0] not in current[1]['voters']
+                or grove_login.usable_replica(db, int(time.time())) is None
+                or db.execute('SELECT recovery_proof FROM grove_login_continuity').fetchone()[0] is not None):
+            raise PeerError('DENIED', 'The certified former issuer and a current retirement voter are required')
+        envelope, anchor = current
+        digest = grove_continuity.anchor_digest(envelope)
+        if digest != params['anchor']:
+            raise PeerError('CONFLICT', 'The installed retirement authorization differs')
+        origin = baseline_origin(db, subject)
+        if origin is None:
+            raise PeerError('DENIED', 'The former issuer is absent from the signed Grove directory')
+        if 'certificate' not in params:
+            return record_ballot(db, state, subject, origin, envelope, anchor, 'grove', subject, retired_issuer=True)
+        certificate = params['certificate']
+        if validate_certificate(certificate, anchor, digest) != (subject, origin):
+            raise PeerError('DENIED', 'Membership approvals do not match the former issuer')
+        admit(db, certificate, anchor, envelope, subject)
+        return grove_continuity.snapshot(state, db, anchor['realm_id'], subject)
 
 
 def existing_member_ballot(state, subject):

@@ -439,6 +439,8 @@ class PeerServices:
             return await self.work(self.grove_continuity_snapshot, pair, params, rpc=True)
         if method == grove_continuity.RECOVERY_VOTE_METHOD:
             return await self.work(self.grove_recovery_vote, pair, params, rpc=True)
+        if method == grove_admission.RESTORE_RETIRED:
+            return await self.work(grove_admission.restore_retired_reply, self.state, pair, params, rpc=True)
         if method == grove_revocation.APPLY:
             return await self.work(self.grove_operator_revocations, pair, params, rpc=True)
         if method == grove_password.APPLY:
@@ -737,6 +739,57 @@ class PeerServices:
                                 lambda db: require_pair(db, pair))
         await self.request_grove_sync()
         return realm
+
+    async def restore_retired_grove_member(self, actor: Actor) -> dict:
+        origin = self.grove_config.origin
+
+        def authorization():
+            with self.state.connect(read_only=True) as db:
+                db.execute('BEGIN')
+                return grove_continuity.retired_member_authorization(db, actor, self.local_id, origin)
+
+        envelope, anchor = await self.work(authorization)
+        digest = grove_continuity.anchor_digest(envelope)
+        voters = anchor['voters']
+        required = len(voters) // 2 + 1
+        params = {'anchor': digest}
+
+        async def restore_request(node, payload):
+            pair = self.pair_for(node)
+            if pair.legacy:
+                raise PeerError('DENIED', 'Grove restoration requires a certified Mesh peer')
+            return pair, await self.call(node, grove_admission.RESTORE_RETIRED, payload, diagnostic=True)
+
+        replies = await asyncio.gather(*(restore_request(node, params) for node in voters), return_exceptions=True)
+        ballots = {}
+        for reply in replies:
+            if isinstance(reply, tuple):
+                pair, ballot = reply
+                try:
+                    if grove_admission.validate_ballot(ballot, anchor, digest) == (pair.node_id, self.local_id, origin):
+                        ballots[pair.node_id] = ballot
+                except PeerError:
+                    continue
+        if len(ballots) < required:
+            raise PeerError('GROVE_RESTORE_QUORUM', 'A majority of current voters must be reachable and support restoration')
+        certificate = [ballots[node] for node in sorted(ballots)[:required]]
+        payload = params | {'certificate': certificate}
+        if len(grove.encoded(payload)) >= REQUEST - 128:
+            raise PeerError('LIMIT', 'The Grove restoration certificate is too large')
+        snapshots = await asyncio.gather(*(restore_request(node, payload) for node in ballots), return_exceptions=True)
+        for reply in snapshots:
+            if isinstance(reply, tuple):
+                pair, snapshot = reply
+                try:
+                    await self.work(partial(grove_continuity.import_snapshot, retired_actor=actor), self.state, snapshot,
+                                    pair.node_id, origin, lambda db: require_pair(db, pair), certificate)
+                except PeerError as error:
+                    if error.code not in {'PROTOCOL', 'OFFLINE'}:
+                        raise
+                    continue
+                await self.request_grove_sync()
+                return {'restored': True}
+        raise PeerError('OFFLINE', 'The voting members could not deliver a Grove identity snapshot')
 
     async def join_grove_from_invitation(self, actor: Actor | None, code: str, *, seed_certificate=None) -> dict:
         expected, sources = grove_admission.read_invitation(code)

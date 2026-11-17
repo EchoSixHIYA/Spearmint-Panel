@@ -276,6 +276,20 @@ export function GroveCard({ session, data, error, members, names, directoryCurre
     try { await api('/grove', { method: 'POST', headers, body: JSON.stringify({ name }) }); window.dispatchEvent(new Event('spearmint:refresh')) }
     catch (failure) { setMessage(groveError(failure)) } finally { setPending(false) }
   }
+  async function restoreRetiredMember() {
+    setPending(true); setMessage(''); setRevocation('')
+    try {
+      await api('/grove/restore-retired-member', { method: 'POST', headers })
+      setRevocation('已恢复为普通成员。Grove 登录可用后，请使用 Grove 管理员账号重新登录。')
+      window.dispatchEvent(new Event('spearmint:refresh'))
+    } catch (failure) {
+      setMessage(failure instanceof ApiError && failure.code === 'REAUTHENTICATION_REQUIRED'
+        ? '请用本机管理员账号重新登录，再恢复 Grove 成员身份。'
+        : failure instanceof ApiError && failure.code === 'GROVE_RESTORE_QUORUM'
+          ? '暂未取得多数投票。请确认多数投票节点已更新并在线，再重试。'
+          : failure instanceof ApiError ? failure.message : '暂时无法恢复 Grove 成员身份。')
+    } finally { setPending(false) }
+  }
   async function memberAdmission(event: FormEvent<HTMLFormElement>, joining: boolean) {
     event.preventDefault()
     const fields = new FormData(event.currentTarget)
@@ -412,6 +426,10 @@ export function GroveCard({ session, data, error, members, names, directoryCurre
       : <><div className="identity-profile"><span className="service-symbol"><Icon name="leaf" size={25} /></span><div><strong>{data.realm?.name}</strong>{!data.issuer_retired && <p>{data.local_issuer ? '当前节点提供 Grove 身份认证' : '使用已有 Grove 身份登录'}</p>}</div></div><dl className="facts"><div><dt>Grove 身份</dt><dd><CopyValue value={data.realm!.id} short /></dd></div>{!data.issuer_retired && <div><dt>身份入口</dt><dd><a className="text-link break-anywhere" href={data.realm!.issuer_origin}>{data.realm!.issuer_origin}<Icon name="external-link" size={14} /></a></dd></div>}<div><dt>同步版本</dt><dd>{data.sequence ?? '等待同步'}{Boolean(data.valid_until) && <span className="muted"> · {new Date(data.valid_until! * 1000).toLocaleTimeString()}</span>}</dd></div></dl>
       {(data.frozen || (data.issuer_paused && !data.issuer_retired)) && <Notice tone="amber">Grove 身份服务正在等待恢复确认；本机独立账号仍可按原有权限使用。</Notice>}
       {members && !directoryCurrent && <Notice tone="amber">显示上次同步的 Grove 成员目录。</Notice>}
+      {data.local_issuer && data.issuer_paused && data.issuer_retired && !data.frozen && !session.grove &&
+        <button className="btn btn-primary" disabled={pending} onClick={() => void restoreRetiredMember()}>
+          {pending ? '正在同步 Grove 成员身份…' : '恢复为 Grove 普通成员'}
+        </button>}
       {members?.length ? <div className="grove-members">{members.map((member) => {
         const origin = memberPanelOrigins.get(member.node_id)
         const content = <><Icon name="server" size={19} /><span><strong>{names.get(member.node_id) || shortId(member.node_id)}</strong><small>{publicPanelLabel(member.origin)}</small></span>
