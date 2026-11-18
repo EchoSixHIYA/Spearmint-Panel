@@ -957,6 +957,9 @@ def main() -> int:
                     # A reset Windows HTTPS transport can otherwise stall application shutdown.
                     timeout_graceful_shutdown=20 if os.name == "nt" and args.tls_cert else None,
                 )
+                if WINDOWS:
+                    from .windows_asyncio import loop_factory
+                    options['loop'] = f'{loop_factory.__module__}:{loop_factory.__name__}'
                 if args.open_setup and handoff:
                     server = DesktopSetupServer(uvicorn.Config(app, **options), state)
                     try:
