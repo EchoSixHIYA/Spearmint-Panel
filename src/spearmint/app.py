@@ -596,10 +596,6 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     async def join_grove_from_member(body: GroveMemberSource, actor: auth.Actor = Depends(require_admin_write)):
         return await remote.join_grove_as_member(actor, body.node_id)
 
-    @app.post('/api/v1/grove/restore-retired-member')
-    async def restore_retired_grove_member(actor: auth.Actor = Depends(require_admin_write)):
-        return await remote.restore_retired_grove_member(actor)
-
     @app.post('/api/v1/grove/join-from-invitation')
     async def join_grove_from_invitation(body: GroveBrowserInvitation, actor: auth.Actor = Depends(require_admin_write)):
         return await remote.join_grove_from_invitation(actor, body.code)
