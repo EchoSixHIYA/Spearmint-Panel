@@ -1,5 +1,6 @@
 """A short-lived SSH connection owned by the node executing a seed request."""
 from base64 import b64encode
+from contextlib import suppress
 from hashlib import sha256
 from io import BytesIO, StringIO
 from ipaddress import ip_address
@@ -20,30 +21,7 @@ from .peer.protocol import PeerError
 
 
 FINGERPRINT = re.compile(r'SHA256:[A-Za-z0-9+/]{43}')
-WINDOWS_PROBE = r'''
-$ErrorActionPreference = 'Stop'
-$arch = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITEW6432')
-if (!$arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
-[ordered]@{os='Windows'; arch=$arch; home=$env:USERPROFILE} | ConvertTo-Json -Compress
-'''
-WINDOWS_DIRECTORY = r'''
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('DIRECTORY'))
-if (!$path) {
-    $items = @(Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -match '^[a-zA-Z]:\\$' } |
-        ForEach-Object { @{name=$_.Root; path=$_.Root} })
-    @{items=$items; free=$null; truncated=$false} | ConvertTo-Json -Compress -Depth 4
-} else {
-    $parent = Get-Item -LiteralPath $path
-    if (!$parent.PSIsContainer -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 2 }
-    $items = @(Get-ChildItem -LiteralPath $parent.FullName -Directory |
-        Where-Object { !($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 101 |
-        ForEach-Object { @{name=$_.Name; path=$_.FullName} })
-    @{items=@($items | Select-Object -First 100); free=$parent.PSDrive.Free; truncated=($items.Count -gt 100)} |
-        ConvertTo-Json -Compress -Depth 4
-}
-'''
+WINDOWS_PROBE = 'echo %PROCESSOR_ARCHITECTURE% %PROCESSOR_ARCHITEW6432%'
 
 
 def hostname(value: str) -> str:
@@ -55,9 +33,12 @@ def hostname(value: str) -> str:
     raise ValueError('Use an IP address or DNS hostname')
 
 
-def powershell(script: str) -> str:
-    script = "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n" + script
-    return 'powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + b64encode(script.encode('utf-16-le')).decode()
+def cmd(command: str, *, unicode: bool = False) -> str:
+    return 'cmd.exe /d ' + ('/u ' if unicode else '') + '/v:off /s /c "' + command + '"'
+
+
+def windows_path(value: str) -> PureWindowsPath:
+    return PureWindowsPath(value[1:] if re.match(r'^/[A-Za-z]:/', value) else value)
 
 
 def authenticate(connection: paramiko.Transport, username: str, secret: str, key: bool):
@@ -78,6 +59,7 @@ def authenticate(connection: paramiko.Transport, username: str, secret: str, key
 
 class Connection:
     def __init__(self, host: str, port: int):
+        self.windows_stage: tuple[str, PureWindowsPath] | None = None
         self.socket = socket.create_connection((host, port), timeout=6)
         self.transport = paramiko.Transport(self.socket)
         self.transport.channel_timeout = 8
@@ -102,6 +84,17 @@ class Connection:
         self.transport.set_keepalive(12)
 
     def close(self):
+        if self.windows_stage is not None and self.transport.is_authenticated():
+            name, staging = self.windows_stage
+            self.windows_stage = None
+            with suppress(OSError, paramiko.SSHException, CalledProcessError, TimeoutExpired, UnicodeError):
+                with paramiko.SFTPClient.from_transport(self.transport) as sftp:
+                    sftp.get_channel().settimeout(5)
+                    home = windows_path(sftp.normalize('.'))
+                    target = windows_path(sftp.normalize(name))
+                    safe = target == staging == home / name and home.is_absolute()
+                if safe and self.windows_cwd() == staging.parent:
+                    self.answer(cmd(f'rmdir /s /q {name}'), timeout=6)
         self.transport.close()
         self.socket.close()
 
@@ -154,7 +147,7 @@ class Connection:
     def system(self):
         try:
             lines = self.answer('uname -s; uname -m; printf "%s\n" "$HOME"; id -u').decode().splitlines()
-        except CalledProcessError:
+        except (CalledProcessError, UnicodeError):
             lines = []
         if len(lines) == 4 and lines[0] == 'Linux':
             if lines[3] == '0':
@@ -164,17 +157,68 @@ class Connection:
                 return target, lines[2]
         else:
             try:
-                result = json.loads(self.answer(powershell(WINDOWS_PROBE)).decode('utf-8-sig'))
-            except (ValueError, CalledProcessError):
-                result = {}
-            if result.get('os') == 'Windows' and result.get('arch') == 'AMD64':
-                return 'windows-amd64', result['home']
+                architectures = self.answer(cmd(WINDOWS_PROBE)).split()
+            except CalledProcessError:
+                architectures = []
+            if b'AMD64' in architectures and b'ARM64' not in architectures:
+                return 'windows-amd64', ''
         raise PeerError('SEED_SYSTEM', 'This SSH host does not have a supported Spearmint platform')
+
+    def prepare_windows(self, package):
+        name = 'spearmint-seed-' + secrets.token_hex(16)
+        cwd = self.windows_cwd()
+        with paramiko.SFTPClient.from_transport(self.transport) as sftp:
+            sftp.get_channel().settimeout(15)
+            home = windows_path(sftp.normalize('.'))
+            if not home.is_absolute() or not home.drive.endswith(':') or home != cwd:
+                raise PeerError('SEED_WINDOWS_STAGING', 'SFTP needs a private local Windows home directory')
+            sftp.mkdir(name, mode=0o700)
+            staging = windows_path(sftp.normalize(name))
+            if staging != home / name:
+                raise PeerError('SEED_WINDOWS_STAGING', 'Unexpected Windows staging directory')
+            self.windows_stage = name, staging
+            receipt = sftp.put(str(package.path), name + '/package.zip')
+            if receipt.st_size != package.metadata['size']:
+                raise PeerError('SEED_WINDOWS_STAGING', 'The transferred package size does not match')
+        # Invoke only fixed commands. User-selected paths and invitation data are sent as JSON.
+        try:
+            output = self.answer(cmd(rf'cd {name} && "%SystemRoot%\System32\certutil.exe" -hashfile package.zip SHA256'),
+                                 timeout=30)
+            if package.metadata['sha256'].encode() not in {line.strip().lower() for line in output.splitlines()}:
+                raise PeerError('SEED_WINDOWS_STAGING', 'The transferred package digest does not match')
+            self.answer(cmd(rf'cd {name} && "%SystemRoot%\System32\tar.exe" -xf package.zip && del /q package.zip'),
+                        timeout=90)
+        except (CalledProcessError, TimeoutExpired) as error:
+            raise PeerError('SEED_WINDOWS_STAGING', 'Windows could not unpack the verified package') from error
+        if self.windows_request('version', {}).get('native_seed') != 1:
+            raise PeerError('SEED_WINDOWS_PACKAGE', 'The Windows package does not contain the native seed helper')
+
+    def windows_cwd(self) -> PureWindowsPath:
+        return windows_path(self.answer(cmd('cd', unicode=True)).decode('utf-16-le').strip())
+
+    def windows_request(self, action: str, data: dict, *, timeout: float = 20) -> dict:
+        if action not in {'version', 'directory', 'install', 'enroll'} or self.windows_stage is None:
+            raise ValueError('Invalid Windows seed helper request')
+        name, _ = self.windows_stage
+        try:
+            command = cmd(rf'cd {name} && spearmint\spearmint.exe --internal-windows-seed {action}')
+            result = json.loads(self.answer(command, json.dumps(data).encode(), timeout=timeout))
+            if not isinstance(result, dict) or len(result) != 1:
+                raise ValueError('Invalid Windows seed receipt')
+        except (ValueError, CalledProcessError) as error:
+            code = {'version': 'SEED_WINDOWS_PACKAGE', 'directory': 'SEED_DIRECTORY'}.get(action, 'SEED_INSTALL')
+            raise PeerError(code,
+                            'The native Windows helper did not return a receipt') from error
+        if 'error' in result:
+            code = result['error']
+            if not isinstance(code, str) or not re.fullmatch(r'[A-Z_0-9]{1,48}', code):
+                code = 'SEED_INSTALL'
+            raise PeerError(code, 'The target rejected the native Windows operation')
+        return result['ok']
 
     def directory(self, target: str, path: str):
         if target.startswith('windows'):
-            script = WINDOWS_DIRECTORY.replace('DIRECTORY', b64encode(path.encode()).decode())
-            return json.loads(self.answer(powershell(script)).decode('utf-8-sig'))
+            return self.windows_request('directory', {'path': path})
         with paramiko.SFTPClient.from_transport(self.transport) as sftp:
             sftp.get_channel().settimeout(8)
             canonical = sftp.normalize(path)
@@ -188,21 +232,7 @@ class Connection:
         return {'items': items[:100], 'free': int(free) * 1024, 'truncated': len(items) > 100}
 
     def writable(self, target: str, path: str):
-        if target.startswith('windows'):
-            # Use an exclusive, immediately removed file to verify the account's effective access.
-            value = b64encode(path.encode()).decode()
-            script = r'''
-$ErrorActionPreference = 'Stop'
-$directory = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('DIRECTORY'))
-$item = Get-Item -LiteralPath $directory
-if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 2 }
-$test = Join-Path $directory ('.spearmint-check-' + [Guid]::NewGuid().ToString('N'))
-$handle = [IO.FileStream]::new($test, 'CreateNew', 'ReadWrite', 'None', 1, 'DeleteOnClose')
-$handle.Dispose()
-'''
-            self.answer(powershell(script.replace('DIRECTORY', value)))
-        else:
-            self.answer(join(['sh', '-c', 'test -d "$1" && test -w "$1" && test -x "$1"', 'seed', path]))
+        self.answer(join(['sh', '-c', 'test -d "$1" && test -w "$1" && test -x "$1"', 'seed', path]))
 
 
 def path_name(value: str):

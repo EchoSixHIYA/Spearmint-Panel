@@ -64,13 +64,13 @@ def install_policy(state, config, policy):
     return mesh_enrollment.enroll(state, config, installed, bootstrap=True)
 
 
-def cli(state, config, action):
+def cli(state, config, action, *, payload=None):
     node = state.verify()
     if action == 'status':
         with state.connect(read_only=True) as db:
             row = db.execute('SELECT id FROM grove_realm').fetchone()
         return {'node_id': node, 'realm': row['id'] if row else None}
-    raw = sys.stdin.buffer.read(LIMIT + 1)
+    raw = sys.stdin.buffer.read(LIMIT + 1) if payload is None else grove.encoded(payload)
     if len(raw) > LIMIT:
         raise PeerError('LIMIT', 'SSH enrollment input exceeds the limit')
     request = json.loads(raw)

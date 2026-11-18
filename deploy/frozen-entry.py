@@ -12,6 +12,9 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--internal-grove-updater"]:
         from spearmint.update_worker import main as update
         raise SystemExit(update(*sys.argv[2:]))
+    if sys.argv[1:2] == ["--internal-windows-seed"]:
+        from spearmint.windows_seed import command
+        raise SystemExit(command(root, sys.argv[2:]))
     if sys.argv[1:2] == ["--internal-supervisor"]:
         from spearmint.native_process import supervise
         raise SystemExit(supervise(*sys.argv[2:]))

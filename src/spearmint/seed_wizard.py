@@ -2,7 +2,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from hashlib import sha256
 import json
 import logging
 from pathlib import Path
@@ -16,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from paramiko import SSHException
 
 from . import grove, grove_admission, grove_continuity, grove_quorum_join, mesh_enrollment, seed_admission, seed_packages, seed_ssh, seed_transport
-from .peer.credentials import RANDOM_ID
+from .peer.credentials import NODE_ID, RANDOM_ID
 from .peer.grove_service_admin import require_admin_identity
 from .peer.pairing import configured
 from .peer.protocol import PeerError
@@ -268,6 +267,12 @@ class SeedWizard:
             job.package = package
             job.origin = grove.origin(f'https://{host}:8765')
             job.paths = {start, '' if platform.startswith('windows') else '/'}
+        if platform == 'windows-amd64':
+            try:
+                job.connection.prepare_windows(package)
+            except (OSError, SSHException, SubprocessError) as error:
+                raise PeerError('SEED_WINDOWS_STAGING', 'The Windows package could not be staged over SSH') from error
+        with self.lock:
             job.status = 'reading'
         self.browse(job, start)
 
@@ -334,14 +339,10 @@ class SeedWizard:
             if requester is None:
                 raise PeerError('DENIED', 'The delegation source is no longer paired')
         self.authorize(requester, job.identity)
-        job.connection.writable(job.platform, job.current)
-        windows = {}
+        windows = job.platform == 'windows-amd64'
         path = seed_ssh.path_type(job.platform)(job.install)
-        if job.platform.startswith('windows'):
-            task = 'Spearmint-' + sha256(job.state.casefold().encode()).hexdigest()[:12]
-            windows = {'InstallDirectory': job.install, 'StateDirectory': job.state, 'TaskLogonType': 'S4U', 'TaskName': task}
-            executable = path / 'releases' / job.package.metadata['commit'] / 'spearmint.exe'
-        else:
+        if not windows:
+            job.connection.writable(job.platform, job.current)
             try:
                 job.connection.answer(join(['sh', '-c', LINUX_SERVICE]))
             except CalledProcessError:
@@ -349,24 +350,33 @@ class SeedWizard:
             job.connection.answer(join(['sh', '-c', LINUX_LOCATION, 'seed', job.install, job.state]))
             executable = path / 'current' / 'spearmint'
         self.audit(job, job_id, 'accepted')
-        with TemporaryDirectory(prefix='.seed-wizard-', dir=self.state.directory) as work:
-            receipt = seed_transport.install(job.package.path, Path(work), host=job.host, target=job.platform,
-                                             digest=job.package.metadata['sha256'], invitation_data=grove.encoded(realm),
-                                             origin=job.origin, port=8765, windows=windows, quiet=True,
-                                             runner=job.connection.run, linux_state=job.state if not windows else '')
-        if not receipt or not receipt.node_id:
+        if windows:
+            result = job.connection.windows_request('install', {
+                'programs': job.install, 'state': job.state, 'origin': job.origin, 'port': 8765,
+                'realm': realm, 'commit': job.package.metadata['commit'],
+            }, timeout=105)
+            node = result.get('node_id')
+        else:
+            with TemporaryDirectory(prefix='.seed-wizard-', dir=self.state.directory) as work:
+                receipt = seed_transport.install(job.package.path, Path(work), host=job.host, target=job.platform,
+                                                 digest=job.package.metadata['sha256'], invitation_data=grove.encoded(realm),
+                                                 origin=job.origin, port=8765, windows={}, quiet=True,
+                                                 runner=job.connection.run, linux_state=job.state)
+            node = receipt.node_id if receipt else None
+        if not isinstance(node, str) or not NODE_ID.fullmatch(node):
             raise PeerError('SEED_INSTALL', 'The installer did not report the new Node ID')
         with self.lock:
-            job.node, job.status = receipt.node_id, 'admitting'
+            job.node, job.status = node, 'admitting'
         self.audit(job, job_id, 'started')
 
         def bootstrap(action, **payload):
-            arguments = [str(executable), '--state-dir', job.state, '--origin', job.origin, 'seed-enrollment', action]
-            command = join(arguments)
             if windows:
-                escaped = ["'" + item.replace("'", "''") + "'" for item in arguments]
-                command = seed_ssh.powershell('& ' + ' '.join(escaped) + '\nexit $LASTEXITCODE')
-            answer = json.loads(job.connection.answer(command, grove.encoded(payload) if payload else b'').decode('utf-8-sig'))
+                answer = job.connection.windows_request('enroll', {
+                    'state': job.state, 'origin': job.origin, 'action': action, 'payload': payload,
+                })
+            else:
+                arguments = [str(executable), '--state-dir', job.state, '--origin', job.origin, 'seed-enrollment', action]
+                answer = json.loads(job.connection.answer(join(arguments), grove.encoded(payload) if payload else b'').decode('utf-8-sig'))
             if answer.get('node_id') != job.node:
                 raise PeerError('SEED_IDENTITY', 'Installed node identity changed during enrollment')
             return answer
