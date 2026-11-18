@@ -37,15 +37,38 @@ def read_record(path: Path) -> dict | None:
         return None
 
 
+POWERSHELL = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass']
+
+
+def windows_task(executable: Path) -> dict:
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        "$tasks=@(Get-ScheduledTask -TaskPath '\\' | Where-Object { $_.Actions.Count -eq 1 -and "
+        "$_.Actions[0].Execute -eq $env:SPEARMINT_UPDATE_EXECUTABLE -and $_.State -eq 'Running' }); "
+        "if ($tasks.Count -ne 1) { throw 'Expected one running packaged Spearmint scheduled task' }; "
+        "ConvertTo-Json -Compress @{ TaskName=$tasks[0].TaskName; TaskLogonType=[string]$tasks[0].Principal.LogonType }"
+    )
+    return json.loads(subprocess.check_output([*POWERSHELL, '-Command', script], timeout=15, text=True,
+                      stderr=subprocess.DEVNULL, env={**installer_env(), 'SPEARMINT_UPDATE_EXECUTABLE': str(executable)}))
+
+
 def supported() -> bool:
     if not getattr(sys, 'frozen', False):
         return False
     executable = Path(sys.executable).resolve()
     parent = executable.parent
-    if WINDOWS:
-        return parent.parent.name == 'releases' and re.fullmatch(r'[a-f0-9]{40}', parent.name) is not None
-    current = Path.home() / '.local/opt/spearmint/current/spearmint'
-    return current.is_file() and executable == current.resolve()
+    try:
+        if WINDOWS:
+            return (parent.parent.name == 'releases' and re.fullmatch(r'[a-f0-9]{40}', parent.name) is not None
+                    and bool(windows_task(executable)))
+        current = Path.home() / '.local/opt/spearmint/current/spearmint'
+        if not current.is_file() or executable != current.resolve():
+            return False
+        pid = subprocess.check_output(['systemctl', '--user', 'show', 'spearmint.service', '--property=MainPID', '--value'],
+                                      timeout=4, text=True, stderr=subprocess.DEVNULL).strip()
+        return pid == str(os.getpid())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
 
 
 def launch(state_directory: Path, job: str) -> None:
@@ -98,23 +121,12 @@ def installer_args(bundle: Path, config: dict, job: dict, backup: Path, backup_s
                 '--expected-node', job['node'], '--expected-current-commit', job['previous'],
                 '--expected-commit', release.commit, '--expected-package-sha256', package_sha, config['origin']]
     executable = Path(sys.executable).resolve()
-    powershell = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass']
-    script = (
-        "$ErrorActionPreference='Stop'; "
-        "$tasks=@(Get-ScheduledTask -TaskPath '\\' | Where-Object { $_.Actions.Count -eq 1 -and "
-        "$_.Actions[0].Execute -eq $env:SPEARMINT_UPDATE_EXECUTABLE }); "
-        "if ($tasks.Count -ne 1) { throw 'Expected one packaged Spearmint scheduled task' }; "
-        "ConvertTo-Json -Compress @{ TaskName=$tasks[0].TaskName; TaskLogonType=[string]$tasks[0].Principal.LogonType }"
-    )
-    task = json.loads(subprocess.check_output(
-        [*powershell, '-Command', script], timeout=15, text=True,
-        env={**installer_env(), 'SPEARMINT_UPDATE_EXECUTABLE': str(executable)},
-    ))
+    task = windows_task(executable)
     arguments = {**config['windows'], **task, 'Origin': config['origin'], 'InstallDirectory': str(executable.parents[2]),
                  'VerifyBackup': str(backup), 'ExpectedBackupSha256': backup_sha, 'ExpectedNode': job['node'],
                  'ExpectedCurrentCommit': job['previous'], 'ExpectedCommit': release.commit,
                  'ExpectedPackageSha256': package_sha}
-    return [*powershell, '-File', str(bundle / 'deployment/install-windows.ps1'), '-Upgrade',
+    return [*POWERSHELL, '-File', str(bundle / 'deployment/install-windows.ps1'), '-Upgrade',
             *(part for name, value in arguments.items() for part in (f'-{name}', value))]
 
 

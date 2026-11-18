@@ -16,9 +16,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import grove, seed_packages, update_release as release, update_worker as worker
 from .peer.grove_endpoints import trusted_members
-from .peer.grove_service_admin import GroveServiceAdmin, admin_revision, require_member
+from .peer import quarantine
+from .peer.grove_service_admin import admin_revision, parse_identity, require_member
 from .peer.outbound import account_admin
 from .peer.pairing import configured
+from .peer.policy import credentials_current, require_pair
 from .peer.protocol import PeerError, parse_b64, wire_b64
 from .platforms import WINDOWS, secure_private
 from .state import StateError, audit
@@ -26,10 +28,11 @@ from .state import StateError, audit
 
 METHOD = 'grove.update.v1'
 JOB_TTL = 24 * 60 * 60
+GROVE_RETRY_SECONDS = 120
 TERMINAL = {'succeeded', 'failed', 'unsupported', 'expired'}
 LOG = logging.getLogger(__name__)
 IO_ERRORS = (OSError, ValueError, RuntimeError, sqlite3.Error, StateError, SubprocessError)
-STATUSES = TERMINAL | {'queued', 'downloading', 'waiting_package', 'installing'}
+STATUSES = TERMINAL | {'queued', 'downloading', 'waiting_package', 'waiting_grove', 'installing'}
 
 
 class Offer(BaseModel):
@@ -94,20 +97,50 @@ class UpdateCoordinator:
 
     async def verify_source(self, offer: Offer, pair=None, source: str | None = None) -> None:
         def check():
-            with self.state.connect() as db:
-                if pair is not None:
-                    GroveServiceAdmin.from_wire(self.local_id, pair, offer.identity).require(db)
-                    return
-                if source is not None and source != self.local_id:
-                    paired_source = configured(db, source)
-                    if paired_source is None:
+            with self.state.connect(read_only=True) as db:
+                db.execute('BEGIN')
+                peer = pair
+                if peer is None and source is not None and source != self.local_id:
+                    peer = configured(db, source)
+                    if peer is None:
                         raise PeerError('DENIED', 'The update origin is no longer paired')
-                    GroveServiceAdmin.from_wire(self.local_id, paired_source, offer.identity).require(db)
-                    return
+                if peer is not None:
+                    require_pair(db, peer)
+                    if peer.legacy or not credentials_current(peer) or quarantine.contains(db, peer.node_id):
+                        raise PeerError('DENIED', 'The update origin requires a current Grove Mesh pairing')
                 trust = trusted_members(db, self.local_id)
-                if trust is None or offer.identity != admin_revision(db, trust.realm_id, offer.identity[1]):
-                    raise PeerError('DENIED', 'Grove administrator authorization changed')
-        await self.remote.work(check, rpc=pair is not None)
+                if trust is None:
+                    raise PeerError('GROVE_DIRECTORY_PENDING', 'Waiting for a current Grove directory')
+                identity = parse_identity(offer.identity)
+                if identity[0] != trust.realm_id or (peer is not None and peer.node_id not in trust.origins):
+                    raise PeerError('DENIED', 'The update origin is outside this Grove')
+                current = admin_revision(db, trust.realm_id, identity[1])
+                if identity != current:
+                    if all(remote >= local for remote, local in zip(identity[2:], current[2:], strict=True)):
+                        raise PeerError('GROVE_DIRECTORY_PENDING', 'Waiting for newer Grove account revisions')
+                    raise PeerError('GROVE_REVISION_CHANGED', 'The initiating Grove administrator revision changed')
+        try:
+            await self.remote.work(check, rpc=pair is not None)
+        except PeerError as error:
+            if error.code == 'GROVE_DIRECTORY_PENDING':
+                await self.remote.request_grove_sync()
+            raise
+
+    @staticmethod
+    def authorization_result(error: PeerError) -> dict | None:
+        if error.code == 'GROVE_DIRECTORY_PENDING':
+            return {'status': 'waiting_grove', 'reason': 'grove_sync_pending'}
+        if error.code == 'DENIED':
+            if str(error) == 'Service setup requires an active Grove Mesh peer':
+                return {'status': 'waiting_grove', 'reason': 'legacy_peer_unverified'}
+            return {'status': 'failed', 'reason': 'authorization_denied'}
+        if error.code == 'GROVE_REVISION_CHANGED':
+            return {'status': 'failed', 'reason': 'authorization_changed'}
+        if error.code == 'CONFLICT':
+            if str(error) == 'Grove account permissions changed. Retry after the identity directory synchronizes':
+                return {'status': 'waiting_grove', 'reason': 'legacy_revision_mismatch'}
+            return {'status': 'failed', 'reason': 'update_conflict'}
+        return None
 
     def audit_event(self, actor: str, source: str, event: str, job: str) -> None:
         with self.state.connect(write=True) as db:
@@ -219,8 +252,8 @@ class UpdateCoordinator:
         except PeerError as error:
             if error.code == 'UNSUPPORTED_METHOD':
                 return {'status': 'unsupported', 'reason': 'updater_missing'}
-            if params['action'] == 'offer' and error.code in {'DENIED', 'CONFLICT'}:
-                return {'status': 'failed', 'reason': 'authorization_changed'}
+            if params['action'] == 'offer' and (result := self.authorization_result(error)) is not None:
+                return result
             LOG.debug('Grove update RPC %s deferred for %s: %s', params['action'], node, error.code)
             return None
 
@@ -272,9 +305,10 @@ class UpdateCoordinator:
             return existing
         if offer.expires <= now:
             return {'status': 'expired'}
+        runnable = self.target is not None and await self.remote.work(worker.supported)
         if self.build['commit'] == offer.release.commit:
-            return {'status': 'succeeded', 'reason': 'already_current'}
-        if self.target is None or not worker.supported():
+            return {'status': 'succeeded', 'reason': 'already_current' if runnable else 'already_current_unmanaged'}
+        if not runnable:
             return {'status': 'unsupported', 'reason': 'native_install_required'}
         if offer.release.database_schema != self.schema:
             return {'status': 'unsupported', 'reason': 'schema_change'}
@@ -440,6 +474,10 @@ class UpdateCoordinator:
             await asyncio.to_thread(worker.launch, self.state.directory, job['job'])
         except (PeerError, *IO_ERRORS) as error:
             LOG.warning('Grove update could not start: %s', type(error).__name__)
+            if isinstance(error, PeerError) and (result := self.authorization_result(error)) is not None:
+                self.write_status(job, **result)
+                self.node_retry = time.monotonic() + 15
+                return
             status = 'waiting_package' if isinstance(error, PeerError) and error.code in {'BUSY', 'UNAVAILABLE'} else 'failed'
             self.write_status(job, status, reason='installer_unavailable' if job['status'] == 'installing' else 'update_unavailable')
             self.node_retry = time.monotonic() + 15
@@ -476,7 +514,19 @@ class UpdateCoordinator:
         expires = batch['expires']
         nodes = batch['nodes']
         before = {node: dict(row) for node, row in nodes.items()}
-        if expires <= int(time.time()):
+        now = int(time.time())
+
+        def save(node, result):
+            row = {key: result[key] for key in ('status', 'reason') if isinstance(result.get(key), str) and len(result[key]) <= 64}
+            if row['status'] == 'waiting_grove' and row.get('reason', '').startswith('legacy_'):
+                since = nodes[node].get('grove_wait_since', now)
+                if now - since >= GROVE_RETRY_SECONDS:
+                    row['status'] = 'failed'
+                else:
+                    row['grove_wait_since'] = since
+            nodes[node] = row
+
+        if expires <= now:
             for node, row in nodes.items():
                 if row['status'] not in TERMINAL:
                     nodes[node] = {'status': 'expired'}
@@ -495,16 +545,15 @@ class UpdateCoordinator:
                                                  for node in candidates))
                 for node, result in zip(candidates, results, strict=True):
                     if result and result.get('status') in STATUSES:
-                        nodes[node] = {'status': result['status'], **({'reason': result['reason']}
-                                       if isinstance(result.get('reason'), str) and len(result['reason']) <= 64 else {})}
+                        save(node, result)
                     elif nodes[node]['status'] == 'queued':
                         nodes[node] = {'status': 'queued', 'reason': 'waiting_node'}
             if nodes.get(self.local_id, {}).get('status') not in TERMINAL:
                 try:
-                    nodes[self.local_id] = await self.accept(Offer.model_validate(intent(self.local_id)))
+                    save(self.local_id, await self.accept(Offer.model_validate(intent(self.local_id))))
                 except PeerError as error:
-                    if error.code not in {'BUSY', 'UNAVAILABLE'}:
-                        nodes[self.local_id] = {'status': 'failed', 'reason': 'authorization_changed'}
+                    if (result := self.authorization_result(error)) is not None:
+                        save(self.local_id, result)
         if nodes != before:
             latest = worker.read_record(self.group_path)
             if latest and latest['job'] == batch['job']:
