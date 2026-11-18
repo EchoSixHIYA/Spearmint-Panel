@@ -657,11 +657,10 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     async def seed_wizard_request(source: str, job: str, action: str, request: Request,
                                   actor: auth.Actor = Depends(require_admin_write)):
         if (re.fullmatch(r'spm1-[a-f0-9]{64}', source) is None or not re.fullmatch(r'[a-f0-9]{32}', job)
-                or action not in {'start', 'verify', 'retry-windows', 'directory', 'install', 'status'}):
+                or action not in {'start', 'verify', 'directory', 'install', 'status'}):
             raise PeerError('INVALID_REQUEST', 'Invalid seed wizard request')
         body = await read_grove_body(request, 13 * 1024)
-        fields = {'start': {'connection'}, 'verify': {'fingerprint'}, 'retry-windows': set(),
-                  'directory': {'path'}, 'install': {'path'}, 'status': set()}
+        fields = {'start': {'connection'}, 'verify': {'fingerprint'}, 'directory': {'path'}, 'install': {'path'}, 'status': set()}
         if body.keys() != fields[action]:
             raise PeerError('INVALID_REQUEST', 'Invalid seed wizard request body')
         pair = None if source == node_id else remote.pair_for(source)
