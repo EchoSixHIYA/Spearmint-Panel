@@ -5,6 +5,7 @@ from contextlib import suppress
 from hashlib import sha256
 import logging
 from pathlib import Path
+import re
 from secrets import token_hex
 import sqlite3
 from subprocess import SubprocessError
@@ -67,6 +68,7 @@ class UpdateCoordinator:
         self.group_path = self.root / 'group.json'
         self.local_path = self.root / 'local.json'
         self.seed_release_path = self.root / 'seed-release.json'
+        self.seed_archives_path = self.root / seed_packages.ARCHIVE_INDEX
         self.catalog: release.Release | None = None
         self.github_checked = 0.0
         self.github_catalog: release.Release | None = None
@@ -74,6 +76,17 @@ class UpdateCoordinator:
         self.downloads: dict[str, tuple[asyncio.Task, float]] = {}
         self.seed_downloads: dict[str, asyncio.Task] = {}
         self.seed_readers: Counter[str] = Counter()
+        self.served_archives: dict[str, float] = {}
+        self.seed_archives: dict[str, tuple[str, int]] = {}
+        with suppress(OSError, ValueError, TypeError, AttributeError):
+            for digest, entry in (worker.read_record(self.seed_archives_path) or {}).items():
+                if (re.fullmatch(release.HASH_PATTERN, digest) and isinstance(entry, list) and len(entry) == 2
+                        and entry[0] in release.TARGETS and type(entry[1]) is int):
+                    self.seed_archives[digest] = (entry[0], entry[1])
+        if cached := self.cached_seed_release():
+            for platform, asset in cached.packages.items():
+                if self.archive(asset).is_file():
+                    self.seed_archives.setdefault(asset.sha256, (platform, cached.sequence))
         self.node_task: asyncio.Task | None = None
         self.node_retry = 0.0
 
@@ -225,6 +238,10 @@ class UpdateCoordinator:
                 previous = self.cached_seed_release()
                 if previous is None or previous.sequence < catalog.sequence:
                     worker.write_record(self.seed_release_path, catalog.model_dump())
+                self.seed_archives[digest] = (target, catalog.sequence)
+                worker.write_record(self.seed_archives_path, self.seed_archives)
+                self.prune_seed_archives(self.protected_archives())
+                await asyncio.to_thread(seed_packages.prune_local, self.state, target, signed=True)
             return package
         except OSError as error:
             raise PeerError('SEED_PACKAGE_FETCH', 'Could not cache the verified deployment archive') from error
@@ -334,11 +351,43 @@ class UpdateCoordinator:
     def archive(self, asset: release.Asset) -> Path:
         return self.root / (asset.sha256 + '.archive')
 
-    def cleanup_cache(self) -> None:
-        protected = self.downloads.keys() | self.seed_downloads.keys() | self.seed_readers.keys()
+    def protected_archives(self) -> set[str]:
+        now = time.monotonic()
+        self.served_archives = {digest: until for digest, until in self.served_archives.items() if until > now}
+        protected = self.seed_downloads.keys() | self.seed_readers.keys() | self.served_archives.keys()
+        protected.update(digest for digest, (task, until) in self.downloads.items() if not task.done() or until > now)
         local = worker.read_record(self.local_path)
         if local and local['status'] not in TERMINAL:
             protected.update(asset['sha256'] for asset in local['release']['packages'].values())
+        group = worker.read_record(self.group_path)
+        if group and group['expires'] > time.time() and any(row['status'] not in TERMINAL for row in group['nodes'].values()):
+            protected.update(asset['sha256'] for asset in group['release']['packages'].values())
+        return protected
+
+    def prune_seed_archives(self, protected: set[str]) -> dict[str, tuple[int, str]]:
+        latest: dict[str, tuple[int, str]] = {}
+        missing = []
+        for digest, (platform, sequence) in self.seed_archives.items():
+            if not (self.root / (digest + '.archive')).is_file():
+                missing.append(digest)
+                continue
+            latest[platform] = max(latest.get(platform, (0, '')), (sequence, digest))
+        keep = {digest for _, digest in latest.values()}
+        for digest in self.seed_archives.keys() - keep - protected - set(missing):
+            try:
+                (self.root / (digest + '.archive')).unlink(missing_ok=True)
+            except OSError:
+                continue
+            missing.append(digest)
+        if missing:
+            for digest in missing:
+                self.seed_archives.pop(digest, None)
+            worker.write_record(self.seed_archives_path, self.seed_archives)
+        return latest
+
+    def cleanup_cache(self) -> None:
+        protected = self.protected_archives()
+        protected.update(digest for _, digest in self.prune_seed_archives(protected).values())
         files = sorted(self.root.glob('*.archive'), key=lambda item: item.stat().st_mtime, reverse=True)
         for file in files[6:]:
             if file.stem not in protected:
@@ -392,6 +441,7 @@ class UpdateCoordinator:
             if action == 'prepare' and set(params) == {'action', 'asset'}:
                 asset = release.Asset.model_validate(params['asset'])
                 if self.has_archive(asset):
+                    self.served_archives[asset.sha256] = time.monotonic() + 30
                     return {'ready': True}
                 task = self.prepare(asset)
                 return {'ready': False, 'pending': task is not None and not task.done()}
@@ -399,6 +449,8 @@ class UpdateCoordinator:
                 asset = release.Asset.model_validate(params['asset'])
                 offset = params['offset']
                 if type(offset) is int and 0 <= offset < asset.size and offset % release.CHUNK == 0:
+                    if self.has_archive(asset):
+                        self.served_archives[asset.sha256] = time.monotonic() + 30
                     return await self.remote.work(self.read_chunk, asset, offset, rpc=True)
         except (ValueError, OSError) as error:
             raise PeerError('INVALID_REQUEST', 'Invalid request for a Grove update') from error
@@ -561,10 +613,16 @@ class UpdateCoordinator:
 
     async def run(self) -> None:
         try:
+            with suppress(*IO_ERRORS):
+                current = self.prune_seed_archives(self.protected_archives())
+                for platform in release.TARGETS:
+                    await asyncio.to_thread(seed_packages.prune_local, self.state, platform, signed=platform in current)
             while True:
                 try:
                     await self.tick_node()
                     await self.tick_group()
+                    if len(self.seed_archives) > len({platform for platform, _ in self.seed_archives.values()}):
+                        self.prune_seed_archives(self.protected_archives())
                 except IO_ERRORS as error:
                     LOG.warning('Grove update check deferred: %s', type(error).__name__)
                 await asyncio.sleep(4)
