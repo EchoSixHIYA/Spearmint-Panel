@@ -30,6 +30,7 @@ const problems: Record<string, string> = {
   SEED_DIRECTORY: '暂时无法读取该目录。', SEED_INSTALL: '安装器未确认服务启动。', SEED_QUORUM: '当前 Grove 多数成员未能完成入网。',
   SEED_WINDOWS_STAGING: '目标 Windows 无法通过 SFTP 接收或解压部署包。请核对 SFTP 子系统和临时空间。',
   SEED_WINDOWS_PACKAGE: '目标 Windows 无法运行原生播种入口。请核对部署包版本和目标的应用执行策略。',
+  SEED_WINDOWS_EXECUTION_POLICY: '目标 Windows 的代码完整性策略阻止了播种程序。',
   SEED_WINDOWS_TASK_PERMISSION: '目标 SSH 账号无法注册 Windows 开机任务。请使用有权限的部署账号。',
   SEED_WINDOWS_TASK_CONFLICT: '目标已存在同名计划任务，请检查现有 Spearmint 安装。',
   SEED_WINDOWS_PORT: '目标 Windows 的面板端口已占用。',
@@ -116,6 +117,8 @@ export function SeedWizard({ follow }: { follow: (origin: string, nodeId?: strin
 
   const directory = view?.directory
   const browsing = view?.status === 'choose' || view?.status === 'reading' && !!directory
+  const windowsPolicyBlocked = view?.error === 'SEED_WINDOWS_EXECUTION_POLICY'
+    || view?.error === 'SEED_WINDOWS_PACKAGE' && view.failure_detail === 'version:exit=0x000011C7'
   const sourceName = listedNodes.find(node => node.id === source)?.name
   function browse(path: string) { if (job) void send(job, 'directory', { path }) }
 
@@ -161,8 +164,16 @@ export function SeedWizard({ follow }: { follow: (origin: string, nodeId?: strin
           onClick={() => void send(job, 'install', { path: view.path })}>安装到此位置</button></div>
       </div>}
       {view?.error && <div className="error" role="alert">
-        <p>{problems[view.error] || '播种操作尚未完成。'}{view.node_id && ` 节点 ID · ${view.node_id}`}</p>
+        <p>{problems[windowsPolicyBlocked ? 'SEED_WINDOWS_EXECUTION_POLICY' : view.error] || '播种操作尚未完成。'}{view.node_id && ` 节点 ID · ${view.node_id}`}</p>
         <small>{[view.failed_stage && stages[view.failed_stage], view.error, view.failure_detail].filter(Boolean).join(' · ')}</small>
+      </div>}
+      {windowsPolicyBlocked && view.failed_stage === 'package' && <div className="stack-small">
+        <Notice title="检查目标 Windows 的智能应用控制" tone="amber">
+          若目标机的代码完整性日志确认是智能应用控制拦截，请在目标机打开「Windows 安全中心 → 应用和浏览器控制 → 智能应用控制设置」。
+          如果决定关闭，请在该页面选择「关」。此设置对整台设备生效。
+        </Notice>
+        {job && view.status === 'windows-policy' && <div><button className="btn btn-primary" disabled={busy}
+          onClick={() => void send(job, 'retry-windows', {})}>重新检查部署入口</button></div>}
       </div>}
       {error && <p className="error" role="alert">{error}</p>}
       {view?.status === 'joined' && <Notice title="Spearmint 已启动并加入 Grove">

@@ -179,6 +179,10 @@ class SeedWizard:
                     raise PeerError('SEED_HOST_KEY', 'The SSH host fingerprint has changed')
                 job.status = 'ssh-login'
                 self.schedule(job, self.login, params['fingerprint'], loop)
+            elif action == 'retry-windows' and job.status == 'windows-policy':
+                job.status, job.error = 'package', None
+                job.failed_stage, job.failure_detail = None, None
+                self.schedule(job, self.check_windows_helper)
             elif action == 'directory' and job.status == 'choose':
                 path = params.get('path')
                 if not isinstance(path, str) or path not in job.paths:
@@ -194,7 +198,7 @@ class SeedWizard:
                     raise PeerError('BUSY', 'A job is already installing on this SSH host')
                 job.status, job.error = 'installing', None
                 self.schedule(job, self.install, job_id, anchor, loop, pair is not None)
-            elif action not in {'status', 'start', 'verify', 'directory', 'install'}:
+            elif action not in {'status', 'start', 'verify', 'retry-windows', 'directory', 'install'}:
                 raise PeerError('INVALID_REQUEST', 'Unknown SSH seed action')
             job.expire = monotonic() + 900
             return job.view()
@@ -227,6 +231,9 @@ class SeedWizard:
                 with self.lock:
                     job.failed_stage = job.status
                     job.failure_detail = error.detail if isinstance(error, seed_ssh.WindowsSeedFailure) else None
+                    if job.status == 'package' and isinstance(error, seed_ssh.WindowsSeedFailure) and error.code == seed_ssh.WINDOWS_POLICY_ERROR:
+                        job.status, job.error = 'windows-policy', error.code
+                        return
                     if job.status == 'reading' and job.directory is not None:
                         job.status, job.error = 'choose', 'SEED_DIRECTORY'
                         return
@@ -277,9 +284,17 @@ class SeedWizard:
                 job.connection.prepare_windows(package)
             except (OSError, SSHException, SubprocessError) as error:
                 raise PeerError('SEED_WINDOWS_STAGING', 'The Windows package could not be staged over SSH') from error
+            self.check_windows_helper(job)
+            return
         with self.lock:
             job.status = 'reading'
         self.browse(job, start)
+
+    def check_windows_helper(self, job):
+        job.connection.check_windows_helper()
+        with self.lock:
+            job.status = 'reading'
+        self.browse(job, '')
 
     def browse(self, job, path):
         path_class = seed_ssh.path_type(job.platform)

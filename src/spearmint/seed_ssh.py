@@ -23,6 +23,8 @@ from .peer.protocol import PeerError
 FINGERPRINT = re.compile(r'SHA256:[A-Za-z0-9+/]{43}')
 WINDOWS_PROBE = 'echo %PROCESSOR_ARCHITECTURE% %PROCESSOR_ARCHITEW6432%'
 WINDOWS_RECEIPT = b'SPEARMINT_WINDOWS_SEED='
+WINDOWS_POLICY_ERROR = 'SEED_WINDOWS_EXECUTION_POLICY'
+ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION = 4551
 
 
 class WindowsSeedFailure(PeerError):
@@ -197,6 +199,7 @@ class Connection:
                         timeout=90)
         except (CalledProcessError, TimeoutExpired) as error:
             raise PeerError('SEED_WINDOWS_STAGING', 'Windows could not unpack the verified package') from error
+    def check_windows_helper(self):
         if self.windows_request('version', {}).get('native_seed') != 1:
             raise WindowsSeedFailure('SEED_WINDOWS_PACKAGE', 'version:unexpected_protocol_version')
 
@@ -213,7 +216,10 @@ class Connection:
             payload = json.dumps(data).encode() + b'\n'
             raw = self.answer(command, payload, timeout=timeout)
         except CalledProcessError as error:
-            raise WindowsSeedFailure(code, f'{action}:exit=0x{error.returncode & 0xffffffff:08X}') from error
+            status = error.returncode & 0xffffffff
+            if status == ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION:
+                code = WINDOWS_POLICY_ERROR
+            raise WindowsSeedFailure(code, f'{action}:exit=0x{status:08X}') from error
         except TimeoutExpired as error:
             raise WindowsSeedFailure(code, f'{action}:timeout') from error
         try:
