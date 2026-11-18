@@ -44,7 +44,8 @@ def windows_task(executable: Path) -> dict:
     script = (
         "$ErrorActionPreference='Stop'; "
         "$tasks=@(Get-ScheduledTask -TaskPath '\\' | Where-Object { $_.Actions.Count -eq 1 -and "
-        "$_.Actions[0].Execute -eq $env:SPEARMINT_UPDATE_EXECUTABLE -and $_.State -eq 'Running' }); "
+        "$_.Actions[0].Execute -eq $env:SPEARMINT_UPDATE_EXECUTABLE -and $_.State -eq 'Running' "
+        "-and $_.Actions[0].Arguments -notlike '--internal-grove-updater *' }); "
         "if ($tasks.Count -ne 1) { throw 'Expected one running packaged Spearmint scheduled task' }; "
         "ConvertTo-Json -Compress @{ TaskName=$tasks[0].TaskName; TaskLogonType=[string]$tasks[0].Principal.LogonType }"
     )
@@ -75,13 +76,51 @@ def launch(state_directory: Path, job: str) -> None:
     executable = str(Path(sys.executable).resolve())
     command = [executable, '--internal-grove-updater', str(state_directory), job]
     if WINDOWS:
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_BREAKAWAY_FROM_JOB
-        subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         creationflags=flags, env={**os.environ, 'PYINSTALLER_RESET_ENVIRONMENT': '1'})
+        panel = windows_task(Path(executable))
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            "$name=$env:SPEARMINT_UPDATE_TASK; $exe=$env:SPEARMINT_UPDATE_EXECUTABLE; $arguments=$env:SPEARMINT_UPDATE_ARGUMENTS; "
+            "$existing=Get-ScheduledTask -TaskPath '\\' -TaskName $name -ErrorAction SilentlyContinue; "
+            "if ($existing) { "
+            "  if ($existing.Actions.Count -ne 1 -or $existing.Actions[0].Execute -ne $exe -or "
+            "      $existing.Actions[0].Arguments -cne $arguments) { throw 'The update task already has another action' }; "
+            "  if ($existing.State -in @('Running','Queued')) { exit 0 }; "
+            "} else { "
+            "  $panel=Get-ScheduledTask -TaskPath '\\' -TaskName $env:SPEARMINT_PANEL_TASK; "
+            "  $action=New-ScheduledTaskAction -Execute $exe -Argument $arguments -WorkingDirectory (Split-Path $exe); "
+            "  $principal=New-ScheduledTaskPrincipal -UserId $panel.Principal.UserId -LogonType $panel.Principal.LogonType -RunLevel Limited; "
+            "  $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries "
+            "    -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 15); "
+            "  Register-ScheduledTask -TaskPath '\\' -TaskName $name -Action $action -Principal $principal -Settings $settings | Out-Null; "
+            "}; Start-ScheduledTask -TaskPath '\\' -TaskName $name"
+        )
+        env = {**installer_env(), 'SPEARMINT_PANEL_TASK': panel['TaskName'], 'SPEARMINT_UPDATE_TASK': f'Spearmint-Update-{job}',
+               'SPEARMINT_UPDATE_EXECUTABLE': executable,
+               'SPEARMINT_UPDATE_ARGUMENTS': f'--internal-grove-updater "{state_directory}" {job}'}
+        subprocess.run([*POWERSHELL, '-Command', script], check=True, env=env, timeout=20, stdin=subprocess.DEVNULL,
+                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
     else:
         subprocess.run(['systemd-run', '--user', '--quiet', '--collect', f'--unit=spearmint-update-{job}',
                         '--property=RuntimeMaxSec=900', '--expand-environment=no', '--', *command],
                        check=True, stdin=subprocess.DEVNULL, capture_output=True, timeout=10, env=installer_env())
+
+
+def remove_windows_update_task(job: str, state_directory: Path) -> None:
+    expected = f'--internal-grove-updater "{state_directory}" {job}'
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        "$task=Get-ScheduledTask -TaskPath '\\' -TaskName $env:SPEARMINT_UPDATE_TASK -ErrorAction SilentlyContinue; "
+        "if ($task -and $task.Actions.Count -eq 1 -and $task.Actions[0].Execute -eq $env:SPEARMINT_UPDATE_EXECUTABLE "
+        "    -and $task.Actions[0].Arguments -ceq $env:SPEARMINT_UPDATE_ARGUMENTS) "
+        "{ Unregister-ScheduledTask -InputObject $task -Confirm:$false }"
+    )
+    try:
+        subprocess.run([*POWERSHELL, '-Command', script], check=True, timeout=12, capture_output=True,
+                       creationflags=subprocess.CREATE_NO_WINDOW, env={**installer_env(),
+                       'SPEARMINT_UPDATE_TASK': f'Spearmint-Update-{job}', 'SPEARMINT_UPDATE_ARGUMENTS': expected,
+                       'SPEARMINT_UPDATE_EXECUTABLE': str(Path(sys.executable).resolve())})
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def setting(flag: str, default=None):
@@ -168,3 +207,6 @@ def main(state_directory: str, job_id: str) -> int:
             stream.write((str(error) + '\n').encode('utf-8', errors='replace'))
         write_record(result, {'status': 'failed', 'reason': 'installer_failed', 'finished_at': int(time.time())})
         return 1
+    finally:
+        if WINDOWS:
+            remove_windows_update_task(job_id, directory)
