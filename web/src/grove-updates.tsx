@@ -22,6 +22,8 @@ const reasons: Record<string, string> = {
   grove_sync_pending: '目标节点尚未同步 Grove 成员或管理员信息',
   legacy_peer_unverified: '目标节点未认可发起端的 Grove 成员身份', legacy_revision_mismatch: '目标节点的 Grove 管理员信息与发起端不一致',
   another_update: '正在处理另一项更新', running_commit_mismatch: '重启后的版本与目标版本不一致',
+  checking_package_sources: '正在查找 GitHub 和 Grove 来源', fetching_from_grove: '正在从 Grove 节点接收安装包',
+  source_unavailable: '暂未找到可用来源，将自动重试',
 }
 
 export function GroveUpdatePanel() {
@@ -59,7 +61,7 @@ export function GroveUpdatePanel() {
       const result = await api<{ release: Candidate | null }>('/grove/updates/release', { signal: AbortSignal.timeout(90_000) })
       if (result.release) setCandidate({ tag: result.release.tag, commit: result.release.commit })
       else setMessage('暂未找到可用的已签名发布。可稍后重试。')
-    })}>{busy ? '处理中…' : '检查 GitHub 更新'}</button>}>
+    })}>{busy ? '处理中…' : '检查更新'}</button>}>
     {message && <Notice tone={error ? 'amber' : undefined}>{message}</Notice>}
     {candidate && <div className="stack">
       <p>可用发布 {candidate.tag} · {candidate.commit.slice(0, 8)}</p>

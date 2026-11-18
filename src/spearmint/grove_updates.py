@@ -293,6 +293,7 @@ class UpdateCoordinator:
         job = token_hex(16)
         worker.write_record(self.group_path, {'job': job, 'release': candidate.model_dump(), 'identity': identity,
                                              'expires': now + JOB_TTL, 'nodes': {node: {'status': 'queued'} for node in members}})
+        self.prepare_group_archives(candidate)
         await self.remote.work(self.audit_event, identity[1], actor.address, 'started', job)
         return self.group_status()
 
@@ -418,6 +419,20 @@ class UpdateCoordinator:
         path = self.archive(asset)
         return path.is_file() and path.stat().st_size == asset.size
 
+    def prepare_group_archives(self, catalog: release.Release) -> None:
+        for asset in catalog.packages.values():
+            if not self.has_archive(asset):
+                self.prepare(asset)
+
+    def cached_group_release(self) -> release.Release | None:
+        candidates = []
+        for path in (self.group_path, self.local_path):
+            with suppress(*IO_ERRORS, KeyError, TypeError):
+                record = worker.read_record(path)
+                if record:
+                    candidates.append(release.Release.model_validate(record['release']))
+        return max(candidates, key=lambda item: item.sequence, default=None)
+
     def read_chunk(self, asset: release.Asset, offset: int) -> dict:
         if not self.has_archive(asset):
             raise PeerError('UNAVAILABLE', 'Update package is not cached')
@@ -436,7 +451,8 @@ class UpdateCoordinator:
             await self.remote.work(authorize, rpc=True)
             if action == 'catalog' and set(params) == {'action'}:
                 pending = self.check_in_background() is not None
-                catalog = self.github_catalog or self.cached_seed_release()
+                cached = (self.github_catalog, self.cached_seed_release(), self.cached_group_release())
+                catalog = max((item for item in cached if item is not None), key=lambda item: item.sequence, default=None)
                 return {'pending': pending, 'release': catalog.model_dump() if catalog else None}
             if action == 'prepare' and set(params) == {'action', 'asset'}:
                 asset = release.Asset.model_validate(params['asset'])
@@ -464,12 +480,24 @@ class UpdateCoordinator:
             with intermediate.open('wb') as stream:
                 for start in range(0, asset.size, 4 * release.CHUNK):
                     offsets = range(start, min(asset.size, start + 4 * release.CHUNK), release.CHUNK)
-                    payloads = await asyncio.gather(*(self.ask(node, {'action': 'chunk', 'asset': asset.model_dump(),
-                                                                     'offset': offset}) for offset in offsets))
-                    for offset, payload in zip(offsets, payloads, strict=True):
-                        block = parse_b64(payload.get('data'), release.CHUNK) if payload else b''
-                        if len(block) != min(release.CHUNK, asset.size - offset):
-                            return False
+                    blocks = {}
+                    for attempt in range(3):
+                        missing = [offset for offset in offsets if offset not in blocks]
+                        if not missing:
+                            break
+                        if attempt:
+                            await asyncio.sleep(1)
+                        payloads = await asyncio.gather(*(self.ask(node, {'action': 'chunk', 'asset': asset.model_dump(),
+                                                                         'offset': offset}) for offset in missing))
+                        for offset, payload in zip(missing, payloads, strict=True):
+                            if payload and 'data' in payload:
+                                block = parse_b64(payload['data'], release.CHUNK)
+                                if len(block) == min(release.CHUNK, asset.size - offset):
+                                    blocks[offset] = block
+                    if len(blocks) != len(offsets):
+                        return False
+                    for offset in offsets:
+                        block = blocks[offset]
                         digest.update(block)
                         stream.write(block)
             if digest.hexdigest() != asset.sha256:
@@ -481,30 +509,51 @@ class UpdateCoordinator:
         finally:
             intermediate.unlink(missing_ok=True)
 
-    async def acquire(self, asset: release.Asset, *, wait_for_sources: bool = False) -> bool:
-        if await asyncio.to_thread(release.correct_archive, self.archive(asset), asset):
-            return True
-        task = self.prepare(asset)
-        if task is not None:
-            done, _ = await asyncio.wait({task}, timeout=7)
-            if done and task.result():
-                return True
-        peers = [node for node in await self.remote.work(self.members) if node != self.local_id]
+    async def from_members(self, asset: release.Asset, *, wait_for_sources: bool, on_transfer=None) -> bool:
+        async def prepare_peer(node):
+            response = await self.ask(node, {'action': 'prepare', 'asset': asset.model_dump()})
+            return node, response or {}
+
         while True:
+            peers = [node for node in await self.remote.work(self.members) if node != self.local_id]
             pending = False
             for start in range(0, len(peers), 8):
-                candidates = peers[start:start + 8]
-                responses = await asyncio.gather(*(self.ask(node, {'action': 'prepare', 'asset': asset.model_dump()})
-                                                   for node in candidates))
-                for node, response in zip(candidates, responses, strict=True):
-                    if response and response.get('ready') and await self.transfer(node, asset):
-                        return True
-                    pending = pending or bool(response and response.get('pending'))
-            if task is not None and task.done() and task.result():
-                return True
-            if not wait_for_sources or (not pending and (task is None or task.done())):
+                probes = [asyncio.create_task(prepare_peer(node)) for node in peers[start:start + 8]]
+                try:
+                    for probe in asyncio.as_completed(probes):
+                        node, response = await probe
+                        if response.get('ready'):
+                            if on_transfer is not None:
+                                on_transfer()
+                            if await self.transfer(node, asset):
+                                return True
+                        pending = pending or bool(response.get('pending'))
+                finally:
+                    for probe in probes:
+                        probe.cancel()
+                    await asyncio.gather(*probes, return_exceptions=True)
+            if not wait_for_sources or not pending:
                 return False
             await asyncio.sleep(2)
+
+    async def acquire(self, asset: release.Asset, *, wait_for_sources: bool = False, on_transfer=None) -> bool:
+        if await asyncio.to_thread(release.correct_archive, self.archive(asset), asset):
+            return True
+        github = self.prepare(asset)
+        mesh = asyncio.create_task(self.from_members(asset, wait_for_sources=wait_for_sources, on_transfer=on_transfer))
+        pending = {mesh, github} if github is not None else {mesh}
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                if any(task.result() for task in done):
+                    return True
+                if mesh in done and github in pending and not wait_for_sources:
+                    done, _ = await asyncio.wait({github}, timeout=7)
+                    return bool(done and github.result())
+            return False
+        finally:
+            mesh.cancel()
+            await asyncio.gather(mesh, return_exceptions=True)
 
     async def run_node(self, job: dict) -> None:
         candidate = release.Release.model_validate(job['release'])
@@ -513,8 +562,9 @@ class UpdateCoordinator:
             if job['expires'] <= int(time.time()):
                 self.write_status(job, 'expired')
                 return
-            self.write_status(job, 'downloading')
-            if not await self.acquire(candidate.packages[self.target]):
+            self.write_status(job, 'downloading', reason='checking_package_sources')
+            if not await self.acquire(candidate.packages[self.target],
+                                      on_transfer=lambda: self.write_status(job, 'downloading', reason='fetching_from_grove')):
                 self.write_status(job, 'waiting_package', reason='source_unavailable')
                 self.node_retry = time.monotonic() + 15
                 return
@@ -586,6 +636,7 @@ class UpdateCoordinator:
             members = await self.remote.work(self.members)
             if not members:
                 return
+            self.prepare_group_archives(release.Release.model_validate(batch['release']))
             def intent(node):
                 return {'job': batch['job'], 'release': batch['release'], 'identity': batch['identity'],
                         'expires': expires, 'target': node}
