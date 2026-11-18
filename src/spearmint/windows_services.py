@@ -1,10 +1,11 @@
-"""Observe and control explicitly configured Windows services through SCM."""
+"""Discover and control Windows services through SCM."""
 
 from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import time
+from xml.etree import ElementTree
 
 from .catalog import Service, register
 from .drivers import LOG_LIMIT, LogSnapshot, Observation, format_log_snapshot
@@ -69,9 +70,6 @@ class WindowsServiceDriver:
         write_private(self.state.directory / ALLOWLIST, encoded)
 
     def running_services(self) -> dict[str, str]:
-        allowed = self.allowed_services()
-        if not allowed:
-            return {}
         import pywintypes
         import win32service as scm
 
@@ -81,7 +79,7 @@ class WindowsServiceDriver:
         except pywintypes.error as error:
             raise ServiceManagerError(error.winerror) from error
         return {name.lower(): display for name, display, status in services
-                if name.lower() in allowed and status[1] == scm.SERVICE_RUNNING}
+                if valid_name(name) and status[1] == scm.SERVICE_RUNNING}
 
     @staticmethod
     @contextmanager
@@ -93,8 +91,9 @@ class WindowsServiceDriver:
             manager.Close()
 
     @contextmanager
-    def open_service(self, name: str, *, start: bool = False, stop: bool = False):
-        if name.lower() not in self.allowed_services():
+    def open_service(self, name: str, *, start: bool = False, stop: bool = False, query_config: bool = False,
+                     host_permissions: bool = False):
+        if not valid_name(name) or (not host_permissions and name.lower() not in self.allowed_services()):
             raise HostError("This Windows service is outside the node's configured list")
         import pywintypes
         import win32service as scm
@@ -104,6 +103,8 @@ class WindowsServiceDriver:
             access |= scm.SERVICE_START
         if stop:
             access |= scm.SERVICE_STOP
+        if query_config:
+            access |= scm.SERVICE_QUERY_CONFIG
         try:
             with self.manager(scm, scm.SC_MANAGER_CONNECT) as manager:
                 handle = scm.OpenService(manager, name, access)
@@ -139,19 +140,19 @@ class WindowsServiceDriver:
         self.observe_target(target)
         return register(self.state, "process", name, target, {"runtime": RUNTIME}, managed=False, actor=actor, source=source)
 
-    def observe_target(self, target: str) -> Observation:
-        with self.open_service(target) as (scm, handle):
+    def observe_target(self, target: str, *, host_permissions: bool = False) -> Observation:
+        with self.open_service(target, host_permissions=host_permissions) as (scm, handle):
             return self.observation(scm, handle)
 
-    def verify_management(self, target: str) -> None:
-        with self.open_service(target, start=True, stop=True) as (scm, handle):
+    def verify_management(self, target: str, *, host_permissions: bool = False) -> None:
+        with self.open_service(target, start=True, stop=True, host_permissions=host_permissions) as (scm, handle):
             self.observation(scm, handle)
 
-    def control_rights(self, target: str) -> dict[str, bool | None]:
+    def control_rights(self, target: str, *, host_permissions: bool = False) -> dict[str, bool | None]:
         rights = {}
         for action in ('start', 'stop'):
             try:
-                with self.open_service(target, **{action: True}):
+                with self.open_service(target, host_permissions=host_permissions, **{action: True}):
                     rights[action] = True
             except ServiceManagerError as error:
                 rights[action] = False if error.reason == 'access_denied' else None
@@ -159,34 +160,34 @@ class WindowsServiceDriver:
                 rights[action] = None
         return rights
 
-    def management_status(self, target: str) -> dict:
+    def management_status(self, target: str, *, host_permissions: bool = False) -> dict:
+        if not host_permissions:
+            try:
+                if target.lower() not in self.allowed_services():
+                    return {"ready": False, "reason": "not_allowed"}
+            except HostError:
+                return {"ready": False, "reason": "invalid_allowlist"}
         try:
-            allowed = self.allowed_services()
-        except HostError:
-            return {"ready": False, "reason": "invalid_allowlist"}
-        if target.lower() not in allowed:
-            return {"ready": False, "reason": "not_allowed"}
-        try:
-            with self.open_service(target) as (scm, handle):
+            with self.open_service(target, host_permissions=host_permissions) as (scm, handle):
                 observed = self.observation(scm, handle)
         except ServiceManagerError as error:
             return {"ready": False, "reason": error.reason}
         except HostError:
             return {"ready": False, "reason": "query_failed"}
         try:
-            with self.open_service(target, start=True, stop=True):
+            with self.open_service(target, start=True, stop=True, host_permissions=host_permissions):
                 pass
         except ServiceManagerError as error:
             if error.reason == "access_denied":
                 return {"ready": False, "reason": "control_denied", "status": observed.status,
-                        "control_rights": self.control_rights(target)}
+                        "control_rights": self.control_rights(target, host_permissions=host_permissions)}
             return {"ready": False, "reason": error.reason, "status": observed.status}
         except HostError:
             return {"ready": False, "reason": "query_failed", "status": observed.status}
         return {"ready": True, "status": observed.status}
 
     def inspect(self, service: Service) -> Observation:
-        return self.observe_target(service.target)
+        return self.observe_target(service.target, host_permissions=service.host_permissions)
 
     def wait(self, scm, handle, expected: str, pending: str) -> None:
         deadline = time.monotonic() + 15
@@ -201,7 +202,8 @@ class WindowsServiceDriver:
             time.sleep(0.2)
 
     def apply(self, service: Service, action: str, before: Observation) -> None:
-        with self.open_service(service.target, start=action != "stop", stop=action != "start") as (scm, handle):
+        with self.open_service(service.target, start=action != "stop", stop=action != "start",
+                               host_permissions=service.host_permissions) as (scm, handle):
             if self.observation(scm, handle) != before:
                 raise HostError("Windows service changed state before the requested action")
             if action != "start" and before.status == "running":
@@ -215,8 +217,98 @@ class WindowsServiceDriver:
         path = service.spec.get('log_path')
         if not path:
             raise HostError('No application log file has been configured for this Windows service')
-        self.observe_target(service.target)
+        self.inspect(service)
         return application_log(path, tail)
+
+    def detect_log(self, target: str) -> str | None:
+        import winreg
+
+        try:
+            with self.open_service(target, query_config=True, host_permissions=True) as (scm, handle):
+                command = scm.QueryServiceConfig(handle)[3]
+        except HostError:
+            return None
+        args = command_arguments(command)
+        executable = Path(os.path.expandvars(args[0])) if args else None
+        parent = executable.parent if executable is not None and executable.is_absolute() else None
+        candidates = []
+        for index, argument in enumerate(args[1:], 1):
+            option, separator, value = argument.partition('=')
+            if option.lower() in {'--log-file', '--logfile', '--log-path', '--logpath'}:
+                if separator or index + 1 < len(args):
+                    candidates.append((value if separator else args[index + 1], parent))
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, rf'SYSTEM\CurrentControlSet\Services\{target}\Parameters') as key:
+                log_base = parent
+                try:
+                    directory, _ = winreg.QueryValueEx(key, 'AppDirectory')
+                    if isinstance(directory, str):
+                        configured = Path(os.path.expandvars(directory))
+                        if configured.is_absolute():
+                            log_base = configured
+                except OSError:
+                    pass
+                for name in ('AppStdout', 'AppStderr'):
+                    try:
+                        path, _ = winreg.QueryValueEx(key, name)
+                        if isinstance(path, str):
+                            candidates.append((path, log_base))
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+        if parent is not None:
+            candidates.extend((path, parent) for path in winsw_logs(executable, target))
+        for proposed, base in candidates:
+            path = Path(os.path.expandvars(proposed.strip('"')))
+            if not path.is_absolute() and base is not None:
+                path = base / path
+            if len(str(path)) > 420:
+                continue
+            try:
+                application_log(str(path), 1)
+                return str(path)
+            except HostError:
+                continue
+        return None
+
+
+def winsw_logs(executable: Path, target: str) -> list[str]:
+    try:
+        with executable.with_suffix('.xml').open('rb') as stream:
+            data = stream.read(MAX_ALLOWLIST_BYTES + 1)
+        if len(data) > MAX_ALLOWLIST_BYTES:
+            return []
+        root = ElementTree.fromstring(data)
+    except (OSError, ValueError, ElementTree.ParseError):
+        return []
+    if root.tag != 'service' or root.findtext('id', '').strip().lower() != target.lower():
+        return []
+    configured = root.findtext('logpath', '').strip().replace('%BASE%', str(executable.parent))
+    directory = Path(configured) if configured else executable.parent
+    return [str(directory / (executable.stem + suffix)) for suffix in ('.out.log', '.err.log')]
+
+
+def command_arguments(command: str) -> list[str]:
+    import ctypes
+    from ctypes import wintypes
+
+    if not command.strip():
+        return []
+    parse = ctypes.windll.shell32.CommandLineToArgvW
+    parse.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    parse.restype = ctypes.POINTER(wintypes.LPWSTR)
+    free = ctypes.windll.kernel32.LocalFree
+    free.argtypes = [wintypes.HLOCAL]
+    free.restype = wintypes.HLOCAL
+    count = ctypes.c_int()
+    arguments = parse(command, ctypes.byref(count))
+    if not arguments:
+        return []
+    try:
+        return [arguments[index] for index in range(count.value)]
+    finally:
+        free(ctypes.cast(arguments, wintypes.HLOCAL))
 
 
 def application_log(path: str, tail: int) -> LogSnapshot:

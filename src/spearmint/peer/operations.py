@@ -253,9 +253,9 @@ class PeerOperations:
 
     def host_ready(self, service: Service) -> bool:
         if service.existing_systemd_unit:
-            return SystemUnitDriver.management_status(service.target, timeout=1)["ready"]
+            return SystemUnitDriver.management_status(service.target, timeout=1, host_permissions=service.host_permissions)["ready"]
         if service.existing_windows_service:
-            return WindowsServiceDriver(self.state).management_status(service.target)["ready"]
+            return WindowsServiceDriver(self.state).management_status(service.target, host_permissions=service.host_permissions)["ready"]
         observation = self.controller.describe(service)["observation"]
         return not observation["stale"] and observation["status"] not in {*TRANSITIONAL, "unknown", "missing"}
 

@@ -60,6 +60,10 @@ class Service:
     def logs_available(self) -> bool:
         return not self.existing_windows_service or bool(self.spec.get('log_path'))
 
+    @property
+    def host_permissions(self) -> bool:
+        return self.spec.get('host_permissions') is True
+
 
 def get_service(db: sqlite3.Connection, service_id: str) -> Service | None:
     row = db.execute("SELECT * FROM service WHERE id=?", (service_id,)).fetchone()

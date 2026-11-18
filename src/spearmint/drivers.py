@@ -18,6 +18,7 @@ CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 CONTAINER_REFERENCE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
 CONTAINER_LIST_LIMIT = 100
 TRANSITIONAL = {"starting", "stopping"}
+SYSTEM_UNIT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:\\-]{0,245}\.service")
 
 
 @dataclass(frozen=True)
@@ -191,18 +192,16 @@ class SystemUnitDriver(ProcessDriver):
 
     @classmethod
     def running_units(cls) -> set[str]:
-        allowed = cls.allowed_units()
-        if not allowed:
-            return set()
         result = capture([*cls.ctl, 'list-units', '--type=service', '--state=running', '--plain', '--no-legend', '--full'],
                          limit=128 * 1024)
         if result.code or result.truncated:
             raise HostError('Cannot read the running systemd services')
-        return {line.split()[0] for line in result.stdout.decode('utf-8', 'replace').splitlines() if line.strip()} & allowed
+        names = (line.split()[0] for line in result.stdout.decode('utf-8', 'replace').splitlines() if line.strip())
+        return {name for name in names if SYSTEM_UNIT.fullmatch(name)}
 
     @classmethod
-    def configured_unit(cls, target: str, *, timeout: float = 4) -> dict[str, str]:
-        if target not in cls.allowed_units():
+    def configured_unit(cls, target: str, *, timeout: float = 4, host_permissions: bool = False) -> dict[str, str]:
+        if not SYSTEM_UNIT.fullmatch(target) or (not host_permissions and target not in cls.allowed_units()):
             raise HostError("The system service is outside this node's configured unit list")
         result = capture([*cls.ctl, "show", "--property", "Id," + cls.unit_fields, target], timeout=timeout)
         unit = dict(line.split("=", 1) for line in result.stdout.decode("utf-8", "replace").splitlines() if "=" in line)
@@ -217,7 +216,7 @@ class SystemUnitDriver(ProcessDriver):
                         managed=False, actor=actor, source=source)
 
     def unit(self, service: Service) -> dict[str, str]:
-        return self.configured_unit(service.target)
+        return self.configured_unit(service.target, host_permissions=service.host_permissions)
 
     @staticmethod
     def sudo_blocked() -> bool:
@@ -228,11 +227,11 @@ class SystemUnitDriver(ProcessDriver):
             return False
 
     @classmethod
-    def management_status(cls, target: str, *, timeout: float = 4) -> dict:
-        if target not in cls.allowed_units():
+    def management_status(cls, target: str, *, timeout: float = 4, host_permissions: bool = False) -> dict:
+        if not host_permissions and target not in cls.allowed_units():
             return {"ready": False, "reason": "not_allowed"}
         try:
-            cls.configured_unit(target, timeout=timeout)
+            cls.configured_unit(target, timeout=timeout, host_permissions=host_permissions)
         except HostError:
             return {"ready": False, "reason": "unit_unavailable"}
         if cls.sudo_blocked():
@@ -249,8 +248,8 @@ class SystemUnitDriver(ProcessDriver):
         return ["--quiet", "--no-pager", "--unit=" + target, "--lines=501", "--output=short-iso-precise"]
 
     @classmethod
-    def delegation_status(cls, target: str) -> dict:
-        management = cls.management_status(target)
+    def delegation_status(cls, target: str, *, host_permissions: bool = False) -> dict:
+        management = cls.management_status(target, host_permissions=host_permissions)
         if not management["ready"]:
             return management
         deadline = time.monotonic() + 5
@@ -332,8 +331,8 @@ class DockerDriver:
             if item["id"] not in registered and (not running_only or item['state'] == 'running'):
                 containers.append({key: item[key] for key in ("id", "name", "state")})
         containers.sort(key=lambda item: (item["name"].casefold(), item["id"]))
-        return {"containers": containers[:CONTAINER_LIST_LIMIT],
-                "truncated": result.truncated or len(containers) > CONTAINER_LIST_LIMIT}
+        return {"containers": containers if running_only else containers[:CONTAINER_LIST_LIMIT],
+                "truncated": result.truncated or (not running_only and len(containers) > CONTAINER_LIST_LIMIT)}
 
     def details(self, argv: list[str], env: dict[str, str], target: str) -> dict | None:
         result = capture([*argv, "container", "inspect", "--format", self.template, "--", target], env=env)

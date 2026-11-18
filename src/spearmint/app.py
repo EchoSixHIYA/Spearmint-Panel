@@ -682,7 +682,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             raise
 
     @app.post('/api/v1/peers/{node_id}/service-setup/{action}')
-    async def remote_service_setup(node_id: str, action: Literal['kinds', 'candidates', 'register', 'manage', 'running', 'take-over', 'create'],
+    async def remote_service_setup(node_id: str, action: Literal['kinds', 'candidates', 'register', 'manage', 'running', 'inspect', 'take-over', 'create'],
                                    body: dict = Depends(grove_body), actor: auth.Actor = Depends(require_admin_write)):
         if node_id in ('local', remote.local_id):
             return await remote.work(remote.service_setup.setup, service_setup.LocalAdmin(actor), action, body)
@@ -1470,7 +1470,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             service = get_service(db, service_id)
         if service is None or not service.existing_windows_service:
             raise HTTPException(404, "Unknown Windows service registration")
-        return WindowsServiceDriver(store).management_status(service.target)
+        return WindowsServiceDriver(store).management_status(service.target, host_permissions=service.host_permissions)
 
     @app.get("/api/v1/services/{service_id}/systemd-management")
     def systemd_management(service_id: str, check_delegation: bool = False, _actor: auth.Actor = Depends(require_admin)):
@@ -1479,8 +1479,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         if service is None or not service.existing_systemd_unit:
             raise HTTPException(404, "Unknown systemd service registration")
         if check_delegation:
-            return SystemUnitDriver.delegation_status(service.target)
-        return SystemUnitDriver.management_status(service.target)
+            return SystemUnitDriver.delegation_status(service.target, host_permissions=service.host_permissions)
+        return SystemUnitDriver.management_status(service.target, host_permissions=service.host_permissions)
 
     @app.post("/api/v1/services/{service_id}/actions", status_code=202)
     def service_action(service_id: str, body: ActionRequest, request: Request,

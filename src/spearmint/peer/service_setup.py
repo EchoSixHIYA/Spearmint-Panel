@@ -29,8 +29,15 @@ class Selection(BaseModel):
     kind: Kind
 
 
-class Registration(Selection):
+class RunningSelection(Selection):
+    offset: int = Field(default=0, ge=0, le=100_000)
+
+
+class Target(Selection):
     target: str = Field(min_length=1, max_length=256)
+
+
+class Registration(Target):
     name: str = Field(min_length=1, max_length=80)
 
 
@@ -106,9 +113,14 @@ class ServiceSetup:
             actor.require(db)
         try:
             if action == 'kinds' and body == {}:
-                return {'kinds': available_kinds(), 'workflow': 2}
-            if action in ('candidates', 'running'):
-                return self.candidates(Selection.model_validate(body).kind, running_only=action == 'running')
+                return {'kinds': available_kinds(), 'workflow': 2, 'checks': True}
+            if action == 'candidates':
+                return self.candidates(Selection.model_validate(body).kind)
+            if action == 'running':
+                selection = RunningSelection.model_validate(body)
+                return self.candidates(selection.kind, running_only=True, offset=selection.offset)
+            if action == 'inspect':
+                return self.inspect_target(Target.model_validate(body))
             if action in ('register', 'manage', 'take-over', 'create'):
                 with self.state.lock('maintenance.lock', exclusive_now=True):
                     if action == 'register':
@@ -130,7 +142,7 @@ class ServiceSetup:
             raise PeerError('CONFLICT', str(error)) from error
         raise PeerError('INVALID_REQUEST', 'Unknown service setup action')
 
-    def candidates(self, kind: Kind, *, running_only: bool = False) -> dict:
+    def candidates(self, kind: Kind, *, running_only: bool = False, offset: int = 0) -> dict:
         if kind not in available_kinds():
             raise PeerError('NOT_FOUND', 'This node does not support this kind of service')
         registered = list_services(self.state, 'docker' if kind == 'docker' else 'process')
@@ -138,19 +150,23 @@ class ServiceSetup:
             result = self.docker.available_containers({service.target for service in registered}, running_only=running_only)
             candidates = [{'target': item['id'], 'name': item['name']} for item in result['containers']]
         else:
-            targets = system_targets(self.state, kind)
             if running_only:
                 if kind == 'systemd':
                     targets = {unit: unit for unit in sorted(SystemUnitDriver.running_units())}
                 else:
                     targets = dict(sorted(WindowsServiceDriver(self.state).running_services().items()))
-            registered = [service for service in registered if is_kind(service, kind) and service.target in targets]
+            else:
+                targets = system_targets(self.state, kind)
+            registered = [service for service in registered if is_kind(service, kind)]
             occupied = {service.target for service in registered}
             candidates = [{'target': target, 'name': name} for target, name in targets.items() if target not in occupied]
             result = {'truncated': False}
         existing = [registration_view(service) for service in registered]
-        return {'candidates': candidates[:MAX_CANDIDATES], 'registered': existing,
-                'truncated': result['truncated'] or len(candidates) > MAX_CANDIDATES}
+        end = offset + MAX_CANDIDATES
+        return {'candidates': candidates[offset:end], 'registered': existing,
+                'truncated': result['truncated'] or len(candidates) > end,
+                **({'next_offset': end if len(candidates) > end else None,
+                    'previous_offset': max(0, offset - MAX_CANDIDATES) if offset else None} if running_only else {})}
 
     def register(self, actor: GroveServiceAdmin | LocalAdmin, body: Registration) -> dict:
         kind, target = body.kind, body.target
@@ -180,48 +196,63 @@ class ServiceSetup:
                 raise PeerError('CONFLICT', 'The workload is already registered. Refresh the list') from error
         return {'service': registration_view(service)}
 
-    def take_over(self, actor: GroveServiceAdmin | LocalAdmin, body: Takeover) -> dict:
+    def inspect_target(self, body: Target, log_path: str | None = None) -> dict:
         kind, target = body.kind, body.target
         if kind not in available_kinds():
             raise PeerError('NOT_FOUND', 'This node does not support this kind of service')
-        if body.log_path and kind != 'windows':
+        if log_path and kind != 'windows':
             raise PeerError('INVALID_REQUEST', 'Only Windows services use an application log file')
-        validate_endpoint(body.endpoint)
-        spec = {'endpoint': body.endpoint}
-        driver = 'process'
         if kind == 'systemd':
-            permissions = SystemUnitDriver.delegation_status(target)
+            unit = SystemUnitDriver.configured_unit(target, host_permissions=True)
+            if unit.get('ActiveState') != 'active' or int(unit.get('MainPID', 0)) <= 0:
+                raise PeerError('SERVICE_STOPPED', 'The service is no longer running')
+            permissions = SystemUnitDriver.delegation_status(target, host_permissions=True)
             if not (permissions.get('listed_logs') and all(permissions.get('listed_actions', {}).get(action) for action in ACTIONS)):
                 raise PeerError('HOST_PERMISSION', 'Require delegated start, stop, restart and journal access on the owning node')
-            unit = SystemUnitDriver.configured_unit(target)
-            running = unit.get('ActiveState') == 'active' and int(unit.get('MainPID', 0)) > 0
-            spec['runtime'] = 'systemd-system'
         elif kind == 'windows':
             windows = WindowsServiceDriver(self.state)
-            management = windows.management_status(target)
+            management = windows.management_status(target, host_permissions=True)
+            if management.get('status') and management['status'] != 'running':
+                raise PeerError('SERVICE_STOPPED', 'The service is no longer running')
             if not management['ready']:
-                raise PeerError('HOST_PERMISSION', 'Require permission to control the configured Windows service')
-            if not body.log_path:
-                raise PeerError('INVALID_REQUEST', 'Provide the Windows service application log file')
+                raise PeerError('HOST_PERMISSION', 'Require permission to control the Windows service')
+            if log_path is None:
+                log_path = windows.detect_log(target)
+            if log_path is None:
+                return {'ready': True, 'log_path': None}
             try:
-                application_log(body.log_path, 1)
+                application_log(log_path, 1)
             except HostError as error:
                 raise PeerError('SERVICE_LOG', str(error)) from error
-            running = windows.observe_target(target).status == 'running'
-            spec.update(runtime='windows-service', log_path=body.log_path)
+            return {'ready': True, 'log_path': log_path}
         else:
             if not CONTAINER_ID.fullmatch(target):
                 raise PeerError('INVALID_REQUEST', 'Select a container by its full ID')
-            driver = 'docker'
-            spec['stop_timeout'] = 8
-            candidate = Service('', self.local_id, body.name, driver, target, spec, True, 1)
+            candidate = Service('', self.local_id, '', 'docker', target, {'stop_timeout': 8}, True, 1)
+            if self.docker.inspect(candidate).status != 'running':
+                raise PeerError('SERVICE_STOPPED', 'The container is no longer running')
             try:
                 self.docker.logs(candidate, 1)
             except HostError as error:
                 raise PeerError('SERVICE_LOG', str(error)) from error
-            running = self.docker.inspect(candidate).status == 'running'
-        if not running:
-            raise PeerError('SERVICE_STOPPED', 'The service is no longer running')
+        return {'ready': True}
+
+    def take_over(self, actor: GroveServiceAdmin | LocalAdmin, body: Takeover) -> dict:
+        kind, target = body.kind, body.target
+        validate_endpoint(body.endpoint)
+        checked = self.inspect_target(body, body.log_path)
+        spec = {'endpoint': body.endpoint}
+        driver = 'process'
+        if kind == 'systemd':
+            spec.update(runtime='systemd-system', host_permissions=True)
+        elif kind == 'windows':
+            if not checked.get('log_path'):
+                raise PeerError('SERVICE_LOG', 'Provide the Windows service application log file')
+            target = target.lower()
+            spec.update(runtime='windows-service', host_permissions=True, log_path=checked['log_path'])
+        else:
+            driver = 'docker'
+            spec['stop_timeout'] = 8
         try:
             service = register(self.state, driver, body.name, target, spec, managed=True, **acting_as(actor))
         except TargetAlreadyRegistered as error:
@@ -258,12 +289,12 @@ class ServiceSetup:
                 raise PeerError('NOT_FOUND', 'Unknown existing workload')
         actions = list(ACTIONS)
         if service.existing_systemd_unit:
-            delegation = SystemUnitDriver.delegation_status(service.target)
+            delegation = SystemUnitDriver.delegation_status(service.target, host_permissions=service.host_permissions)
             actions = [action for action in actions if delegation.get('listed_actions', {}).get(action)]
             if not actions:
                 raise PeerError('HOST_PERMISSION', 'The owning node has no delegated systemd control for this service')
         elif service.managed and service.existing_windows_service:
-            WindowsServiceDriver(self.state).verify_management(service.target)
+            WindowsServiceDriver(self.state).verify_management(service.target, host_permissions=service.host_permissions)
         elif service.managed:
             self.docker.verify_management(service)
         service = change_mode(self.state, service.id, 'manage', docker_socket=self.docker_socket,

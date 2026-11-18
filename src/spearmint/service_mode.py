@@ -42,10 +42,10 @@ def change_mode(state: State, service_id: str, mode: Literal["observe", "manage"
     update = changing or (version is None and not foreground)
     if update:
         if service.existing_systemd_unit and managed:
-            SystemUnitDriver.configured_unit(service.target)
+            SystemUnitDriver.configured_unit(service.target, host_permissions=service.host_permissions)
             SystemUnitDriver.require_sudo()
         elif service.existing_windows_service and managed:
-            WindowsServiceDriver(state).verify_management(service.target)
+            WindowsServiceDriver(state).verify_management(service.target, host_permissions=service.host_permissions)
         elif service.driver == "docker" and managed:
             DockerDriver(docker_socket).verify_management(service)
         elif foreground:
