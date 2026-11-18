@@ -1,5 +1,6 @@
 """Coordinate a Grove update and exchange verified release archives over Mesh."""
 import asyncio
+from collections import Counter
 from contextlib import suppress
 from hashlib import sha256
 import logging
@@ -13,7 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import grove, update_release as release, update_worker as worker
+from . import grove, seed_packages, update_release as release, update_worker as worker
 from .peer.grove_endpoints import trusted_members
 from .peer.grove_service_admin import GroveServiceAdmin, admin_revision, require_member
 from .peer.outbound import account_admin
@@ -62,11 +63,14 @@ class UpdateCoordinator:
         secure_private(self.root, 0o700)
         self.group_path = self.root / 'group.json'
         self.local_path = self.root / 'local.json'
+        self.seed_release_path = self.root / 'seed-release.json'
         self.catalog: release.Release | None = None
         self.github_checked = 0.0
         self.github_catalog: release.Release | None = None
         self.check_task: asyncio.Task | None = None
         self.downloads: dict[str, tuple[asyncio.Task, float]] = {}
+        self.seed_downloads: dict[str, asyncio.Task] = {}
+        self.seed_readers: Counter[str] = Counter()
         self.node_task: asyncio.Task | None = None
         self.node_retry = 0.0
 
@@ -126,13 +130,12 @@ class UpdateCoordinator:
         self.check_task = asyncio.create_task(self.check_github())
         return self.check_task
 
-    async def find_release(self) -> dict:
+    async def discover_release(self) -> tuple[release.Release | None, str | None]:
         task = self.check_in_background()
         if task is not None:
             await asyncio.shield(task)
         if self.github_catalog is not None:
-            self.catalog = self.github_catalog
-            return {'release': self.catalog.model_dump(), 'source': 'github'}
+            return self.github_catalog, 'github'
         peers = [node for node in await self.remote.work(self.members) if node != self.local_id]
         for start in range(0, len(peers), 8):
             candidates = peers[start:start + 8]
@@ -144,14 +147,71 @@ class UpdateCoordinator:
                         with suppress(ValidationError):
                             available.append((node, release.Release.model_validate(response['release'])))
                 if available:
-                    node, self.catalog = max(available, key=lambda item: item[1].sequence)
-                    return {'release': self.catalog.model_dump(), 'source': node}
+                    node, catalog = max(available, key=lambda item: item[1].sequence)
+                    return catalog, node
                 if not any(response and response.get('pending') for response in responses):
                     break
                 if attempt < 3:
                     await asyncio.sleep(2)
-        self.catalog = None
-        return {'release': None}
+        return None, None
+
+    async def find_release(self) -> dict:
+        self.catalog, source = await self.discover_release()
+        return {'release': self.catalog.model_dump(), 'source': source} if self.catalog is not None else {'release': None}
+
+    def cached_seed_release(self) -> release.Release | None:
+        with suppress(OSError, ValueError, TypeError):
+            cached = worker.read_record(self.seed_release_path)
+            if cached is not None:
+                return release.Release.model_validate(cached)
+        return None
+
+    async def seed_package(self, target: str) -> seed_packages.SeedArchive:
+        if target not in release.TARGETS:
+            raise PeerError('SEED_SYSTEM', 'No native deployment package supports this platform')
+        catalog, _ = await self.discover_release()
+        cached = self.cached_seed_release()
+        if cached is not None and cached.database_schema == self.schema and (
+                catalog is None or catalog.database_schema != self.schema or cached.sequence > catalog.sequence):
+            catalog = cached
+        if catalog is None or catalog.database_schema != self.schema:
+            raise PeerError('SEED_PACKAGE_RELEASE', 'No compatible signed deployment release is available')
+        asset = catalog.packages[target]
+        digest = asset.sha256
+        task = self.seed_downloads.get(digest)
+        if task is None:
+            task = asyncio.create_task(self.download_for_seed(asset))
+            self.seed_downloads[digest] = task
+            task.add_done_callback(lambda done: self.finish_seed_download(digest, done))
+        self.seed_readers[digest] += 1
+        try:
+            if not await asyncio.shield(task):
+                raise PeerError('SEED_PACKAGE_FETCH', 'Could not fetch a verified deployment archive from GitHub or another Grove member')
+            package = await asyncio.to_thread(seed_packages.retain, self.state, self.archive(asset), catalog, target)
+            with suppress(OSError):
+                previous = self.cached_seed_release()
+                if previous is None or previous.sequence < catalog.sequence:
+                    worker.write_record(self.seed_release_path, catalog.model_dump())
+            return package
+        except OSError as error:
+            raise PeerError('SEED_PACKAGE_FETCH', 'Could not cache the verified deployment archive') from error
+        finally:
+            self.seed_readers[digest] -= 1
+            if not self.seed_readers[digest]:
+                del self.seed_readers[digest]
+
+    async def download_for_seed(self, asset: release.Asset) -> bool:
+        try:
+            async with asyncio.timeout(600):
+                return await self.acquire(asset, wait_for_sources=True)
+        except (PeerError, *IO_ERRORS):
+            return False
+
+    def finish_seed_download(self, digest: str, task: asyncio.Task) -> None:
+        if self.seed_downloads.get(digest) is task:
+            self.seed_downloads.pop(digest)
+        if not task.cancelled():
+            task.exception()
 
     async def ask(self, node: str, params: dict) -> dict | None:
         try:
@@ -241,7 +301,7 @@ class UpdateCoordinator:
         return self.root / (asset.sha256 + '.archive')
 
     def cleanup_cache(self) -> None:
-        protected = set(self.downloads)
+        protected = self.downloads.keys() | self.seed_downloads.keys() | self.seed_readers.keys()
         local = worker.read_record(self.local_path)
         if local and local['status'] not in TERMINAL:
             protected.update(asset['sha256'] for asset in local['release']['packages'].values())
@@ -293,7 +353,8 @@ class UpdateCoordinator:
             await self.remote.work(authorize, rpc=True)
             if action == 'catalog' and set(params) == {'action'}:
                 pending = self.check_in_background() is not None
-                return {'pending': pending, 'release': self.github_catalog.model_dump() if self.github_catalog else None}
+                catalog = self.github_catalog or self.cached_seed_release()
+                return {'pending': pending, 'release': catalog.model_dump() if catalog else None}
             if action == 'prepare' and set(params) == {'action', 'asset'}:
                 asset = release.Asset.model_validate(params['asset'])
                 if self.has_archive(asset):
@@ -334,7 +395,7 @@ class UpdateCoordinator:
         finally:
             intermediate.unlink(missing_ok=True)
 
-    async def acquire(self, asset: release.Asset) -> bool:
+    async def acquire(self, asset: release.Asset, *, wait_for_sources: bool = False) -> bool:
         if await asyncio.to_thread(release.correct_archive, self.archive(asset), asset):
             return True
         task = self.prepare(asset)
@@ -343,14 +404,21 @@ class UpdateCoordinator:
             if done and task.result():
                 return True
         peers = [node for node in await self.remote.work(self.members) if node != self.local_id]
-        for start in range(0, len(peers), 8):
-            candidates = peers[start:start + 8]
-            responses = await asyncio.gather(*(self.ask(node, {'action': 'prepare', 'asset': asset.model_dump()})
-                                               for node in candidates))
-            for node, response in zip(candidates, responses, strict=True):
-                if response and response.get('ready') and await self.transfer(node, asset):
-                    return True
-        return bool(task and task.done() and task.result())
+        while True:
+            pending = False
+            for start in range(0, len(peers), 8):
+                candidates = peers[start:start + 8]
+                responses = await asyncio.gather(*(self.ask(node, {'action': 'prepare', 'asset': asset.model_dump()})
+                                                   for node in candidates))
+                for node, response in zip(candidates, responses, strict=True):
+                    if response and response.get('ready') and await self.transfer(node, asset):
+                        return True
+                    pending = pending or bool(response and response.get('pending'))
+            if task is not None and task.done() and task.result():
+                return True
+            if not wait_for_sources or (not pending and (task is None or task.done())):
+                return False
+            await asyncio.sleep(2)
 
     async def run_node(self, job: dict) -> None:
         candidate = release.Release.model_validate(job['release'])
@@ -452,7 +520,7 @@ class UpdateCoordinator:
                     LOG.warning('Grove update check deferred: %s', type(error).__name__)
                 await asyncio.sleep(4)
         finally:
-            tasks = [task for task, _ in self.downloads.values()]
+            tasks = [task for task, _ in self.downloads.values()] + list(self.seed_downloads.values())
             tasks.extend(task for task in (self.node_task, self.check_task) if task is not None)
             for task in tasks:
                 task.cancel()

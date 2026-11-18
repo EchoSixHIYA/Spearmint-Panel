@@ -13,13 +13,15 @@ type SeedView = { status: string; fingerprint?: string; platform?: string; packa
 
 const progress: Record<string, string> = {
   'host-check': '正在核对 SSH 主机身份…', 'ssh-login': '正在测试 SSH 登录并读取系统信息…',
-  package: '正在获取并校验原生包…', reading: '正在读取当前目录…', installing: '发起节点正在传包、安装并启动服务…',
+  package: '发起节点正在自动获取并校验部署包…', reading: '正在读取当前目录…', installing: '发起节点正在传包、安装并启动服务…',
   admitting: '面板已启动，正在通过 Grove 多数成员完成入网…',
 }
 const problems: Record<string, string> = {
   SEED_SSH: '无法完成 SSH 连接。请核对地址、端口及发起节点的网络可达性。',
   SEED_SSH_AUTH: '目标未接受 SSH 登录。请核对账号与凭据。', SEED_HOST_KEY: 'SSH 主机指纹不一致，请核对目标身份。',
   SEED_SYSTEM: '目标系统、架构或 SSH 账号不满足原生安装条件。', SEED_PACKAGE: '发起节点暂无对应系统和架构的可校验部署包。',
+  SEED_PACKAGE_RELEASE: '暂时无法获取与目标系统和架构兼容的签名发布。',
+  SEED_PACKAGE_FETCH: '发起节点暂时无法从 GitHub 或 Grove 成员取得并校验部署包，请稍后重试。',
   SEED_DIRECTORY: '暂时无法读取该目录。', SEED_INSTALL: '安装器未确认服务启动。', SEED_QUORUM: '当前 Grove 多数成员未能完成入网。',
   SEED_SERVICE: 'SSH 账号无法启用 Linux 用户服务的开机运行。',
   SEED_GROVE_STATE: '面板正在等待 Grove 成员目录或签发状态同步。',

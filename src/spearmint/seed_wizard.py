@@ -76,8 +76,7 @@ class Job:
     login: SSHInput | None = field(default=None, repr=False)
     platform: str | None = None
     origin: str | None = None
-    package: Path | None = None
-    manifest: dict | None = None
+    package: seed_packages.SeedArchive | None = None
     current: str | None = None
     directory: dict | None = None
     paths: set[str] = field(default_factory=set)
@@ -96,7 +95,8 @@ class Job:
 
     def view(self):
         return {'status': self.status, 'fingerprint': self.connection.fingerprint if self.connection else None,
-                'platform': self.platform, 'package': self.manifest, 'path': self.current, 'directory': self.directory,
+                'platform': self.platform, 'package': self.package.metadata if self.package else None,
+                'path': self.current, 'directory': self.directory,
                 'install': self.install, 'state': self.state, 'origin': self.origin, 'node_id': self.node, 'error': self.error}
 
     def close(self):
@@ -104,6 +104,8 @@ class Job:
         if self.connection:
             self.connection.close()
             self.connection = None
+        if self.package:
+            self.package.close()
 
 
 class SeedWizard:
@@ -167,14 +169,14 @@ class SeedWizard:
                 if any(item.host == host and item.port == info.port and item.status in ('installing', 'admitting') for item in self.jobs.values()):
                     raise PeerError('BUSY', 'A job is already installing on this SSH host')
                 job = self.jobs[job_id] = Job(key, identity, host, info.port, login=info)
-                self.schedule(job, self.probe)
+                self.schedule(job, self.probe, loop)
             elif job is None:
                 raise PeerError('NOT_FOUND', 'The seed request has expired or the executor restarted')
             elif action == 'verify' and job.status == 'verify-host':
                 if params.get('fingerprint') != job.connection.fingerprint:
                     raise PeerError('SEED_HOST_KEY', 'The SSH host fingerprint has changed')
                 job.status = 'ssh-login'
-                self.schedule(job, self.login, params['fingerprint'])
+                self.schedule(job, self.login, params['fingerprint'], loop)
             elif action == 'directory' and job.status == 'choose':
                 path = params.get('path')
                 if not isinstance(path, str) or path not in job.paths:
@@ -231,27 +233,39 @@ class SeedWizard:
                     job.close()
         self.workers.submit(perform)
 
-    def probe(self, job):
+    def probe(self, job, loop):
         connection = seed_ssh.Connection(job.host, job.port)
         with self.lock:
             job.connection = connection
             fingerprint = job.login.fingerprint
             job.status = 'ssh-login' if fingerprint else 'verify-host'
         if fingerprint:
-            self.login(job, fingerprint)
+            self.login(job, fingerprint, loop)
 
-    def login(self, job, fingerprint):
+    def login(self, job, fingerprint, loop):
         login, job.login = job.login, None
         job.connection.login(fingerprint, login.username, login.secret, login.key)
         del login
         platform, home = job.connection.system()
         with self.lock:
             job.platform, job.status = platform, 'package'
-        path, manifest = seed_packages.acquire(self.state, platform)
+        future = asyncio.run_coroutine_threadsafe(self.remote.grove_updates.seed_package(platform), loop)
+        try:
+            package = future.result(timeout=700)
+        except TimeoutError as error:
+            future.cancel()
+            raise PeerError('SEED_PACKAGE_FETCH', 'Timed out acquiring the native deployment package') from error
+        except PeerError as error:
+            if error.code != 'SEED_PACKAGE_RELEASE':
+                raise
+            try:
+                package = seed_packages.acquire_local(self.state, platform)
+            except PeerError:
+                raise error from None
         host = f'[{job.host}]' if ':' in job.host else job.host
         start = '' if platform.startswith('windows') else home
         with self.lock:
-            job.package, job.manifest = path, manifest
+            job.package = package
             job.origin = grove.origin(f'https://{host}:8765')
             job.paths = {start, '' if platform.startswith('windows') else '/'}
             job.status = 'reading'
@@ -271,7 +285,7 @@ class SeedWizard:
         if path:
             try:
                 job.connection.writable(job.platform, path)
-                writable = data['free'] is None or data['free'] >= job.manifest['size'] * 4
+                writable = data['free'] is None or data['free'] >= job.package.metadata['size'] * 4
             except (SubprocessError, OSError, SSHException):
                 pass
         location = path_class(path) / 'Spearmint' if path else None
@@ -326,7 +340,7 @@ class SeedWizard:
         if job.platform.startswith('windows'):
             task = 'Spearmint-' + sha256(job.state.casefold().encode()).hexdigest()[:12]
             windows = {'InstallDirectory': job.install, 'StateDirectory': job.state, 'TaskLogonType': 'S4U', 'TaskName': task}
-            executable = path / 'releases' / job.manifest['commit'] / 'spearmint.exe'
+            executable = path / 'releases' / job.package.metadata['commit'] / 'spearmint.exe'
         else:
             try:
                 job.connection.answer(join(['sh', '-c', LINUX_SERVICE]))
@@ -336,8 +350,8 @@ class SeedWizard:
             executable = path / 'current' / 'spearmint'
         self.audit(job, job_id, 'accepted')
         with TemporaryDirectory(prefix='.seed-wizard-', dir=self.state.directory) as work:
-            receipt = seed_transport.install(job.package, Path(work), host=job.host, target=job.platform,
-                                             digest=job.manifest['sha256'], invitation_data=grove.encoded(realm),
+            receipt = seed_transport.install(job.package.path, Path(work), host=job.host, target=job.platform,
+                                             digest=job.package.metadata['sha256'], invitation_data=grove.encoded(realm),
                                              origin=job.origin, port=8765, windows=windows, quiet=True,
                                              runner=job.connection.run, linux_state=job.state if not windows else '')
         if not receipt or not receipt.node_id:
