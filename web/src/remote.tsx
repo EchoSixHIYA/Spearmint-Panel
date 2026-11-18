@@ -64,6 +64,16 @@ function RouteSelectionProgress({ diagnostics }: { diagnostics: RouteDiagnostics
   return <p>{diagnostics.selected_path ? '当前只有一条已验证的可用路径。' : '正在确认可用路径。'}</p>
 }
 
+const meshPathErrors: Record<string, string> = {
+  no_route: '暂时找不到可用路径', route_lost: 'Mesh 路径已断开', offline: '目标会话离线',
+  timeout: '响应超时', busy: '通道容量不足', unavailable: '目录暂时不可用',
+  denied: 'Mesh 节点拒绝请求', protocol: 'Mesh 协议响应无效', conflict: 'Mesh 状态已变更',
+}
+
+export function meshPathError(code?: string, fallback = '暂时无法使用') {
+  return meshPathErrors[code?.toLowerCase() ?? ''] ?? fallback
+}
+
 export function RouteDetails({ diagnostics, neighbor, names, showSelection = true }: {
   diagnostics: RouteDiagnostics; neighbor?: NeighborUse; names?: ReadonlyMap<string, string>; showSelection?: boolean
 }) {
@@ -71,9 +81,8 @@ export function RouteDetails({ diagnostics, neighbor, names, showSelection = tru
     initial: '首次连接', resumed: '恢复会话', idle: '按需连接', failure: '原路径失效，已接替', lower_cost: '新路径成本持续更低',
     route_lost: '路径已断开', offline: '会话已关闭', timeout: '通信超时', busy: '通道容量不足',
   }
-  const pathErrors: Record<string, string> = {
-    no_route: '暂时找不到可用路径', route_lost: '候选路径已断开', offline: '候选会话已关闭',
-    timeout: '响应超时', busy: '通道容量不足', unavailable: '目录暂时不可用',
+  const failureStages: Record<string, string> = {
+    prepare: '新路径准备失败', open: '中继建链失败', connect: '路径发现失败', trial: '最近一次备路异常',
   }
   const roles: Record<string, string> = { active: '当前使用', trial: '备路试用', direct: '直连备路', inbound: '对端建立的中继' }
   const neighborRoles = { fixed: '固定邻居', trial: '候补试连', automatic: '自动邻居', candidate: '待选邻居' }
@@ -92,7 +101,7 @@ export function RouteDetails({ diagnostics, neighbor, names, showSelection = tru
     <p>{reasons[diagnostics.switch_reason || ''] || '正在确认可用路径'} · 已换路 {diagnostics.switches} 次</p>
     {showSelection && (diagnostics.selected_path || diagnostics.opening_trial || diagnostics.preparing_switch) &&
       <RouteSelectionStatus diagnostics={diagnostics} />}
-    {pathError && <p>{errorStage === 'prepare' ? '新路径准备失败' : '最近一次备路异常'} · {pathErrors[pathError] ?? '暂时无法使用'}</p>}
+    {pathError && <p>{failureStages[errorStage] || '连接失败'} · {meshPathError(pathError)}</p>}
     {comparison && <div className="route-comparison">
       <strong>正在比较的路径</strong>
       <ol className="route-session-path" aria-label="正在比较的路径">{comparison.path.map((node) => <li key={node}>

@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { ApiError, api, READ_TIMEOUT_MS, timestamp } from './api'
 import { eventLabel, refreshConsole, useConsole, type AuditEntry, type NodeView, type PeerReputation, type Preferences } from './console-data'
-import { OwnerRegistrationLink, PeerDirectory, RouteDetails, RouteObservations, RouteSelectionStatus } from './remote'
+import { meshPathError, OwnerRegistrationLink, PeerDirectory, RouteDetails, RouteObservations, RouteSelectionStatus } from './remote'
 import { Badge, bytes, CopyValue, duration, EmptyState, GardenArt, HealthRing, Icon, Loading, Metric, Modal, NodeConnectionBadge, Notice, PageHeading, Panel, shortId, Tabs } from './ui'
 import { drivers, ServiceState } from './services'
 import { NetworkMap } from './network-map'
@@ -336,7 +336,7 @@ export function NodesPage({ nodeId, resources = false, onSave }: { nodeId?: stri
 
 function TopologyPaths({ node }: { node: NodeView }) {
   const { listedNodes, directoryCurrent, meshCurrent, local, onUnauthorized } = useConsole()
-  const [route, setRoute] = useState<{ path: string[]; business_session_selected?: boolean }>()
+  const [route, setRoute] = useState<{ path: string[]; business_session_selected?: boolean; connection_error?: { code: string; detail: string } }>()
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
   const diagnostics = node.status !== 'unknown' ? node.peer?.route_diagnostics : undefined
@@ -347,12 +347,17 @@ function TopologyPaths({ node }: { node: NodeView }) {
   async function probe() {
     setPending(true); setError(''); setRoute(undefined)
     try {
-      const value = await api<NonNullable<typeof route>>(`/peers/${node.id}/route`, { signal: AbortSignal.timeout(READ_TIMEOUT_MS) })
-      if (reportedPath(local.data?.node_id, { node_id: node.id, status: 'online', path: value.path })) setRoute(value)
-      else setError('无法确认探测结果的起点和目标。')
+      const value = await api<NonNullable<typeof route>>(`/peers/${node.id}/route?probe=true`, { signal: AbortSignal.timeout(READ_TIMEOUT_MS) })
+      if (reportedPath(local.data?.node_id, { node_id: node.id, status: 'online', path: value.path })) {
+        setRoute(value)
+        if (value.connection_error) setError(`未建立 Mesh 会话 · ${meshPathError(value.connection_error.code, value.connection_error.detail)}`)
+      } else setError('无法确认探测结果的起点和目标。')
     }
-    catch (failure) { if (failure instanceof ApiError && failure.status === 401) onUnauthorized(); else setError(failure instanceof Error ? failure.message : '未找到可用路径') }
-    finally { setPending(false) }
+    catch (failure) {
+      if (failure instanceof ApiError && failure.status === 401) onUnauthorized()
+      else setError(failure instanceof ApiError ? meshPathError(failure.code, failure.message) : '路径探测超时，请重试。')
+    }
+    finally { setPending(false); refreshConsole() }
   }
 
   return <>
@@ -376,7 +381,7 @@ function TopologyPaths({ node }: { node: NodeView }) {
       onClick={() => void probe()}><Icon name="route" size={16} />{pending ? '正在探测…' : '探测路径'}</button>}
     {!node.peer && <a className="text-link" href={`#/nodes/${node.id}`}>查看成员详情<Icon name="arrow-right" size={15} /></a>}
     {route && <section className="topology-path" aria-label="探测时的路径">
-      <h4>{route.business_session_selected === true ? '探测时的活动路径'
+      <h4>{route.business_session_selected === true ? '探测已验证的活动路径'
         : route.business_session_selected === false ? '探测发现的候选路径' : '探测时的路径'} · {pathLabel(route.path)}</h4>
       <RoutePath path={route.path} names={names} />
     </section>}

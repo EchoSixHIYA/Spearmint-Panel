@@ -49,7 +49,7 @@ from .policy import clean_expired, require_pair
 from .protocol import IN_FLIGHT, RELAY_FRAMES, REQUEST, PeerError, matches, parse_b64, wire_b64
 from .relay import Relay
 from .reputation import GROUPS as OPTIONAL_RPC, Reputation
-from .routing import Routing
+from .routing import Route, Routing
 from .session import Session
 from .adaptive import IDLE, AdaptiveRoutes, Binding, SwitchDeferred
 
@@ -1450,6 +1450,25 @@ class PeerServices:
         if pair.legacy or not pair.routed:
             raise PeerError("OFFLINE", "Peer is offline")
         return await self.relay.connect(pair)
+
+    async def verify_route(self, node: str) -> Route:
+        try:
+            async with asyncio.timeout(22):
+                session = await self.connect(self.pair_for(node))
+                if await self.request(session, 'peer.ping', {}) != {'status': 'ok'}:
+                    raise PeerError('PROTOCOL', 'Invalid Mesh probe response')
+        except TimeoutError as error:
+            raise PeerError('TIMEOUT', 'Mesh probe reached its total deadline') from error
+
+        if self.connection_for(node) is session and not session.closed:
+            binding = self.adaptive.active.get(node) if self.adaptive else None
+            if binding is not None and binding.session is session:
+                return binding.route
+            if (neighbor := self.manager.neighbors.get(node)) is not None and neighbor.session is session:
+                return Route((self.local_id, node), neighbor)
+            if self.relay.session_for(node) is session and (route := self.relay.route_for(node)) is not None:
+                return route
+        raise PeerError('ROUTE_LOST', 'The verified Mesh session changed during the probe')
 
     def invalidate(self, node: str, session: Session | None, code: str = 'ROUTE_LOST') -> None:
         if self.adaptive:

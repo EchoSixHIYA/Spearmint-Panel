@@ -368,12 +368,14 @@ class AdaptiveRoutes:
         reason = 'resumed' if self.reasons.get(node) == 'idle' else 'failure' if node in self.selectors else 'initial'
         visited = set()
         last_error = None
+        phase = failure_phase = 'connect'
         deadline = asyncio.get_running_loop().time() + 15
         try:
             async with asyncio.timeout_at(deadline):
                 async for binding in self.recovery_bindings(node):
                     if not self.live(binding):
                         continue
+                    phase = 'prepare'
                     try:
                         await self.promote(pair, binding, reason)
                         return binding.session
@@ -384,22 +386,25 @@ class AdaptiveRoutes:
                         self.failed[self.failure_key(binding)] = self.clock() + COOLDOWN
                         if binding.circuit and not binding.incoming:
                             self.relay.drop(binding.circuit, 'CLOSED')
-                        last_error = error
+                        failure_phase, last_error = phase, error
                 for stage in range(3):
                     if stage:
+                        phase = 'connect'
                         try:
                             await self.routing.find(node, refresh=True)
                             discovery = self.routing.attempts.get(node)
                             if stage == 2 and discovery is not None:
                                 await asyncio.shield(discovery)
                         except PeerError as error:
-                            last_error = error
+                            if last_error is None:
+                                failure_phase, last_error = phase, error
                     routes = [route for route in self.routing.routes(node)
                               if self.route_key(route) not in visited and self.failed.get(self.route_key(route), 0) <= self.clock()]
                     routes.sort(key=lambda route: (route.ticket is not None, self.trial_order(route)))
                     for route in routes:
                         visited.add(self.route_key(route))
                         binding = None
+                        phase = 'open'
                         try:
                             if route.ticket is None:
                                 binding = self.direct(node)
@@ -413,16 +418,18 @@ class AdaptiveRoutes:
                                 budget = min(10, max(.1, deadline - asyncio.get_running_loop().time()))
                                 circuit = await asyncio.wait_for(self.relay.open_route(pair, route, role='opening'), budget)
                                 binding = Binding(route, circuit.session, circuit)
+                            phase = 'prepare'
                             await self.promote(pair, binding, reason)
                             return binding.session
                         except TimeoutError:
-                            last_error = PeerError('TIMEOUT', 'Timed out opening a candidate Mesh path')
+                            failure_phase = phase
+                            last_error = PeerError('TIMEOUT', 'Timed out establishing a candidate Mesh session')
                         except PeerError as error:
                             if error.code not in PATH_ERRORS:
                                 if binding and binding.circuit:
                                     self.relay.drop(binding.circuit, 'CLOSED')
                                 raise
-                            last_error = error
+                            failure_phase, last_error = phase, error
                         except BaseException:
                             if binding and binding.circuit:
                                 self.relay.drop(binding.circuit, 'CLOSED')
@@ -436,9 +443,14 @@ class AdaptiveRoutes:
                         else:
                             self.failed[self.route_key(route)] = self.clock() + COOLDOWN
                             self.routing.invalidate(route)
+                phase = failure_phase
                 raise last_error or PeerError('NO_ROUTE', 'No candidate Mesh path is available')
         except TimeoutError as error:
+            self.path_errors[node] = phase + '_timeout'
             raise PeerError('TIMEOUT', 'Mesh connection reached its total deadline') from error
+        except PeerError as error:
+            self.path_errors[node] = phase + '_' + error.code.lower()
+            raise
 
     async def open_trial(self, pair: Pair, route: Route) -> None:
         node = pair.node_id

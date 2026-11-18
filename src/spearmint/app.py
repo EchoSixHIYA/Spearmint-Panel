@@ -1030,13 +1030,26 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                                                          actor=actor.operation_actor, source=actor.address)}
 
     @app.get("/api/v1/peers/{node_id}/route")
-    async def peer_route(node_id: str, _actor: auth.Actor = Depends(require_admin)):
-        binding = remote.adaptive.active.get(node_id) if remote.adaptive else None
-        selected = bool(binding and remote.adaptive.live(binding))
-        route = binding.route if selected else await remote.routing.find(node_id)
+    async def peer_route(node_id: str, probe: bool = False, _actor: auth.Actor = Depends(require_admin)):
+        failure = {}
+        if probe:
+            candidate = remote.routing.lookup(node_id)
+            try:
+                route = await remote.verify_route(node_id)
+                selected = True
+            except PeerError as error:
+                route = remote.routing.lookup(node_id) or candidate
+                if route is None:
+                    raise
+                selected = False
+                failure = {'connection_error': {'code': error.code, 'detail': str(error)}}
+        else:
+            binding = remote.adaptive.active.get(node_id) if remote.adaptive else None
+            selected = bool(binding and remote.adaptive.live(binding))
+            route = binding.route if selected else await remote.routing.find(node_id)
         return {**route.public_data(), 'business_session_selected': selected,
                 'diagnostics': remote.adaptive.status(node_id) if remote.adaptive else None,
-                "discovery": remote.routing.status()}
+                'discovery': remote.routing.status(), **failure}
 
     @app.get("/api/v1/peers/{node_id}/services")
     async def remote_services(node_id: str, refresh: bool = False, actor: auth.Actor = Depends(require_admin)):
