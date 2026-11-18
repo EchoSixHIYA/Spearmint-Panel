@@ -65,7 +65,7 @@ def export_service(state: State, service_id: str, *, directory: bool, status: bo
         service = get_service(db, service_id)
         if service is None:
             raise StateError("Unknown service ID")
-        if logs and service.existing_windows_service:
+        if logs and not service.logs_available:
             raise StateError("Windows service application logs are not available through SCM")
         event = set_export(db, pair.node_id, service_id, directory=directory, status=status, logs=logs)
         publish(db, service_id)

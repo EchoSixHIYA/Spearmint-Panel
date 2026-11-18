@@ -190,6 +190,17 @@ class SystemUnitDriver(ProcessDriver):
                 if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\.service", name)}
 
     @classmethod
+    def running_units(cls) -> set[str]:
+        allowed = cls.allowed_units()
+        if not allowed:
+            return set()
+        result = capture([*cls.ctl, 'list-units', '--type=service', '--state=running', '--plain', '--no-legend', '--full'],
+                         limit=128 * 1024)
+        if result.code or result.truncated:
+            raise HostError('Cannot read the running systemd services')
+        return {line.split()[0] for line in result.stdout.decode('utf-8', 'replace').splitlines() if line.strip()} & allowed
+
+    @classmethod
     def configured_unit(cls, target: str, *, timeout: float = 4) -> dict[str, str]:
         if target not in cls.allowed_units():
             raise HostError("The system service is outside this node's configured unit list")
@@ -298,10 +309,11 @@ class DockerDriver:
     def __init__(self, socket: Path) -> None:
         self.socket = socket
 
-    def available_containers(self, registered: set[str]) -> dict:
+    def available_containers(self, registered: set[str], *, running_only: bool = False) -> dict:
         argv, env = rootless_command(self.socket)
         template = '{"id":{{json .ID}},"name":{{json .Names}},"state":{{json .State}}}'
-        result = capture([*argv, "container", "ls", "--all", "--no-trunc", "--format", template],
+        selection = ['--filter', 'status=running'] if running_only else ['--all']
+        result = capture([*argv, "container", "ls", *selection, "--no-trunc", "--format", template],
                          env=env, limit=64 * 1024)
         if result.code and not result.truncated:
             raise HostError("Cannot list containers on the configured Docker engine")
@@ -317,7 +329,7 @@ class DockerDriver:
                     raise ValueError
             except (KeyError, TypeError, ValueError) as error:
                 raise HostError("Docker returned invalid container list metadata") from error
-            if item["id"] not in registered:
+            if item["id"] not in registered and (not running_only or item['state'] == 'running'):
                 containers.append({key: item[key] for key in ("id", "name", "state")})
         containers.sort(key=lambda item: (item["name"].casefold(), item["id"]))
         return {"containers": containers[:CONTAINER_LIST_LIMIT],

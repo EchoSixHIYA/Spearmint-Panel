@@ -3,11 +3,12 @@
 from contextlib import contextmanager
 import json
 import os
+from pathlib import Path
 import time
 
 from .catalog import Service, register
-from .drivers import LogSnapshot, Observation
-from .host import HostError, HostTimeout
+from .drivers import LOG_LIMIT, LogSnapshot, Observation, format_log_snapshot
+from .host import Capture, HostError, HostTimeout
 from .onboarding import write_private
 from .platforms import WINDOWS, process_start, read_file
 from .state import State, StateError, private_path
@@ -67,6 +68,30 @@ class WindowsServiceDriver:
             raise HostError("The Windows service allowlist is too large")
         write_private(self.state.directory / ALLOWLIST, encoded)
 
+    def running_services(self) -> dict[str, str]:
+        allowed = self.allowed_services()
+        if not allowed:
+            return {}
+        import pywintypes
+        import win32service as scm
+
+        try:
+            with self.manager(scm, scm.SC_MANAGER_ENUMERATE_SERVICE) as manager:
+                services = scm.EnumServicesStatus(manager, scm.SERVICE_WIN32, scm.SERVICE_ACTIVE)
+        except pywintypes.error as error:
+            raise ServiceManagerError(error.winerror) from error
+        return {name.lower(): display for name, display, status in services
+                if name.lower() in allowed and status[1] == scm.SERVICE_RUNNING}
+
+    @staticmethod
+    @contextmanager
+    def manager(scm, access):
+        manager = scm.OpenSCManager(None, None, access)
+        try:
+            yield manager
+        finally:
+            manager.Close()
+
     @contextmanager
     def open_service(self, name: str, *, start: bool = False, stop: bool = False):
         if name.lower() not in self.allowed_services():
@@ -80,15 +105,12 @@ class WindowsServiceDriver:
         if stop:
             access |= scm.SERVICE_STOP
         try:
-            manager = scm.OpenSCManager(None, None, scm.SC_MANAGER_CONNECT)
-            try:
+            with self.manager(scm, scm.SC_MANAGER_CONNECT) as manager:
                 handle = scm.OpenService(manager, name, access)
                 try:
                     yield scm, handle
                 finally:
                     handle.Close()
-            finally:
-                manager.Close()
         except pywintypes.error as error:
             raise ServiceManagerError(error.winerror) from error
 
@@ -190,4 +212,25 @@ class WindowsServiceDriver:
                 self.wait(scm, handle, "running", "starting")
 
     def logs(self, service: Service, tail: int) -> LogSnapshot:
-        raise HostError("Windows service application logs are not available through SCM")
+        path = service.spec.get('log_path')
+        if not path:
+            raise HostError('No application log file has been configured for this Windows service')
+        self.observe_target(service.target)
+        return application_log(path, tail)
+
+
+def application_log(path: str, tail: int) -> LogSnapshot:
+    try:
+        file = Path(path)
+        if not file.is_absolute() or len(file.drive) != 2 or ':' in file.name:
+            raise ValueError
+        file = file.resolve(strict=True)
+        if len(file.drive) != 2 or not file.is_file():
+            raise ValueError
+        with file.open('rb') as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - LOG_LIMIT))
+            data = stream.read(LOG_LIMIT)
+    except (OSError, ValueError) as error:
+        raise HostError('The Windows application log must be a readable local file') from error
+    return format_log_snapshot(Capture(0, data, b'', size > LOG_LIMIT), tail, 'Cannot read the Windows application log')

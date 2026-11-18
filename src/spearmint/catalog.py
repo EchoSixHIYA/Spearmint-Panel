@@ -56,6 +56,10 @@ class Service:
     def existing_system_service(self) -> bool:
         return self.existing_systemd_unit or self.existing_windows_service
 
+    @property
+    def logs_available(self) -> bool:
+        return not self.existing_windows_service or bool(self.spec.get('log_path'))
+
 
 def get_service(db: sqlite3.Connection, service_id: str) -> Service | None:
     row = db.execute("SELECT * FROM service WHERE id=?", (service_id,)).fetchone()
@@ -84,13 +88,15 @@ def validate_endpoint(endpoint: str | None) -> None:
 
 
 def register(state: State, driver: str, name: str, target: str, spec: dict, *,
-             managed: bool, actor: str = "admin", source: str = "local") -> Service:
+             managed: bool, actor: str = "admin", source: str = "local", authorize=None) -> Service:
     name = service_name(name)
     node_id = state.verify()
     service_id = uuid4().hex
     if driver == "process" and spec.get("runtime") not in {"systemd-system", "windows-service"}:
         target = f"spearmint-workload-{service_id}.service"
     with state.connect(write=True) as db:
+        if authorize is not None:
+            authorize(db)
         existing = db.execute("SELECT id, spec FROM service WHERE driver=? AND target=?", (driver, target)).fetchone()
         if existing is not None and json.loads(existing["spec"]).get("runtime") == spec.get("runtime"):
             raise TargetAlreadyRegistered(existing["id"])

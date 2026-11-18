@@ -9,7 +9,7 @@ import { NodeQuarantine } from './node-quarantine'
 import { PolicyEvidence } from './policy-evidence'
 import { useGroveDirectorySync } from './grove-auth'
 import { publicPanelLabel } from './grove-directory'
-import { localRegistrationRoute, nodeResourcesHref, seedProgressHref } from './grove-navigation'
+import { groveServiceRegistrationHref, nodeResourcesHref, seedProgressHref } from './grove-navigation'
 import { SeedConnectionProgress } from './seed-deployment'
 import { SeedWizard } from './seed-wizard'
 import { connectionGroup, connectionLabels, countConnections, meshEndpointLabel, nodeConnectionGroup, pathLabel, reachabilityLabel, reportedPath, type ConnectionGroup } from './connection-status'
@@ -117,7 +117,7 @@ export function OverviewPage() {
         <Panel title="本机服务" action={<a className="panel-link" href="#/services/local">服务管理<Icon name="arrow-up-right" size={14} /></a>}>
           {services.error ? <Notice tone="amber">暂时无法读取本机服务。{services.error}</Notice>
             : !services.data ? <Loading label="正在读取本机服务…" />
-            : !services.data.length ? <EmptyState title="本机还没有登记服务" action={<a href={localRegistrationRoute} className="btn btn-primary">
+            : !services.data.length ? <EmptyState title="本机还没有登记服务" action={<a href={groveServiceRegistrationHref()} className="btn btn-primary">
               登记第一个服务<Icon name="arrow-right" size={15} /></a>} />
             : services.data.slice(0, 4).map((service) => <a key={service.id} className="service-mini" href={`#/services/${service.id}`}>
               <span className="service-symbol"><Icon name={service.driver === 'docker' ? 'package' : 'terminal'} size={18} /></span>

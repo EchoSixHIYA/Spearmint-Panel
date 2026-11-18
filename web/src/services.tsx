@@ -25,7 +25,7 @@ export function LocalOperationBadge({ operation }: { operation: Operation }) {
 export type Observation = { status: string; message: string | null; health: string | null; pid: number; checked_at: number | null; last_seen_at: number | null; last_status: string | null; stale: boolean }
 export type Service = {
   id: string; node_id?: string; name: string; driver: 'process' | 'docker'; runtime?: 'systemd-system' | 'windows-service'
-  registered_target?: string; actions: Action[]; endpoint: string | null; observation: Observation; version?: number; approval_required?: boolean
+  registered_target?: string; actions: Action[]; endpoint: string | null; observation: Observation; version?: number; approval_required?: boolean; logs_available?: boolean
 }
 type Detail = Service & { operations: Operation[]; can_unregister?: boolean; can_edit_details?: boolean }
 type Mode = 'observe' | 'manage'
@@ -387,7 +387,7 @@ export function Services({ session, onUnauthorized, section, segments }: {
     && matchesServiceStatus(filter, observed(item)))
   return <>
     <PageHeading eyebrow="OPERATIONS / SERVICES" title="服务管理" description="管理已经登记的程序与容器，让每一次操作都有清楚的状态和结果。">
-      <a className="btn btn-primary" href={scope === 'local' ? serviceRegistrationRoute() : groveServiceRegistrationHref()}>
+      <a className="btn btn-primary" href={groveServiceRegistrationHref()}>
         <Icon name="plus" size={16} />{scope === 'local' ? '登记本机服务' : '登记服务'}
       </a>
     </PageHeading>
@@ -404,7 +404,7 @@ export function Services({ session, onUnauthorized, section, segments }: {
         <ServiceStatusFilters value={filter} onChange={setFilter} />
       </div>
       {services.error && <Notice tone="amber" title="服务状态暂时无法更新">{services.error}</Notice>}
-      {!data ? services.error ? <EmptyState icon="wifi-off" title="等待恢复服务连接">连接恢复后会自动重新读取服务列表。</EmptyState> : <Loading label="正在读取服务…" /> : !data.length ? <EmptyState icon="layers" title="让你的第一个服务在这里生长" action={<a className="btn btn-secondary" href={serviceRegistrationRoute()}><Icon name="plus" size={16} />查看登记方式</a>}>登记一个前台程序或已有容器，即可查看状态、读取日志并控制启停。</EmptyState>
+      {!data ? services.error ? <EmptyState icon="wifi-off" title="等待恢复服务连接">连接恢复后会自动重新读取服务列表。</EmptyState> : <Loading label="正在读取服务…" /> : !data.length ? <EmptyState icon="layers" title="本机还没有登记服务" action={<a className="btn btn-secondary" href={groveServiceRegistrationHref()}><Icon name="plus" size={16} />登记服务</a>}>接管运行中的系统服务或容器，或者为指定程序创建托管服务。</EmptyState>
         : !visible?.length ? <EmptyState icon="search" title="没有匹配的服务">换个关键词，或选择其他状态。</EmptyState>
           : <div className="table-wrap"><table className="data-table service-table"><thead><tr><th>服务</th><th>所属节点</th><th>驱动</th><th>状态</th><th>最近观测</th><th><span className="sr-only">服务入口</span></th></tr></thead>
             <tbody>{visible.map((item) => <tr key={item.id}><td><a className="service-name-cell" href={`#/services/${item.id}`}><span className="service-cell-icon"><Icon name={item.driver === 'docker' ? 'package' : 'terminal'} size={20} /></span><span><strong>{item.name}</strong><small title={item.registered_target}>{item.registered_target
@@ -483,7 +483,7 @@ function ServiceDetail({ id, tab, sourceNodeId, session, onUnauthorized }: {
   const operations = detail?.operations ?? []
   const recent = accepted && !operations.some((operation) => operation.id === accepted.id) ? [accepted, ...operations] : operations
   const busy = submitting || recent.some((operation) => ['queued', 'running'].includes(operation.status))
-  const hasLogs = !!current && current.runtime !== 'windows-service'
+  const hasLogs = !!current && (current.logs_available ?? current.runtime !== 'windows-service')
   const status = current?.observation.status
   const blocked = !detail || !current || current.approval_required || busy || !!pollError || current.observation.stale
     || (refreshActionsAfter !== undefined && (requestedAt ?? 0) < refreshActionsAfter)

@@ -466,7 +466,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         status = {
             "NOT_FOUND": 404, "DEPLOYMENT_UNSUPPORTED": 404, "INVALID_REQUEST": 400, "BUSY": 429, "PROTOCOL": 502, "TIMEOUT": 504,
             "DENIED": 403, "CONFLICT": 409, "DIRECTORY_CHANGED": 409, "EXPIRED": 410, "SESSION_REQUIRED": 401,
-            "HOST_PERMISSION": 409,
+            "HOST_PERMISSION": 409, "SERVICE_STOPPED": 409, "SERVICE_LOG": 409, "SERVICE_COMMAND": 400,
             "REAUTHENTICATION_REQUIRED": 403, "APPROVAL_VERSION_REQUIRED": 409, "POLICY_CONFLICT": 409,
             "GROVE_INVITATION_EXPIRED": 410,
         }.get(error.code, 503)
@@ -682,8 +682,10 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             raise
 
     @app.post('/api/v1/peers/{node_id}/service-setup/{action}')
-    async def remote_service_setup(node_id: str, action: Literal['kinds', 'candidates', 'register', 'manage'],
+    async def remote_service_setup(node_id: str, action: Literal['kinds', 'candidates', 'register', 'manage', 'running', 'take-over', 'create'],
                                    body: dict = Depends(grove_body), actor: auth.Actor = Depends(require_admin_write)):
+        if node_id in ('local', remote.local_id):
+            return await remote.work(remote.service_setup.setup, service_setup.LocalAdmin(actor), action, body)
         pair = remote.pair_for(node_id)
         identity = await remote.work(grove_service_admin.source_identity, store, remote.local_id, pair, actor)
         return await remote.call(node_id, service_setup.METHOD, {'identity': identity, 'action': action, 'body': body},

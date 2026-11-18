@@ -98,7 +98,7 @@ def service_access(state: State, service_id: str) -> dict:
             })
         return {"service_version": service.version, "sampled_at": sampled_at,
                 "independent_approval": protected, "available_actions": service.actions,
-                "logs_available": not service.existing_windows_service, "peers": peers}
+                "logs_available": service.logs_available, "peers": peers}
 
 
 def change_service_access(state: State, service_id: str, node_id: str, actor: auth.Actor, *, revision: str,
@@ -126,7 +126,7 @@ def change_service_access(state: State, service_id: str, node_id: str, actor: au
                 raise PeerError("CONFLICT", "Enable this peer before expanding its access") from error
         if actions and protected:
             raise PeerError("APPROVAL_VERSION_REQUIRED", "This service requires an independent M003 approval")
-        if permissions["logs"] and service.existing_windows_service:
+        if permissions["logs"] and not service.logs_available:
             raise PeerError("INVALID_REQUEST", "Windows service application logs are not available through SCM")
         if bool(actions) != (hours is not None) or (actions and not permissions["directory"]):
             raise PeerError("INVALID_REQUEST", "Account actions need directory access and a grant duration")

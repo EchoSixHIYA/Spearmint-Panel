@@ -1730,7 +1730,7 @@ class PeerServices:
                 actor.require(db)
                 services = [Service.from_row(row) for row in db.execute('SELECT * FROM service ORDER BY name,id')]
             return {'services': [{'id': service.id, 'name': service.name, 'driver': service.driver,
-                                  'version': service.version, 'status': True, 'logs': not service.existing_windows_service,
+                                  'version': service.version, 'status': True, 'logs': service.logs_available,
                                   'actions': service.actions,
                                   'observation': observation(self.controller.describe(service)['observation'],
                                                              OBSERVATION_TTL, include_health=True)}
@@ -1756,7 +1756,7 @@ class PeerServices:
             return observation(self.controller.describe(service)['observation'], OBSERVATION_TTL, include_health=True)
         tail = body.get('tail')
         if action == 'logs' and body.keys() == {'service_id', 'tail'} and type(tail) is int and 1 <= tail <= 500:
-            if service.existing_windows_service:
+            if not service.logs_available:
                 raise PeerError('NOT_FOUND', 'Windows service logs are unavailable')
             try:
                 snapshot = self.controller.logs(service, tail)

@@ -1,17 +1,21 @@
-"""Register and configure existing workloads through the owning Grove node."""
+"""Register workloads through the owning Grove node."""
 
+from dataclasses import dataclass
 import sys
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ..catalog import ACTIONS, RegistrationError, TargetAlreadyRegistered, get_service, list_services
-from ..drivers import ContainerNotFound, DockerDriver, SystemUnitDriver
+from .. import auth
+from ..catalog import ACTIONS, RegistrationError, Service, TargetAlreadyRegistered, get_service, list_services, process_spec, register, service_name, validate_endpoint
+from ..drivers import CONTAINER_ID, ContainerNotFound, DockerDriver, SystemUnitDriver
 from ..host import HostError
 from ..platforms import WINDOWS
 from ..service_mode import ModeChangeError, change_mode
-from ..windows_services import WindowsServiceDriver
+from ..state import StateError
+from ..windows_services import WindowsServiceDriver, application_log
 from .grove_service_admin import GroveServiceAdmin
+from .outbound import account_admin
 from .protocol import PeerError
 
 
@@ -36,6 +40,29 @@ class Management(BaseModel):
     version: int = Field(ge=1, le=2**53 - 1)
 
 
+class Takeover(Registration):
+    endpoint: str | None = Field(default=None, max_length=180)
+    log_path: str | None = Field(default=None, max_length=420)
+
+
+class NewService(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    name: str = Field(min_length=1, max_length=80)
+    executable: str = Field(min_length=1, max_length=1024)
+    arguments: list[str] = Field(default_factory=list, max_length=128)
+    cwd: str = Field(min_length=1, max_length=1024)
+    stop_timeout: int = Field(default=8, ge=1, le=30)
+    endpoint: str | None = Field(default=None, max_length=180)
+
+
+@dataclass(frozen=True)
+class LocalAdmin:
+    actor: auth.Actor
+
+    def require(self, db):
+        account_admin(db, self.actor)
+
+
 def available_kinds() -> list[Kind]:
     if WINDOWS:
         return ['windows']
@@ -53,6 +80,11 @@ def registration_view(service) -> dict:
             'managed': service.managed}
 
 
+def acting_as(actor: GroveServiceAdmin | LocalAdmin) -> dict:
+    identity = actor.actor if isinstance(actor, LocalAdmin) else actor
+    return {'actor': identity.operation_actor, 'source': identity.address, 'authorize': actor.require}
+
+
 class ServiceSetup:
     method = METHOD
 
@@ -66,19 +98,25 @@ class ServiceSetup:
         if params.keys() != {'identity', 'action', 'body'}:
             raise PeerError('INVALID_REQUEST', 'Invalid service setup request')
         identity, action, body = params['identity'], params['action'], params['body']
-        actor = GroveServiceAdmin.from_wire(self.local_id, pair, identity)
+        return self.setup(GroveServiceAdmin.from_wire(self.local_id, pair, identity), action, body)
+
+    def setup(self, actor: GroveServiceAdmin | LocalAdmin, action: str, body: dict) -> dict:
         with self.state.connect() as db:
             db.execute('BEGIN')
             actor.require(db)
         try:
             if action == 'kinds' and body == {}:
-                return {'kinds': available_kinds()}
-            if action == 'candidates':
-                return self.candidates(Selection.model_validate(body).kind)
-            if action in ('register', 'manage'):
+                return {'kinds': available_kinds(), 'workflow': 2}
+            if action in ('candidates', 'running'):
+                return self.candidates(Selection.model_validate(body).kind, running_only=action == 'running')
+            if action in ('register', 'manage', 'take-over', 'create'):
                 with self.state.lock('maintenance.lock', exclusive_now=True):
                     if action == 'register':
                         return self.register(actor, Registration.model_validate(body))
+                    if action == 'take-over':
+                        return self.take_over(actor, Takeover.model_validate(body))
+                    if action == 'create':
+                        return self.create(actor, NewService.model_validate(body))
                     return self.manage(actor, Management.model_validate(body))
         except ValidationError as error:
             raise PeerError('INVALID_REQUEST', 'Invalid service setup parameters') from error
@@ -88,17 +126,24 @@ class ServiceSetup:
             raise PeerError('CONFLICT', 'The owning node could not verify the workload or its management permissions') from error
         except RegistrationError as error:
             raise PeerError('CONFLICT', str(error)) from error
+        except StateError as error:
+            raise PeerError('CONFLICT', str(error)) from error
         raise PeerError('INVALID_REQUEST', 'Unknown service setup action')
 
-    def candidates(self, kind: Kind) -> dict:
+    def candidates(self, kind: Kind, *, running_only: bool = False) -> dict:
         if kind not in available_kinds():
             raise PeerError('NOT_FOUND', 'This node does not support this kind of service')
         registered = list_services(self.state, 'docker' if kind == 'docker' else 'process')
         if kind == 'docker':
-            result = self.docker.available_containers({service.target for service in registered})
+            result = self.docker.available_containers({service.target for service in registered}, running_only=running_only)
             candidates = [{'target': item['id'], 'name': item['name']} for item in result['containers']]
         else:
             targets = system_targets(self.state, kind)
+            if running_only:
+                if kind == 'systemd':
+                    targets = {unit: unit for unit in sorted(SystemUnitDriver.running_units())}
+                else:
+                    targets = dict(sorted(WindowsServiceDriver(self.state).running_services().items()))
             registered = [service for service in registered if is_kind(service, kind) and service.target in targets]
             occupied = {service.target for service in registered}
             candidates = [{'target': target, 'name': name} for target, name in targets.items() if target not in occupied]
@@ -107,14 +152,15 @@ class ServiceSetup:
         return {'candidates': candidates[:MAX_CANDIDATES], 'registered': existing,
                 'truncated': result['truncated'] or len(candidates) > MAX_CANDIDATES}
 
-    def register(self, actor: GroveServiceAdmin, body: Registration) -> dict:
+    def register(self, actor: GroveServiceAdmin | LocalAdmin, body: Registration) -> dict:
         kind, target = body.kind, body.target
         if kind not in available_kinds():
             raise PeerError('NOT_FOUND', 'This node does not support this kind of service')
         with self.state.connect() as db:
             db.execute('BEGIN')
             actor.require(db)
-        audit_as = {'actor': actor.operation_actor, 'source': actor.address}
+        audit_as = acting_as(actor)
+        audit_as.pop('authorize')
         try:
             if kind == 'docker':
                 if len(target) != 64 or any(char not in '0123456789abcdef' for char in target):
@@ -134,7 +180,76 @@ class ServiceSetup:
                 raise PeerError('CONFLICT', 'The workload is already registered. Refresh the list') from error
         return {'service': registration_view(service)}
 
-    def manage(self, actor: GroveServiceAdmin, body: Management) -> dict:
+    def take_over(self, actor: GroveServiceAdmin | LocalAdmin, body: Takeover) -> dict:
+        kind, target = body.kind, body.target
+        if kind not in available_kinds():
+            raise PeerError('NOT_FOUND', 'This node does not support this kind of service')
+        if body.log_path and kind != 'windows':
+            raise PeerError('INVALID_REQUEST', 'Only Windows services use an application log file')
+        validate_endpoint(body.endpoint)
+        spec = {'endpoint': body.endpoint}
+        driver = 'process'
+        if kind == 'systemd':
+            permissions = SystemUnitDriver.delegation_status(target)
+            if not (permissions.get('listed_logs') and all(permissions.get('listed_actions', {}).get(action) for action in ACTIONS)):
+                raise PeerError('HOST_PERMISSION', 'Require delegated start, stop, restart and journal access on the owning node')
+            unit = SystemUnitDriver.configured_unit(target)
+            running = unit.get('ActiveState') == 'active' and int(unit.get('MainPID', 0)) > 0
+            spec['runtime'] = 'systemd-system'
+        elif kind == 'windows':
+            windows = WindowsServiceDriver(self.state)
+            management = windows.management_status(target)
+            if not management['ready']:
+                raise PeerError('HOST_PERMISSION', 'Require permission to control the configured Windows service')
+            if not body.log_path:
+                raise PeerError('INVALID_REQUEST', 'Provide the Windows service application log file')
+            try:
+                application_log(body.log_path, 1)
+            except HostError as error:
+                raise PeerError('SERVICE_LOG', str(error)) from error
+            running = windows.observe_target(target).status == 'running'
+            spec.update(runtime='windows-service', log_path=body.log_path)
+        else:
+            if not CONTAINER_ID.fullmatch(target):
+                raise PeerError('INVALID_REQUEST', 'Select a container by its full ID')
+            driver = 'docker'
+            spec['stop_timeout'] = 8
+            candidate = Service('', self.local_id, body.name, driver, target, spec, True, 1)
+            try:
+                self.docker.logs(candidate, 1)
+            except HostError as error:
+                raise PeerError('SERVICE_LOG', str(error)) from error
+            running = self.docker.inspect(candidate).status == 'running'
+        if not running:
+            raise PeerError('SERVICE_STOPPED', 'The service is no longer running')
+        try:
+            service = register(self.state, driver, body.name, target, spec, managed=True, **acting_as(actor))
+        except TargetAlreadyRegistered as error:
+            with self.state.connect() as db:
+                actor.require(db)
+                service = get_service(db, error.service_id)
+            if service is None or not service.managed or service.name != service_name(body.name) or service.spec != spec:
+                raise
+        return {'service': registration_view(service)}
+
+    def create(self, actor: GroveServiceAdmin | LocalAdmin, body: NewService) -> dict:
+        try:
+            spec = process_spec([body.executable, *body.arguments], body.cwd, body.stop_timeout, body.endpoint)
+        except StateError as error:
+            raise PeerError('SERVICE_COMMAND', str(error)) from error
+        name = service_name(body.name)
+        with self.state.connect() as db:
+            actor.require(db)
+            row = db.execute('SELECT * FROM service WHERE name=?', (name,)).fetchone()
+        if row is not None:
+            service = Service.from_row(row)
+            if service.driver != 'process' or not service.managed or service.spec != spec:
+                raise RegistrationError('Service name is already registered')
+        else:
+            service = register(self.state, 'process', name, '', spec, managed=True, **acting_as(actor))
+        return {'service': registration_view(service)}
+
+    def manage(self, actor: GroveServiceAdmin | LocalAdmin, body: Management) -> dict:
         with self.state.connect() as db:
             db.execute('BEGIN')
             actor.require(db)
@@ -152,7 +267,7 @@ class ServiceSetup:
         elif service.managed:
             self.docker.verify_management(service)
         service = change_mode(self.state, service.id, 'manage', docker_socket=self.docker_socket,
-                              actor=actor, version=body.version)
+                              actor=actor.actor if isinstance(actor, LocalAdmin) else actor, version=body.version)
         return {'service': registration_view(service)}
 
 

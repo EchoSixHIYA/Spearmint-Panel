@@ -263,6 +263,7 @@ class Controller:
         return {
             "id": service.id, "node_id": service.node_id, "name": service.name, "driver": service.driver,
             "actions": service.actions, "version": service.version, "endpoint": service.spec.get("endpoint"),
+            "logs_available": service.logs_available,
             **({"runtime": service.spec["runtime"]} if service.existing_system_service else {}),
             **({"registered_target": service.target} if service.existing_system_service or service.driver == "docker" else {}),
             "observation": {
