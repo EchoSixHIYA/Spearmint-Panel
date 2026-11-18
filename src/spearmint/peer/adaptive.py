@@ -208,31 +208,33 @@ class AdaptiveRoutes:
     def make_space(self, node: str, *, business: bool) -> None:
         if not self.relay_capacity_full():
             return
+        # A primary needs a slot even when background discovery initiated it.
+        candidates = [(other, binding) for other, binding in self.trials.items()
+                      if other != node and (business or self.connection_for(other) is not None)]
         if business:
-            candidates = [(other, binding) for other, binding in self.trials.items() if other != node]
             candidates += [(other, binding) for other, binding in self.active.items()
                            if other != node and other not in self.pending_targets
                            and self.clock() - self.used.get(other, 0) > 20]
-            candidates.sort(key=lambda item: (item[0] in self.active, self.used.get(item[0], 0), item[0]))
-            for other, binding in candidates:
-                keeper = self.keepers.get(other)
-                probe_only = (self.trials.get(other) is binding and keeper is not None
-                              and not keeper.done() and not keeper.cancelling()
-                              and bool(binding.session.pending) and all(
-                                  isinstance(item, tuple) and item and item[0] in {'peer.ping', 'catalog.sync', CATALOG_HEALTH_METHOD}
-                                  for item in binding.session.pending.values()))
-                if binding.circuit and not binding.incoming and (not binding.session.pending or probe_only):
-                    if probe_only:
-                        # This owned read has no operation/receipt to preserve.
-                        # Release its slot before displacing any business session.
-                        self.cancel_keeper(other)
-                        self.trials.pop(other)
-                        self.relay.drop(binding.circuit, 'CLOSED')
-                    else:
-                        self.retire(other, binding)
-                    self.counts['capacity_reclaimed'] += 1
-                    if not self.relay_capacity_full():
-                        return
+        candidates.sort(key=lambda item: (self.active.get(item[0]) is item[1], item[0] in self.pending_targets,
+                                         self.used.get(item[0], 0), item[0]))
+        for other, binding in candidates:
+            keeper = self.keepers.get(other)
+            probe_only = (self.trials.get(other) is binding and keeper is not None
+                          and not keeper.done() and not keeper.cancelling()
+                          and bool(binding.session.pending) and all(
+                              isinstance(item, tuple) and item and item[0] in {'peer.ping', 'catalog.sync', CATALOG_HEALTH_METHOD}
+                              for item in binding.session.pending.values()))
+            if binding.circuit and not binding.incoming and (not binding.session.pending or probe_only):
+                if probe_only:
+                    # The owned standby read can be cancelled without dropping an operation or its receipt.
+                    self.cancel_keeper(other)
+                    self.trials.pop(other)
+                    self.relay.drop(binding.circuit, 'CLOSED')
+                else:
+                    self.retire(other, binding)
+                self.counts['capacity_reclaimed'] += 1
+                if not self.relay_capacity_full():
+                    return
         raise PeerError('BUSY', 'Mesh channel budget is occupied by active requests')
 
     async def promote(self, pair: Pair, binding: Binding, reason: str, *, check: Callable[[], None] | None = None) -> None:
@@ -416,7 +418,8 @@ class AdaptiveRoutes:
                                 # existing ready/TLS budget. All attempts still share
                                 # the same fifteen-second outer deadline.
                                 budget = min(10, max(.1, deadline - asyncio.get_running_loop().time()))
-                                circuit = await asyncio.wait_for(self.relay.open_route(pair, route, role='opening'), budget)
+                                async with asyncio.timeout(budget):
+                                    circuit = await self.relay.open_route(pair, route, role='opening')
                                 binding = Binding(route, circuit.session, circuit)
                             phase = 'prepare'
                             await self.promote(pair, binding, reason)
@@ -457,7 +460,8 @@ class AdaptiveRoutes:
         self.last_trial[node] = self.trialled_paths[self.route_key(route)] = self.clock()
         binding = None
         try:
-            self.make_space(node, business=False)
+            if self.relay_capacity_full():
+                raise PeerError('BUSY', 'Mesh channel budget is occupied by active requests')
             circuit = await self.relay.open_route(pair, route, role='trial')
             binding = Binding(route, circuit.session, circuit)
             recovering = (node in self.attempts or node in self.pending_targets
