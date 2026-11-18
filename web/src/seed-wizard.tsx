@@ -116,6 +116,8 @@ export function SeedWizard({ follow }: { follow: (origin: string, nodeId?: strin
 
   const directory = view?.directory
   const browsing = view?.status === 'choose' || view?.status === 'reading' && !!directory
+  const windowsPolicyBlocked = view?.platform === 'windows-amd64' && view.error === 'SEED_WINDOWS_PACKAGE'
+    && view.failure_detail === 'version:exit=0x000011C7'
   const sourceName = listedNodes.find(node => node.id === source)?.name
   function browse(path: string) { if (job) void send(job, 'directory', { path }) }
 
@@ -164,6 +166,10 @@ export function SeedWizard({ follow }: { follow: (origin: string, nodeId?: strin
         <p>{problems[view.error] || '播种操作尚未完成。'}{view.node_id && ` 节点 ID · ${view.node_id}`}</p>
         <small>{[view.failed_stage && stages[view.failed_stage], view.error, view.failure_detail].filter(Boolean).join(' · ')}</small>
       </div>}
+      {windowsPolicyBlocked && <Notice tone="amber" title="检查目标机的智能应用控制">
+        若目标机的代码完整性日志确认是智能应用控制拦截，请在目标机打开「Windows 安全中心 → 应用和浏览器控制 → 智能应用控制设置」，选择「关」。
+        关闭会对整台设备生效。完成后点击「开始新播种」。
+      </Notice>}
       {error && <p className="error" role="alert">{error}</p>}
       {view?.status === 'joined' && <Notice title="Spearmint 已启动并加入 Grove">
         {view.origin && <button className="btn btn-secondary" onClick={() => follow(view.origin!, view.node_id)}>查看 Mesh 接入状态</button>}
