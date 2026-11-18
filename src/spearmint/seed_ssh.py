@@ -22,6 +22,13 @@ from .peer.protocol import PeerError
 
 FINGERPRINT = re.compile(r'SHA256:[A-Za-z0-9+/]{43}')
 WINDOWS_PROBE = 'echo %PROCESSOR_ARCHITECTURE% %PROCESSOR_ARCHITEW6432%'
+WINDOWS_RECEIPT = b'SPEARMINT_WINDOWS_SEED='
+
+
+class WindowsSeedFailure(PeerError):
+    def __init__(self, code: str, detail: str):
+        super().__init__(code, 'The native Windows helper did not return a receipt')
+        self.detail = detail
 
 
 def hostname(value: str) -> str:
@@ -191,7 +198,7 @@ class Connection:
         except (CalledProcessError, TimeoutExpired) as error:
             raise PeerError('SEED_WINDOWS_STAGING', 'Windows could not unpack the verified package') from error
         if self.windows_request('version', {}).get('native_seed') != 1:
-            raise PeerError('SEED_WINDOWS_PACKAGE', 'The Windows package does not contain the native seed helper')
+            raise WindowsSeedFailure('SEED_WINDOWS_PACKAGE', 'version:unexpected_protocol_version')
 
     def windows_cwd(self) -> PureWindowsPath:
         return windows_path(self.answer(cmd('cd', unicode=True)).decode('utf-16-le').strip())
@@ -200,20 +207,29 @@ class Connection:
         if action not in {'version', 'directory', 'install', 'enroll'} or self.windows_stage is None:
             raise ValueError('Invalid Windows seed helper request')
         name, _ = self.windows_stage
+        code = {'version': 'SEED_WINDOWS_PACKAGE', 'directory': 'SEED_DIRECTORY'}.get(action, 'SEED_INSTALL')
+        command = cmd(rf'cd {name} && spearmint\spearmint.exe --internal-windows-seed {action}')
         try:
-            command = cmd(rf'cd {name} && spearmint\spearmint.exe --internal-windows-seed {action}')
-            result = json.loads(self.answer(command, json.dumps(data).encode(), timeout=timeout))
-            if not isinstance(result, dict) or len(result) != 1:
+            payload = json.dumps(data).encode() + b'\n'
+            raw = self.answer(command, payload, timeout=timeout)
+        except CalledProcessError as error:
+            raise WindowsSeedFailure(code, f'{action}:exit=0x{error.returncode & 0xffffffff:08X}') from error
+        except TimeoutExpired as error:
+            raise WindowsSeedFailure(code, f'{action}:timeout') from error
+        try:
+            receipts = [line.removeprefix(WINDOWS_RECEIPT) for line in raw.splitlines() if line.startswith(WINDOWS_RECEIPT)]
+            result = json.loads(receipts[0] if len(receipts) == 1 else raw)
+            if not isinstance(result, dict) or result.keys() not in ({'ok'}, {'error'}):
                 raise ValueError('Invalid Windows seed receipt')
-        except (ValueError, CalledProcessError) as error:
-            code = {'version': 'SEED_WINDOWS_PACKAGE', 'directory': 'SEED_DIRECTORY'}.get(action, 'SEED_INSTALL')
-            raise PeerError(code,
-                            'The native Windows helper did not return a receipt') from error
+        except ValueError as error:
+            raise WindowsSeedFailure(code, f'{action}:invalid_receipt') from error
         if 'error' in result:
             code = result['error']
             if not isinstance(code, str) or not re.fullmatch(r'[A-Z_0-9]{1,48}', code):
                 code = 'SEED_INSTALL'
             raise PeerError(code, 'The target rejected the native Windows operation')
+        if not isinstance(result['ok'], dict):
+            raise WindowsSeedFailure(code, f'{action}:invalid_receipt')
         return result['ok']
 
     def directory(self, target: str, path: str):

@@ -83,6 +83,8 @@ class Job:
     state: str | None = None
     node: str | None = None
     error: str | None = None
+    failed_stage: str | None = None
+    failure_detail: str | None = None
 
     @property
     def actor(self) -> str:
@@ -96,7 +98,8 @@ class Job:
         return {'status': self.status, 'fingerprint': self.connection.fingerprint if self.connection else None,
                 'platform': self.platform, 'package': self.package.metadata if self.package else None,
                 'path': self.current, 'directory': self.directory,
-                'install': self.install, 'state': self.state, 'origin': self.origin, 'node_id': self.node, 'error': self.error}
+                'install': self.install, 'state': self.state, 'origin': self.origin, 'node_id': self.node,
+                'error': self.error, 'failed_stage': self.failed_stage, 'failure_detail': self.failure_detail}
 
     def close(self):
         self.login = None
@@ -222,6 +225,8 @@ class SeedWizard:
                 function(job, *args)
             except (PeerError, OSError, SSHException, SubprocessError, ValueError, StateError, TypeError, KeyError) as error:
                 with self.lock:
+                    job.failed_stage = job.status
+                    job.failure_detail = error.detail if isinstance(error, seed_ssh.WindowsSeedFailure) else None
                     if job.status == 'reading' and job.directory is not None:
                         job.status, job.error = 'choose', 'SEED_DIRECTORY'
                         return
@@ -288,11 +293,15 @@ class SeedWizard:
                  and item['path'].isprintable() and path_class(item['path']).is_absolute()]
         writable = False
         if path:
-            try:
-                job.connection.writable(job.platform, path)
-                writable = data['free'] is None or data['free'] >= job.package.metadata['size'] * 4
-            except (SubprocessError, OSError, SSHException):
-                pass
+            if job.platform == 'windows-amd64':
+                writable = data.get('writable') is True
+            else:
+                try:
+                    job.connection.writable(job.platform, path)
+                    writable = True
+                except (SubprocessError, OSError, SSHException):
+                    pass
+            writable = writable and (data['free'] is None or data['free'] >= job.package.metadata['size'] * 4)
         location = path_class(path) / 'Spearmint' if path else None
         with self.lock:
             job.current = path

@@ -11,7 +11,7 @@ from shutil import copytree, disk_usage
 import stat
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import monotonic, sleep
 from urllib.parse import urlsplit
 
@@ -62,7 +62,12 @@ def directory(value: str) -> dict:
             items.append({'name': entry.name, 'path': entry.path})
             if len(items) > 100:
                 break
-    return {'items': items[:100], 'free': disk_usage(path).free, 'truncated': len(items) > 100}
+    writable = False
+    with suppress(OSError):
+        with NamedTemporaryFile(prefix='.spearmint-check-', dir=path):
+            pass
+        writable = True
+    return {'items': items[:100], 'free': disk_usage(path).free, 'truncated': len(items) > 100, 'writable': writable}
 
 
 @contextmanager
@@ -255,20 +260,21 @@ def command(bundle: Path, args: list[str]) -> int:
     # Keep stdout as one ASCII JSON line independent of the SSH console code page.
     action = args[0]
     try:
-        data = sys.stdin.buffer.read(seed_admission.LIMIT + 16385)
-        if len(data) > seed_admission.LIMIT + 16384:
-            raise ValueError('Windows seed request is too large')
-        options = json.loads(data)
         if action == 'version':
             result = {'native_seed': 1}
-        elif action == 'directory':
-            result = directory(options['path'])
-        elif action == 'install':
-            result = install(bundle, options)
-        elif action == 'enroll':
-            result = enroll(options)
         else:
-            raise ValueError('Unknown Windows seed operation')
+            data = sys.stdin.buffer.readline(seed_admission.LIMIT + 16385)
+            if len(data) > seed_admission.LIMIT + 16384:
+                raise ValueError('Windows seed request is too large')
+            options = json.loads(data)
+            if action == 'directory':
+                result = directory(options['path'])
+            elif action == 'install':
+                result = install(bundle, options)
+            elif action == 'enroll':
+                result = enroll(options)
+            else:
+                raise ValueError('Unknown Windows seed operation')
         result = {'ok': result}
     except PeerError as error:
         result = {'error': error.code}
@@ -276,5 +282,5 @@ def command(bundle: Path, args: list[str]) -> int:
         result = {'error': {'directory': 'SEED_DIRECTORY', 'install': 'SEED_INSTALL'}.get(action, 'SEED_WINDOWS_PACKAGE')}
         # Do not send paths, package contents or invitation data through the job UI.
         print(type(error).__name__, file=sys.stderr)
-    print(json.dumps(result, ensure_ascii=True), flush=True)
+    print('SPEARMINT_WINDOWS_SEED=' + json.dumps(result, ensure_ascii=True), flush=True)
     return 0

@@ -9,12 +9,17 @@ type Job = { source: string; id: string }
 type Directory = { parent: string | null; writable: boolean; free: number | null; truncated: boolean;
   items: Array<{ name: string; path: string }> }
 type SeedView = { status: string; fingerprint?: string; platform?: string; package?: { name: string; size: number; commit: string };
-  path?: string; directory?: Directory; install?: string; state?: string; origin?: string; node_id?: string; error?: string }
+  path?: string; directory?: Directory; install?: string; state?: string; origin?: string; node_id?: string; error?: string
+  failed_stage?: string; failure_detail?: string }
 
 const progress: Record<string, string> = {
   'host-check': '正在核对 SSH 主机身份…', 'ssh-login': '正在测试 SSH 登录并读取系统信息…',
   package: '发起节点正在自动获取并校验部署包…', reading: '正在读取当前目录…', installing: '发起节点正在传包、安装并启动服务…',
   admitting: '面板已启动，正在通过 Grove 多数成员完成入网…',
+}
+const stages: Record<string, string> = {
+  'host-check': '主机身份核对', 'ssh-login': 'SSH 登录与系统识别', package: '验包与部署入口探测',
+  reading: '目录读取', installing: '安装与启动', admitting: 'Grove 入网',
 }
 const problems: Record<string, string> = {
   SEED_SSH: '无法完成 SSH 连接。请核对地址、端口及发起节点的网络可达性。',
@@ -155,7 +160,10 @@ export function SeedWizard({ follow }: { follow: (origin: string, nodeId?: strin
         <div><button className="btn btn-primary" type="button" disabled={busy || view.status !== 'choose' || !directory.writable}
           onClick={() => void send(job, 'install', { path: view.path })}>安装到此位置</button></div>
       </div>}
-      {view?.error && <p className="error" role="alert">{problems[view.error] || '播种操作尚未完成。'}{view.node_id && ` 节点 ID · ${view.node_id}`}</p>}
+      {view?.error && <div className="error" role="alert">
+        <p>{problems[view.error] || '播种操作尚未完成。'}{view.node_id && ` 节点 ID · ${view.node_id}`}</p>
+        <small>{[view.failed_stage && stages[view.failed_stage], view.error, view.failure_detail].filter(Boolean).join(' · ')}</small>
+      </div>}
       {error && <p className="error" role="alert">{error}</p>}
       {view?.status === 'joined' && <Notice title="Spearmint 已启动并加入 Grove">
         {view.origin && <button className="btn btn-secondary" onClick={() => follow(view.origin!, view.node_id)}>查看 Mesh 接入状态</button>}
