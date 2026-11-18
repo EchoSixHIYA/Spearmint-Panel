@@ -56,6 +56,7 @@ requested_port=
 requested_bind=
 requested_cert=
 requested_key=
+delegated_systemd=false
 case "${1:-}" in
     --stage-only) mode=stage; shift ;;
     --upgrade) mode=upgrade; shift ;;
@@ -115,6 +116,13 @@ absolute_path() {
     esac
 }
 while [ "$#" -ge 1 ]; do
+    if [ "$1" = --allow-delegated-systemd ]; then
+        { [ "$mode" = install ] || [ "$mode" = stage ]; } && [ "$delegated_systemd" = false ] ||
+            fail "Provide --allow-delegated-systemd once during installation."
+        delegated_systemd=true
+        shift
+        continue
+    fi
     if [ "$1" = --keep-stopped ]; then
         [ "$mode" = upgrade ] && [ "$keep_stopped" = false ] ||
             fail "Provide --keep-stopped once, with --upgrade or --check-upgrade."
@@ -195,7 +203,7 @@ while [ "$#" -ge 1 ]; do
     esac
     shift 2
 done
-[ "$#" -eq 1 ] || fail "Usage: sh deployment/install-linux.sh [MODE] [--keep-stopped] [--port PORT] [--bind IPv4 --tls-cert PEM --tls-key PEM] [--verify-backup DIR | --join-grove FILE] [--expected-backup-sha256 SHA256] [--expected-package-sha256 SHA256] [--expected-node ID] [--expected-commit COMMIT] [--expected-current-commit COMMIT] [--grove-ca FILE] https://panel.example.net"
+[ "$#" -eq 1 ] || fail "Usage: sh deployment/install-linux.sh [MODE] [--keep-stopped] [--allow-delegated-systemd] [--port PORT] [--bind IPv4 --tls-cert PEM --tls-key PEM] [--verify-backup DIR | --join-grove FILE] [--expected-backup-sha256 SHA256] [--expected-package-sha256 SHA256] [--expected-node ID] [--expected-commit COMMIT] [--expected-current-commit COMMIT] [--grove-ca FILE] https://panel.example.net"
 [ -z "$expected_backup_sha256" ] || [ -n "$backup" ] || fail "--expected-backup-sha256 requires --verify-backup."
 if [ -n "$requested_cert" ] || [ -n "$requested_key" ]; then
     [ -n "$requested_cert" ] && [ -n "$requested_key" ] || fail "Supply both TLS paths."
@@ -251,6 +259,7 @@ current="$base/current"
 config="$HOME/.config/spearmint/environment"
 unit="$HOME/.config/systemd/user/spearmint.service"
 port_config="$unit.d/10-spearmint-port.conf"
+delegation_config="$unit.d/20-spearmint-delegated-systemd.conf"
 service=spearmint.service
 case "$releases/" in
     "$bundle/"*) fail "Extract the package outside the installation directory before installing." ;;
@@ -301,6 +310,15 @@ elif [ ! -e "$current" ] && [ ! -L "$current" ] && [ "$mode" != upgrade ] && [ "
     panel_bind=${requested_bind:-127.0.0.1}
     panel_cert=$requested_cert
     panel_key=$requested_key
+fi
+delegation_override() {
+    printf '[Service]\nNoNewPrivileges=no\n'
+}
+if [ -e "$delegation_config" ] || [ -L "$delegation_config" ]; then
+    [ -f "$delegation_config" ] && [ ! -L "$delegation_config" ] &&
+        delegation_override | cmp -s -- - "$delegation_config" ||
+        fail "Invalid delegated systemd configuration: $delegation_config"
+    delegated_systemd=true
 fi
 [ -z "$requested_port" ] || [ "$requested_port" = "$panel_port" ] ||
     fail "This installation uses panel port $panel_port. Use the same port."
@@ -397,9 +415,17 @@ else
 fi
 
 panel_request() {
-    # Connect locally and preserve the public origin used for Host and TLS verification.
-    curl -q --noproxy '*' -fsS --max-time 1 --connect-to "::$panel_bind:$panel_port" \
-        -H "Host: ${origin#https://}" "$@"
+    path=$1
+    shift
+    if response=$(curl -q --noproxy '*' -fsS --max-time 1 --connect-to "::$panel_bind:$panel_port" \
+        -H "Host: ${origin#https://}" "$@" "$health_url$path"); then
+        printf '%s\n' "$response"
+        return
+    fi
+    # Reverse proxies may terminate public TLS and use a private localhost certificate upstream.
+    [ -n "$panel_cert" ] &&
+        curl -q --noproxy '*' -fsS --max-time 1 --cacert "$panel_cert" --connect-to "::$panel_bind:$panel_port" \
+            -H "Host: ${origin#https://}" "$@" "https://localhost:$panel_port$path"
 }
 
 wait_ready() {
@@ -414,9 +440,9 @@ wait_ready() {
                 if [ "$(readlink -f -- "/proc/$pid/exe")" = "$expected" ] &&
                     ss -H -ltnp "sport = :$panel_port" |
                         awk -v address="$panel_bind:$panel_port" -v owner="pid=$pid," '$4 == address && index($0, owner) { found=1 } END { exit !found }' &&
-                    panel_request "$health_url/healthz" 2>/dev/null | grep -qx '{"status":"ok"}' &&
-                    { [ "$check_web" = false ] || panel_request \
-                        -o /dev/null -w '%{http_code} %{content_type}\n' "$health_url/" 2>/dev/null |
+                    panel_request /healthz 2>/dev/null | grep -qx '{"status":"ok"}' &&
+                    { [ "$check_web" = false ] || panel_request / \
+                        -o /dev/null -w '%{http_code} %{content_type}\n' 2>/dev/null |
                         grep -Eq '^200 text/html([[:space:]]*;|$)'; } &&
                     [ "$(systemctl --user show "$service" -p MainPID --value)" = "$pid" ] &&
                     systemctl --user is-active --quiet "$service"; then
@@ -441,8 +467,12 @@ require_free_panel_port() {
 
 check_loaded_unit() {
     systemctl --user daemon-reload
+    expected_drop_ins=$expected_drop_in
+    if [ "$delegated_systemd" = true ]; then
+        expected_drop_ins=${expected_drop_ins:+"$expected_drop_ins "}$delegation_config
+    fi
     [ "$(systemctl --user show "$service" -p FragmentPath --value)" = "$unit" ] &&
-        [ "$(systemctl --user show "$service" -p DropInPaths --value)" = "$expected_drop_in" ] ||
+        [ "$(systemctl --user show "$service" -p DropInPaths --value)" = "$expected_drop_ins" ] ||
         fail "The loaded user unit uses a custom definition. Follow its deployment instructions."
 }
 
@@ -668,6 +698,14 @@ if { [ "$panel_port" != 8765 ] || [ -n "$panel_cert" ]; } && [ -z "$expected_dro
     mv -T -- "$temporary" "$port_config"
     trap - EXIT INT TERM
     expected_drop_in=$port_config
+fi
+if [ "$delegated_systemd" = true ] && [ ! -e "$delegation_config" ]; then
+    mkdir -p -- "${delegation_config%/*}"
+    temporary=$(mktemp "$delegation_config.XXXXXXXX")
+    trap 'rm -f -- "$temporary"' EXIT
+    delegation_override > "$temporary"
+    mv -T -- "$temporary" "$delegation_config"
+    trap - EXIT
 fi
 if [ ! -L "$current" ] && [ ! -e "$current" ]; then
     ln -s -- "releases/$commit" "$current"

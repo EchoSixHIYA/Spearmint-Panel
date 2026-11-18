@@ -56,6 +56,7 @@
 准备浏览器可访问的 HTTPS 地址，将本地反向代理指向 `127.0.0.1:8765`。仓库提供 [Nginx 配置示例](deploy/nginx.conf.example)，包内也包含该示例。将命令中的域名替换为实际面板地址。
 
 - **Linux** 使用运行面板的普通用户执行 `sh deployment/install-linux.sh https://panel.example.net`。安装器需要 systemd 用户会话、`curl` 和 `ss`。如需退出登录后仍运行，可由系统管理员为该用户启用 linger。
+  若面板账号已有通过 `sudoers` 委派的系统服务管理权限，可在接管安装时加入 `--allow-delegated-systemd`，并在安装环境中保留原有的 `SPEARMINT_SYSTEMD_UNITS` 配置。后续升级会沿用该设置。
 - **Windows** 使用 PowerShell 执行 `.\deployment\install-windows.ps1 -Origin 'https://panel.example.net'`。安装器创建计划任务，首次配置入口由安装器打印。
 
 ### 添加节点并登记服务

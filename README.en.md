@@ -56,6 +56,7 @@ Keep the archive and its matching `.sha256` file in the same directory. On Linux
 Set up a browser-accessible HTTPS address and a local reverse proxy to `127.0.0.1:8765`. The [Nginx example](deploy/nginx.conf.example) is also bundled with the package. Replace the example hostname with your panel's actual address.
 
 - **Linux** Run `sh deployment/install-linux.sh https://panel.example.net` as the panel's regular user. The installer needs a systemd user session, `curl`, and `ss`. An administrator can enable linger to keep the user service running after logout.
+  If the panel account already manages system services through scoped `sudoers` rules, add `--allow-delegated-systemd` when adopting the existing installation and preserve its `SPEARMINT_SYSTEMD_UNITS` setting. Later upgrades preserve this option.
 - **Windows** Run `.\deployment\install-windows.ps1 -Origin 'https://panel.example.net'` in PowerShell. The installer creates a scheduled task and prints the first-run setup path.
 
 ### Add nodes and register services
