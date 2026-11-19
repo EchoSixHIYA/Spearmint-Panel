@@ -1,0 +1,15 @@
+.demo-toolbar { height: 36px; position: fixed; inset: 0 0 auto; z-index: 60; background: #174c3b; color: #eff9f0; padding: 0 20px; display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.demo-toolbar strong { font-size: 13px; }
+.demo-toolbar strong span { font-size: 11px; font-weight: 400; opacity: .8; margin-left: 12px; }
+.demo-toolbar > div { display: flex; gap: 8px; align-items: center; }
+.demo-toolbar button, .demo-toolbar a { background: transparent; border: 1px solid #ffffff35; color: inherit; border-radius: 5px; padding: 3px 9px; font-size: 11px; }
+.demo-toolbar button:hover, .demo-toolbar a:hover { background: #ffffff18; }
+.demo-application { padding-top: 36px; }
+.demo-application .sidebar { top: 36px; height: calc(100vh - 36px); }
+.demo-application .topbar { top: 36px; }
+.demo-toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%); max-width: 80vw; z-index: 120; padding: 12px 20px; color: white; background: #174c3b; box-shadow: 0 8px 28px #183f3230; border-radius: 12px; }
+.demo-guide { padding-left: 20px; line-height: 2.1; }
+.demo-guide a { color: #277555; font-weight: 700; }
+.demo-login { max-width: 460px; margin: 140px auto; padding: 20px; }
+.demo-login .brand-link { margin-bottom: 26px; }
+@media (max-width: 600px) { .demo-toolbar { padding: 0 9px; } .demo-toolbar strong span { display: none; } .demo-toolbar > div { gap: 4px; } }

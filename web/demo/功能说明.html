@@ -1,0 +1,28 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Spearmint 功能说明与演示指南</title>
+<style>body{margin:0;background:#f4f7f2;color:#243c31;font:15px/1.8 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft Yahei",sans-serif}main{max-width:1000px;margin:40px auto;padding:32px;background:white;border:1px solid #dce7dc;border-radius:18px}h1,h2{color:#174c3b}h1{margin:0}h2{margin-top:32px;font-size:21px}p{margin:12px 0}table{border-collapse:collapse;width:100%;font-size:14px}th,td{border:1px solid #dde7de;padding:10px 13px;text-align:left;vertical-align:top}th{background:#edf5ec}a{color:#267453}code{background:#eff4ed;padding:2px 5px;border-radius:4px}small,.muted{color:#718577}.badge{display:inline-block;background:#e8f3e9;border-radius:6px;padding:2px 9px;margin-bottom:12px;font-size:12px}li{margin:7px 0}@media(max-width:700px){main{margin:12px;padding:18px}table{font-size:12px}th,td{padding:6px}}@media print{body{background:white}main{border:0;margin:0;padding:0;max-width:none}a{color:inherit}tr{break-inside:avoid}}</style></head><body><main>
+<span class="badge">Spearmint 0.4.0-preview.17 · 离线演示</span><h1>功能说明与演示指南</h1><p class="muted">依据本机运行版本 <code>8bb543f</code> 制作 · 2026 年 11 月 19 日</p>
+<p><a href="index.html">打开演示面板 →</a></p><h2>如何使用</h2><ol><li>解压整个压缩包，双击 <code>index.html</code>。无需 Python、Node.js、SSH 服务器或网络连接。</li><li>页面直接进入示例 Grove。顶栏可打开演示指南或重置示例数据。</li><li>服务、节点和文件均使用虚构数据。服务登记、启停、备注等演示修改保存在当前浏览器；终端及文件工作区保存在当前页面，重新加载后恢复。</li><li>不要在演示中填写真实账号、密码或密钥。任意示例 SSH 凭据即可继续向导。</li></ol>
+<h2>当前版本已实现的功能</h2><p>以下为 Spearmint 当前运行版本已实现的功能。本包沿用该版本的页面，使用内置数据演示，不连接实际设备。需要真实节点的能力同样使用示例数据，不标为“未完成”。</p>
+<table><thead><tr><th>模块</th><th>当前实现</th><th>本包演示方式</th></tr></thead><tbody>
+<tr><td>花园总览</td><td>成员与服务统计、主机资源、连接摘要、网络缩略图、最近活动。</td><td>6 个虚构成员、资源曲线和示例活动；可从总览进入节点、服务和告警。</td></tr>
+<tr><td>节点管理</td><td>Grove 成员目录、节点备注同步、节点连接状态和资源信息，区分无公网 IP 设备。</td><td>Windows 工作站、上海、香港、美国、ARM64 Thor 和家庭 NAS；可查看详情、修改备注。</td></tr>
+<tr><td>网络拓扑</td><td>展示直连与中继路径、RTT、邻居观测和路径探测。</td><td>选择节点查看示例活动路径；Thor 经上海中转，家庭 NAS 初始离线。</td></tr>
+<tr><td>服务管理</td><td>本机与远程服务目录、状态、启停重启、日志、服务登记与移除。</td><td>内置 Web API、Nginx、PostgreSQL、推理 API 等；服务操作会改变示例状态，并生成操作与审计记录。</td></tr>
+<tr><td>接管服务</td><td>读取目标节点运行中的 Windows / systemd 服务和 Docker 容器，选择后检查接管能力与日志。</td><td>返回对应平台的运行列表和接管检查结果，可选中登记。</td></tr>
+<tr><td>新建服务</td><td>保存多行启动命令为节点数据目录中的脚本；Windows 与 Linux 均可托管前台程序。</td><td>输入名称和多行命令，登记到所选示例节点，随后可启停和读取示例日志。</td></tr>
+<tr><td>快速 SSH</td><td>xterm.js 交互终端，通过 Mesh 管理 Grove 节点，支持目录读取、文件上传下载、文本编辑。</td><td>复用 xterm.js；拓扑选点后进入示例终端，可输入常用命令，并浏览、上传下载或编辑内置文件。</td></tr>
+<tr><td>节点播种</td><td>拓扑选择发起节点、SSH 连接、系统识别、部署包获取、逐层目录选择、安装与自动入网。</td><td>填写示例连接信息后沿向导完成流程，展示安装和入网进度，完成后家庭 NAS 转为在线。</td></tr>
+<tr><td>群组更新</td><td>管理员发起群组更新，节点获取签名包、安装重启；无法访问 GitHub 时向 Grove 成员取包。</td><td>检查并发起示例任务，节点依次显示获取包、安装和完成；NAS 展示通过 Grove 获取包。</td></tr>
+<tr><td>应用部署</td><td>查看构建与部署信息，核对节点版本、页面包和成员目录。</td><td>使用 preview.17 的示例版本与清单，展示节点部署检查。</td></tr>
+<tr><td>公网映射</td><td>FRP 映射入口与服务端点关联、映射状态及管理。</td><td>使用示例公网入口与映射数据展示，不开通实际公网地址。</td></tr>
+<tr><td>用户与身份</td><td>Grove 管理员登录、成员与身份目录同步、邀请码、账号验证与权限信息。</td><td>内置管理员与操作员示例账号、成员目录；登录入口不验证真实凭据。</td></tr>
+<tr><td>操作、告警和审计</td><td>服务操作回执、审计列表、节点与资源告警。</td><td>示例离线节点产生告警；启停、登记、备注与更新操作生成记录，可检索。</td></tr>
+<tr><td>会话与设置</td><td>当前会话与撤销、面板显示设置。</td><td>可撤销示例会话、退出并重新进入演示，修改名称与紧凑显示选项。</td></tr>
+<tr><td>备份与恢复</td><td>命令行备份、校验与恢复状态目录，升级前核对备份和持久化格式；面板提供中断升级恢复信息。</td><td>本包展示部署信息与恢复说明，不对设备执行备份恢复。</td></tr>
+</tbody></table>
+<h2>尚未实现：标注“未完成”</h2><table><thead><tr><th>功能</th><th>状态与边界</th></tr></thead><tbody><tr><td>移动节点（Pollen）</td><td>未完成。当前版本仅提供规划页面，尚无完整的移动节点接入与运行流程。</td></tr><tr><td>跨 Grove 连接</td><td>未完成。当前版本仅提供规划页面，尚无跨 Grove 联邦连接与资源共享流程。</td></tr></tbody></table>
+<h2>推荐演示顺序（约 5 分钟）</h2><ol><li>花园总览：介绍成员、服务和资源统计。</li><li>网络拓扑：选择 Thor，展示无公网 IP 节点通过上海转发的路径。</li><li>服务管理：打开 Demo API 日志；停止后重新启动，查看状态与回执变化。</li><li>登记服务：选择 Linux 节点接管 Nginx，或新建多行命令 <code>cd /home/demo/projects</code>、<code>python hello.py --port 8080</code>。</li><li>快速 SSH：选择上海节点，依次输入 <code>help</code>、<code>pwd</code>、<code>ls</code>、<code>cat README.txt</code>；在下方编辑并保存文本，再下载。</li><li>节点播种：选上海为发起节点，填写 <code>nas.example</code>、账号 <code>demo</code> 和任意示例密码，沿向导安装。</li><li>群组更新：检查并发起更新，观察 NAS 从 Grove 获取安装包的进度。</li><li>打开未完成页面，说明移动节点与跨 Grove 连接的规划边界。</li></ol>
+<h2>打包与数据说明</h2><p>包内只有 HTML、CSS、JavaScript、图标和文字说明；不包含 Spearmint 后端、可执行程序、真实运行数据、证书、私钥、SSH 凭据或用户会话。所有示例 IP 使用文档保留地址或内网示例地址。JavaScript 用于页面交互与示例状态，直接由浏览器执行。可将整个目录托管为静态网站，也可直接从文件打开。</p>
+<p>示例终端不会在电脑上执行命令。支持的命令包括 <code>help</code>、<code>pwd</code>、<code>cd</code>、<code>ls</code> / <code>dir</code>、<code>cat</code> / <code>type</code>、<code>echo</code>、<code>whoami</code>、<code>hostname</code>、<code>date</code>、<code>uname -a</code>、<code>python --version</code>、<code>systemctl status</code>、<code>docker ps</code>、<code>clear</code> / <code>cls</code>、<code>exit</code>。其他命令仅回显提示。</p><p>许可：AGPL-3.0-only。第三方组件许可见包内 <code>THIRD_PARTY_LICENSES.md</code>，项目许可见 <code>LICENSE.txt</code>。</p>
+<p>源码与演示构建脚本：<a href="https://github.com/EchoSixHIYA/Spearmint-Panel/tree/dev/web/demo">项目 dev 分支的 web/demo</a>。演示包所依据的运行版本为文首标注的提交。</p>
+</main></body></html>
