@@ -31,7 +31,7 @@
 .overview-network-main .mesh-level { width: auto; max-width: none; justify-self: stretch; }
 .overview-network-main .mesh-level h4 { width: auto; margin: 0 0 9px; padding: 0; color: #bfd8c9; font-size: 10px; background: transparent; }
 .overview-network-main .mesh-level-nodes { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-.overview-network-main .mesh-node { min-height: 58px; padding: 8px 10px; gap: 8px; border-radius: 10px; box-shadow: 0 2px 8px #072b201a; }
+.overview-network-main .mesh-node { min-height: 72px; padding: 8px 10px; gap: 8px; border-radius: 10px; box-shadow: 0 2px 8px #072b201a; }
 .overview-network-main .mesh-node-icon { width: 27px; height: 27px; border-radius: 7px; }
 .overview-network-main .mesh-node-icon .icon { width: 17px; height: 17px; }
 .overview-network-main .mesh-node-info strong { font-size: 12px; }
@@ -79,15 +79,19 @@
 .overview-network .mesh-wire-halo { stroke: #a5dbb41a; stroke-width: 6; }
 .overview-network .mesh-wire { stroke: #a8d7b5; stroke-width: 1.5; }
 .overview-network .mesh-connections circle { fill: #d0ebc7; stroke: #356c55; }
-.overview-network .mesh-unplaced { background: #153f2f26; border-color: #d0ebd326; border-radius: 10px; padding: 10px 12px; }
-.overview-network .mesh-unplaced h4 { color: #c7dfce; font-size: 10px; margin-bottom: 8px; }
 .overview-network .mesh-node { background: #ffffff0c; border-color: #c7e9d12e; color: #edf9ef; }
 .overview-network .mesh-node-icon { background: #aedcba1a; color: #badfc7; }
 .overview-network .mesh-node-info small, .overview-network .mesh-node-arrow { color: #c0d7c9; }
 .overview-network .mesh-node[href]:hover { background: #ffffff18; border-color: #bdddc9; }
 .overview-network .mesh-map-message { color: #d3e7d8; min-height: 180px; }
-.overview-network-main .mesh-map { max-height: 380px; overflow-y: auto; }
-.overview-network-main .mesh-unplaced > div { max-height: 160px; overflow: auto; }
+.overview-network .mesh-node:not(.is-online) { background: #84908928; border-color: #a4b0a852; color: #c5ceca; }
+.overview-network .mesh-node:not(.is-online) .mesh-node-icon { background: #7d8d8340; color: #b5c0b9; }
+.overview-network .mesh-node:not(.is-online) .mesh-node-info small { color: #a3b2a9; }
+.overview-network .mesh-preview-node:not(.is-online) .mesh-preview-marker { background: #566961; border-color: #a1aaa5; color: #cdd4d0; box-shadow: none; }
+.overview-network .mesh-preview-node:not(.is-online) .mesh-preview-name { color: #bac5be; }
+.overview-network .mesh-link-pending .mesh-wire { stroke: #93a69c; stroke-dasharray: 5 5; }
+.overview-network .mesh-link-pending .mesh-wire-halo { stroke: #93a69c12; }
+.overview-network .mesh-link-pending circle { fill: #93a69c; }
 .overview-network-legend { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; color: #bfd8c8; font-size: 9px; margin-top: 9px; }
 .overview-network-legend > span { display: inline-flex; align-items: center; gap: 5px; }
 .overview-network-legend i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #dfefda; }

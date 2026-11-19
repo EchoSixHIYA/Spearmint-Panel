@@ -1,29 +1,35 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
-import { useConsole, type NodeView } from './console-data'
-import { reachabilityLabel, reachabilityReports } from './connection-status'
+import { type NodeView } from './console-data'
+import { reachabilityLabel } from './connection-status'
 import { Icon, nodeConnectionLabel, shortId } from './ui'
 import { NetworkCanvas } from './network-canvas'
+import { useNetworkMemory } from './network-memory'
 import './network-map.css'
 
-type Link = { id: string; from: string; to: string; kind: 'active' | 'selected' | 'alternative'; shared?: boolean }
+type Link = { id: string; from: string; to: string; kind: 'active' | 'selected' | 'alternative'; shared?: boolean; pending?: boolean }
 
-function reportedLinks(nodes: NodeView[], current: NodeView, target?: string, alternative?: readonly string[]) {
+function reportedLinks(nodes: NodeView[], current: NodeView, paths: Map<string, string[]>, rememberedDepths: Map<string, number>, target?: string, alternative?: readonly string[]) {
   const destinations = new Map<string, number>()
+  const positions = new Map<string, number>()
   const relayPositions = new Map<string, number>()
   const links = new Map<string, Link>()
   for (const node of nodes) {
-    const path = node.activePath
+    const path = node.activePath ?? paths.get(node.id)
     if (!path) continue
-    destinations.set(node.id, path.length - 1)
+    positions.set(node.id, path.length - 1)
+    if (node.activePath) destinations.set(node.id, path.length - 1)
     for (let depth = 1; depth < path.length; depth++) {
       const from = path[depth - 1], to = path[depth]
       if (depth < path.length - 1) relayPositions.set(to, Math.min(depth, relayPositions.get(to) ?? depth))
       const id = [from, to].sort().join('/')
       const previous = links.get(id)
-      if (!previous || node.id === target) links.set(id, { id, from, to, kind: node.id === target ? 'selected' : 'active' })
+      if (!previous || (previous.pending && node.activePath) || (node.id === target && (node.activePath || previous.pending))) {
+        links.set(id, { id, from, to, kind: node.id === target ? 'selected' : 'active', pending: !node.activePath })
+      }
     }
   }
-  const depths = new Map([...relayPositions, ...destinations, [current.id, 0]])
+  const depths = new Map([...relayPositions, ...positions, [current.id, 0]])
+  for (const node of nodes) if (!depths.has(node.id)) depths.set(node.id, rememberedDepths.get(node.id) ?? 1)
   const alternativeOnly = new Set<string>()
   if (alternative) for (let depth = 1; depth < alternative.length; depth++) {
     const from = alternative[depth - 1], to = alternative[depth]
@@ -75,7 +81,7 @@ function linkGeometry(from: DOMRect, to: DOMRect, bounds: DOMRect, vertical: boo
 
 function Connections({ links, radial = false }: { links: Link[]; radial?: boolean }) {
   const overlay = useRef<SVGSVGElement>(null)
-  const [lines, setLines] = useState<Array<ReturnType<typeof linkGeometry> & Pick<Link, 'id' | 'kind' | 'shared' | 'from' | 'to'>>>([])
+  const [lines, setLines] = useState<Array<ReturnType<typeof linkGeometry> & Pick<Link, 'id' | 'kind' | 'shared' | 'from' | 'to' | 'pending'>>>([])
   useLayoutEffect(() => {
     const graph = overlay.current?.parentElement
     if (!graph) return
@@ -92,8 +98,8 @@ function Connections({ links, radial = false }: { links: Link[]; radial?: boolea
         return [id, new DOMRect((rect.left - visibleBounds.left) / scaleX, (rect.top - visibleBounds.top) / scaleY,
           rect.width / scaleX, rect.height / scaleY)]
       }))
-      setLines(links.filter(({ from, to }) => rects.has(from) && rects.has(to)).map(({ id, from, to, kind, shared }, lane) => ({
-        id, kind, shared, from, to, ...linkGeometry(rects.get(from)!, rects.get(to)!, bounds, vertical, radial,
+      setLines(links.filter(({ from, to }) => rects.has(from) && rects.has(to)).map(({ id, from, to, kind, shared, pending }, lane) => ({
+        id, kind, shared, pending, from, to, ...linkGeometry(rects.get(from)!, rects.get(to)!, bounds, vertical, radial,
           [...rects].filter(([node]) => node !== from && node !== to).map(([, rect]) => rect), lane),
       })))
     }
@@ -104,7 +110,7 @@ function Connections({ links, radial = false }: { links: Link[]; radial?: boolea
     return () => observer.disconnect()
   }, [links, radial])
   return <svg ref={overlay} className="mesh-connections" aria-hidden="true">
-    {lines.map(({ id, x1, x2, y1, y2, path, kind, shared, from, to }) => <g key={id} className={`mesh-link-${kind}`} data-from={from} data-to={to}>
+    {lines.map(({ id, x1, x2, y1, y2, path, kind, shared, from, to, pending }) => <g key={id} className={`mesh-link-${kind}${pending ? ' mesh-link-pending' : ''}`} data-from={from} data-to={to}>
       <path d={path} className="mesh-wire-halo" /><path d={path} className="mesh-wire" />
       {shared && <path d={path} className="mesh-wire-shared" />}
       <circle cx={x1} cy={y1} r="3.5" /><circle cx={x2} cy={y2} r="3.5" />
@@ -112,8 +118,8 @@ function Connections({ links, radial = false }: { links: Link[]; radial?: boolea
   </svg>
 }
 
-function NetworkPreview({ current, levels, byId, links }: {
-  current: NodeView; levels: Map<number, string[]>; byId: Map<string, NodeView>; links: Link[]
+function NetworkPreview({ current, levels, byId, links, paths }: {
+  current: NodeView; levels: Map<number, string[]>; byId: Map<string, NodeView>; links: Link[]; paths: Map<string, string[]>
 }) {
   const angles = new Map<string, number>()
   const positions = [{ id: current.id, x: 0, y: 0 }]
@@ -133,7 +139,7 @@ function NetworkPreview({ current, levels, byId, links }: {
       : Math.max(ringSize, Math.floor(Math.PI / Math.asin(spacing / (2 * radius))))
     const slots = Array.from({ length: slotCount }, (_, index) => startAngle + index * turn / slotCount)
     for (const [index, id] of members.entries()) {
-      const parent = byId.get(id)?.activePath?.at(-2) ?? links.find((link) => link.to === id && angles.has(link.from))?.from
+      const parent = paths.get(id)?.at(-2) ?? links.find((link) => link.to === id && angles.has(link.from))?.from
       const preferred = angles.get(parent ?? '') ?? startAngle + index * turn / ringSize
       const best = slots.reduce((closest, angle, i) =>
         Math.cos(angle - preferred) > Math.cos(slots[closest] - preferred) ? i : closest, 0)
@@ -180,7 +186,7 @@ function MapNode({ node, plotted = false, hops, selected = false, alternative = 
   const awaitingPath = online && !node.local && hops === undefined
   const latency = online ? node.peer?.rtt_ms : null
   const evidence = reachabilityLabel(node)
-  const relayOnly = plotted && !node.local && hops === undefined
+  const relayOnly = plotted && online && !node.local && hops === undefined
   const props = { className: `mesh-node${node.local ? ' is-local' : ''}${online ? ' is-online' : ''}${selected ? ' is-target' : ''}`,
     'data-mesh-node': plotted ? node.id : undefined, title: node.name }
   const card = <>
@@ -190,6 +196,7 @@ function MapNode({ node, plotted = false, hops, selected = false, alternative = 
       <small><span className="mesh-status-dot" />{nodeConnectionLabel(node)}{latency != null && <span className="mesh-latency" title="心跳往返时间">{latency.toFixed(1)} ms</span>}</small>
       {hops !== undefined && <small>{hops === 1 ? '直连' : `活动路径 ${hops} 跳`}</small>}
       {awaitingPath && <small>路径待报告</small>}
+      {!online && plotted && <small>连接待确认</small>}
       {!online && node.idlePath && <small>上次连接 {node.idlePath.path.length - 1} 跳</small>}
       {relayOnly && <small>{alternative ? '备路经过' : '中继经过'}</small>}
       {evidence && <small>{evidence}</small>}
@@ -197,7 +204,7 @@ function MapNode({ node, plotted = false, hops, selected = false, alternative = 
     <Icon name={onPick ? selected ? 'check' : 'arrow-right' : 'arrow-up-right'} className="mesh-node-arrow" size={15} />
   </>
   if (onPick) return <button {...props} type="button" aria-pressed={selected}
-    disabled={!node.local && (!node.peer?.enabled || ['disabled', 'quarantined'].includes(node.status))}
+    disabled={node.local ? !online : !node.peer?.enabled || ['disabled', 'quarantined'].includes(node.status)}
     onClick={() => onPick(node.id)}>{card}</button>
   return <a {...props} href={`#/${selectTarget && !node.local ? 'topology' : 'nodes'}/${node.id}`}
     aria-current={selectTarget && selected ? 'location' : undefined}>{card}</a>
@@ -210,14 +217,13 @@ function MapRelay({ id, alternative }: { id: string; alternative: boolean }) {
   </div>
 }
 
-export function NetworkMap({ mini = false, compact = false, showUnplaced = true, target, alternative, onPick }: {
-  mini?: boolean; compact?: boolean; showUnplaced?: boolean; target?: string; alternative?: readonly string[]; onPick?: (id: string) => void
+export function NetworkMap({ mini = false, compact = false, target, alternative, onPick }: {
+  mini?: boolean; compact?: boolean; target?: string; alternative?: readonly string[]; onPick?: (id: string) => void
 }) {
-  const { listedNodes: nodes } = useConsole()
-  const current = nodes.find((node) => node.local)
+  const { nodes, current, paths, depths: rememberedDepths } = useNetworkMemory()
   if (!current) return <div className="mesh-map"><p className="mesh-map-message">正在读取本机节点…</p></div>
 
-  const { depths, destinations, alternativeOnly, links } = reportedLinks(nodes, current, target, alternative)
+  const { depths, destinations, alternativeOnly, links } = reportedLinks(nodes, current, paths, rememberedDepths, target, alternative)
   const levels = new Map<number, string[]>()
   const byId = new Map(nodes.map((node) => [node.id, node]))
   for (const [id, depth] of [...depths].sort(([, a], [, b]) => a - b)) {
@@ -225,24 +231,11 @@ export function NetworkMap({ mini = false, compact = false, showUnplaced = true,
     if (level) level.push(id)
     else levels.set(depth, [id])
   }
-  const unplaced: NodeView[] = []
-  const observed: NodeView[] = []
-  const withoutMesh: NodeView[] = []
-  for (const node of nodes) {
-    const depth = depths.get(node.id)
-    if (depth === undefined && node.status === 'unconfigured') withoutMesh.push(node)
-    else if (depth === undefined) (reachabilityReports(node) ? observed : unplaced).push(node)
-  }
-  const withoutPaths = [
-    { members: observed, title: '邻居观测可达 · 本机暂无活动路径' },
-    { members: unplaced, title: '暂无活动路径' },
-    { members: withoutMesh, title: '本机未配置 Mesh 互联' },
-  ]
   return <div className={`mesh-map${mini ? ' mesh-map-mini' : ''}${compact ? ' mesh-map-compact' : ''}`}>
     {alternative && <div className="mesh-map-legend"><span><i />活动路径</span><span><i className="is-alternative" />已验证备路</span></div>}
     <NetworkCanvas mini={mini} compact={compact} current={current.id}
       label={mini ? '节点关系画布' : compact ? '节点连接拓扑画布' : '网络拓扑画布'}>
-      {mini ? <NetworkPreview current={current} levels={levels} byId={byId} links={links} />
+      {mini ? <NetworkPreview current={current} levels={levels} byId={byId} links={links} paths={paths} />
         : <div className="mesh-graph" role="group" aria-label={`已报告的网络拓扑，${depths.size} 个节点，${links.length} 条链路`}
           style={compact ? { '--mesh-level-count': levels.size } as CSSProperties : undefined}>
           <Connections links={links} />
@@ -257,9 +250,5 @@ export function NetworkMap({ mini = false, compact = false, showUnplaced = true,
           </section>)}
         </div>}
     </NetworkCanvas>
-    {showUnplaced && withoutPaths.filter(({ members }) => members.length > 0).map(({ members, title }) => <section className="mesh-unplaced" key={title}>
-        <h4>{title} · {members.length} 个节点</h4>
-        <div>{members.map((node) => <MapNode key={node.id} node={node} selected={node.id === target} selectTarget={!mini && !compact} onPick={onPick} />)}</div>
-      </section>)}
   </div>
 }

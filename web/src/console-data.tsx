@@ -228,7 +228,8 @@ function useConsoleData(session: Session, onUnauthorized: () => void, preference
   return { local, localName, peers, services, metrics, audit, nodes, listedNodes, memberNodes: directory.members ? memberNodes : undefined,
     remoteNodes, connections: countConnections(remoteNodes),
     meshCurrent, meshLoading, meshError, remoteCatalog, alerts,
-    admin, session, preferences, nodeNotes, grove, groveError: grove.error || roster.error, ...directory, onUnauthorized }
+    admin, session, preferences, nodeNotes, nodeNotesCurrent: !!grove.data && !grove.error && (!realmId || (!!sharedNotes.data && !sharedNotes.error)),
+    grove, groveError: grove.error || roster.error, ...directory, onUnauthorized }
 }
 
 type Data = ReturnType<typeof useConsoleData> & { webBuild?: string }

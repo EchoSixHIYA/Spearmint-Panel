@@ -104,7 +104,7 @@ export function OverviewPage() {
         <div className="overview-network-main" aria-label="节点连接拓扑"><NetworkMap compact /></div>
         <aside className="overview-network-mini" aria-labelledby="overview-node-map-title">
           <h2 id="overview-node-map-title">节点关系</h2>
-          <NetworkMap mini showUnplaced={false} />
+          <NetworkMap mini />
           <div className="overview-network-legend"><span><i />当前节点</span><span><i />已连接</span></div>
         </aside>
       </div>

@@ -40,7 +40,7 @@
   min-width: 100%;
 }
 .mesh-level { min-width: 0; }
-.mesh-level h4, .mesh-unplaced h4 {
+.mesh-level h4 {
   margin: 0 0 12px;
   color: #506d5e;
   font-size: 12px;
@@ -59,6 +59,9 @@
 .mesh-link-alternative .mesh-wire-halo { stroke: #f2e8d9; }
 .mesh-link-alternative circle { fill: #88653d; }
 .mesh-wire-shared { stroke: #e5c291; stroke-width: 1.4; }
+.mesh-link-pending .mesh-wire { stroke: #98a49b; stroke-dasharray: 5 5; }
+.mesh-link-pending .mesh-wire-halo { stroke: #dbe0dc; }
+.mesh-link-pending circle { fill: #98a49b; }
 .mesh-map-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 10px 16px; background: #f7faf7; border-bottom: 1px solid #dfeae1; }
 .mesh-map-legend span { display: inline-flex; gap: 7px; align-items: center; color: #506d5e; font-size: 12px; }
 .mesh-map-legend i { display: inline-block; width: 19px; border-top: 2px solid #24684c; }
@@ -71,7 +74,7 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  min-height: 70px;
+  min-height: 78px;
   padding: 10px 11px;
   border: 1px solid #d9e6dc;
   border-radius: 12px;
@@ -105,9 +108,6 @@ button.mesh-node:not(:disabled):hover { border-color: #73a98a; box-shadow: 0 5px
 .mesh-node-arrow { flex: none; color: #709486; }
 .mesh-node.is-local .mesh-node-arrow { color: #b8deca; }
 
-.mesh-unplaced { position: relative; border-top: 1px solid #dfeae1; padding: 14px 17px 16px; background: #f7faf7; }
-.mesh-unplaced > div { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 174px), 1fr)); gap: 10px; }
-.mesh-unplaced .mesh-node { box-shadow: none; }
 .mesh-map-message { display: grid; min-height: 140px; place-items: center; margin: 0; color: #587465; font-size: 13px; }
 .mesh-preview {
   position: relative;
@@ -166,8 +166,6 @@ button.mesh-node:not(:disabled):hover { border-color: #73a98a; box-shadow: 0 5px
 .mesh-map-mini .mesh-node-icon .icon { width: 17px; height: 17px; }
 .mesh-map-mini .mesh-node-info strong { font-size: 12px; }
 .mesh-map-mini .mesh-node-arrow { display: none; }
-.mesh-map-mini .mesh-unplaced { padding: 10px 12px; }
-.mesh-map-mini .mesh-unplaced > div { grid-template-columns: repeat(auto-fit, minmax(min(100%, 132px), 1fr)); }
 
 @container (max-width: 620px) {
   .mesh-graph { grid-auto-flow: row; grid-auto-columns: minmax(0, 1fr); width: 100%; min-height: 0; gap: 21px; padding: 22px 18px; }
