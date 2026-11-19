@@ -20,6 +20,7 @@ import { Brand, EmptyState, Loading, Notice, PageHeading, Panel } from './ui'
 import './grove.css'
 import './style.css'
 import './workspace.css'
+import './overview.css'
 
 const QuickSSH = lazy(() => import('./quick-ssh'))
 

@@ -1,0 +1,77 @@
+.hero-garden.overview-network {
+  display: block;
+  padding: 26px 30px 18px;
+}
+.overview-network-heading {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+}
+.overview-network-heading h1 { margin: 13px 0 6px; color: #f3fff5; font-size: 25px; letter-spacing: -.6px; }
+.overview-network-heading p { margin: 0; font-size: 12px; line-height: 1.7; color: #c4dfcf; }
+.overview-network-actions { display: flex; align-items: center; gap: 20px; flex-shrink: 0; }
+.overview-topology-link { display: inline-flex; align-items: center; gap: 6px; color: #d4ebdc; font-size: 12px; }
+.overview-topology-link:hover { color: #fff; }
+.overview-network-map { position: relative; margin: 12px -8px 6px; }
+.overview-network .mesh-map {
+  border: 0;
+  border-radius: 12px;
+  background: radial-gradient(circle, #d4f2de20 .8px, transparent 1px) center / 20px 20px;
+}
+.overview-network .mesh-preview {
+  --preview-unit: clamp(.65px, .18cqi, 1.1px);
+  --preview-rise: max(.8px, var(--preview-unit));
+  height: max(235px, calc((var(--preview-span-y) + 96) * var(--preview-rise)));
+}
+.overview-network .mesh-preview::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 156px;
+  height: 156px;
+  translate: -50% -50%;
+  border: 1px solid #c6e9d619;
+  border-radius: 50%;
+  box-shadow: 0 0 0 60px #c6e9d608, 0 0 0 120px #c6e9d604;
+  pointer-events: none;
+}
+.overview-network .mesh-preview-marker { background: #305f4e; border-color: #97b9a8; color: #d3e8db; box-shadow: 0 3px 12px #082e2a33; }
+.overview-network .mesh-preview-node.is-online .mesh-preview-marker { background: #337559; border-color: #a5d9b5; color: #e1f7e7; }
+.overview-network .mesh-preview-node.is-local .mesh-preview-marker {
+  width: clamp(42px, calc(49 * var(--preview-unit)), 54px);
+  background: #e0f0dc;
+  border-color: #f4fff0;
+  color: #1f5840;
+  box-shadow: 0 0 0 6px #c8e8d01c, 0 0 28px #d4f4d51a;
+}
+.overview-network .mesh-preview-name { background: #1b503fe6; color: #ecf8ee; font-size: 11px; padding: 2px 6px; }
+.overview-network .mesh-preview-node[href]:hover .mesh-preview-marker { outline-color: #d1edc9; }
+.overview-network .mesh-preview-node:focus-visible { outline-color: #e6f9df; }
+.overview-network .mesh-wire-halo { stroke: #a5dbb41a; stroke-width: 8; }
+.overview-network .mesh-wire { stroke: #a8d7b5; stroke-width: 1.5; }
+.overview-network .mesh-connections circle { fill: #d0ebc7; stroke: #356c55; }
+.overview-network .mesh-unplaced { background: #153f2f26; border-color: #d0ebd326; border-radius: 10px; }
+.overview-network .mesh-unplaced h4 { color: #c7dfce; }
+.overview-network .mesh-node { background: #ffffff0c; border-color: #c7e9d12e; color: #edf9ef; }
+.overview-network .mesh-node-icon { background: #aedcba1a; color: #badfc7; }
+.overview-network .mesh-node-info small, .overview-network .mesh-node-arrow { color: #c0d7c9; }
+.overview-network .mesh-node[href]:hover { background: #ffffff18; border-color: #bdddc9; }
+.overview-network .mesh-map-message { color: #d3e7d8; min-height: 235px; }
+.overview-network-footer { position: relative; display: flex; justify-content: space-between; align-items: center; gap: 14px; color: #adcdbb; font-size: 9px; }
+.overview-network-footer > span:first-child { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.overview-network-footer i, .overview-legend-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #dfefda; }
+.overview-network-footer .overview-legend-dot { margin-left: 11px; background: #5b9974; border: 1px solid #b0d9b9; }
+.overview-network-footer > span:last-child { text-align: right; font-size: 8px; letter-spacing: 1.5px; }
+@media (max-width: 700px) {
+  .hero-garden.overview-network { padding: 22px 18px 16px; }
+  .overview-network-heading { align-items: flex-start; flex-wrap: wrap; gap: 15px; }
+  .overview-network-heading h1 { font-size: 23px; }
+  .overview-network-actions { gap: 16px; }
+  .overview-network .hero-kicker { font-size: 9px; letter-spacing: 1.5px; }
+  .overview-network-map { margin-inline: -8px; }
+  .overview-network-footer > span:last-child { max-width: 52%; font-size: 7px; letter-spacing: .6px; }
+}
