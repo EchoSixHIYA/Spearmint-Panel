@@ -12,7 +12,20 @@
   background: radial-gradient(circle, #c5ddce 1px, transparent 1px) 7px 7px / 18px 18px,
     radial-gradient(ellipse at 48% 22%, #eaf5ec, #f7faf6 72%);
 }
-.mesh-map-scroll { overflow-x: auto; scrollbar-width: thin; }
+.mesh-canvas-shell { position: relative; display: flex; flex-direction: column; height: 360px; }
+.mesh-canvas-shell.is-compact { height: 272px; }
+.mesh-canvas-shell.is-mini { height: 230px; }
+.mesh-canvas { position: relative; flex: 1; min-height: 0; overflow: hidden; touch-action: none; cursor: grab; }
+.mesh-canvas.is-dragging, .mesh-canvas.is-dragging * { cursor: grabbing; user-select: none; }
+.mesh-canvas:focus-visible { outline: 2px solid #6aab87; outline-offset: -3px; }
+.mesh-canvas-stage { position: absolute; top: 0; left: 0; width: max-content; transform-origin: 0 0; }
+.mesh-canvas-controls { z-index: 2; display: flex; justify-content: flex-end; align-items: center; gap: 2px; min-height: 29px; padding: 2px 7px; background: #f1f7f0e6; border-bottom: 1px solid #dbe8dc; }
+.mesh-canvas-controls button { display: grid; place-items: center; width: 24px; height: 24px; border: 0; border-radius: 5px; padding: 0; background: transparent; color: #35634c; font: inherit; font-size: 17px; cursor: pointer; }
+.mesh-canvas-controls button:hover { background: #dcecdf; }
+.mesh-canvas-controls button:disabled { opacity: .35; cursor: default; }
+.mesh-canvas-controls button:focus-visible { outline: 2px solid #5a9878; outline-offset: -1px; }
+.mesh-canvas-controls output { min-width: 36px; text-align: center; font-size: 10px; color: #5b7563; font-variant-numeric: tabular-nums; }
+.mesh-canvas-hint { position: absolute; bottom: 6px; left: 8px; padding: 3px 7px; border-radius: 4px; background: #f4f9f1eb; color: #6e8474; font-size: 10px; pointer-events: none; }
 .mesh-graph {
   position: relative;
   display: grid;
@@ -36,7 +49,7 @@
 .mesh-level h4 { text-align: center; }
 .mesh-level-nodes { display: grid; gap: 13px; }
 .mesh-connections { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.mesh-connections path { fill: none; stroke-linecap: round; }
+.mesh-connections path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
 .mesh-wire-halo { stroke: #e0f0e4; stroke-width: 7; }
 .mesh-wire { stroke: #58a17c; stroke-width: 2; }
 .mesh-connections circle { fill: #58a17c; stroke: #f8fdf9; stroke-width: 1.5; }
@@ -96,29 +109,27 @@ button.mesh-node:not(:disabled):hover { border-color: #73a98a; box-shadow: 0 5px
 .mesh-unplaced > div { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 174px), 1fr)); gap: 10px; }
 .mesh-unplaced .mesh-node { box-shadow: none; }
 .mesh-map-message { display: grid; min-height: 140px; place-items: center; margin: 0; color: #587465; font-size: 13px; }
-.mesh-map-mini .mesh-map-scroll { max-height: 460px; }
 .mesh-preview {
-  --preview-unit: clamp(.55px, .23cqi, 1px);
-  --preview-rise: max(.72px, var(--preview-unit));
   position: relative;
-  min-width: calc((var(--preview-span-x) + 104) * var(--preview-unit));
-  height: max(142px, calc((var(--preview-span-y) + 88) * var(--preview-rise)));
 }
 .mesh-preview-node {
   position: absolute;
   z-index: 1;
-  left: calc(50% + var(--preview-x) * var(--preview-unit));
-  top: calc(50% + (var(--preview-y) - 8) * var(--preview-rise));
   translate: -50% -50%;
-  display: grid;
-  place-items: center;
-  width: calc(88 * var(--preview-unit));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 80px;
+  height: 70px;
   border-radius: 8px;
   color: #214535;
   text-decoration: none;
 }
 .mesh-preview-marker {
-  width: clamp(28px, calc(37 * var(--preview-unit)), 37px);
+  width: 37px;
+  flex: none;
   aspect-ratio: 1;
   display: grid;
   place-items: center;
@@ -130,15 +141,13 @@ button.mesh-node:not(:disabled):hover { border-color: #73a98a; box-shadow: 0 5px
 }
 .mesh-preview-node.is-online .mesh-preview-marker { background: #e8f4eb; border-color: #76aa8b; color: #24684c; }
 .mesh-preview-node.is-local .mesh-preview-marker {
-  width: clamp(34px, calc(46 * var(--preview-unit)), 46px);
+  width: 46px;
   border-color: #194f3c;
   background: #194f3c;
   color: #f3fff5;
   box-shadow: 0 0 0 4px #8ab89c40;
 }
 .mesh-preview-name {
-  position: absolute;
-  top: calc(100% + 3px);
   max-width: 100%;
   padding: 1px 4px;
   overflow: hidden;
@@ -177,3 +186,10 @@ button.mesh-node:not(:disabled):hover { border-color: #73a98a; box-shadow: 0 5px
   .topology-panel { padding: 14px; }
   .topology-tools { grid-template-columns: 1fr; gap: 15px; }
 }
+
+/* Node sizes remain readable; the viewport, rather than the graph, adapts to narrow screens. */
+.mesh-canvas-stage > .mesh-graph { grid-auto-flow: column; grid-auto-columns: 224px; width: max-content; min-width: 0; gap: 64px; padding: 32px 26px; }
+.mesh-canvas-stage .mesh-level { width: auto; max-width: none; justify-self: stretch; }
+.mesh-canvas-stage .mesh-level h4 { width: auto; background: transparent; }
+.mesh-canvas-stage .mesh-level-nodes { grid-template-columns: minmax(0, 1fr); }
+.mesh-canvas-stage .mesh-graph .mesh-level-nodes > .mesh-node { width: 100%; }

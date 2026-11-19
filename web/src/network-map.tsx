@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { useConsole, type NodeView } from './console-data'
 import { reachabilityLabel, reachabilityReports } from './connection-status'
 import { Icon, nodeConnectionLabel, shortId } from './ui'
+import { NetworkCanvas } from './network-canvas'
 import './network-map.css'
 
 type Link = { id: string; from: string; to: string; kind: 'active' | 'selected' | 'alternative'; shared?: boolean }
@@ -38,7 +39,7 @@ function reportedLinks(nodes: NodeView[], current: NodeView, target?: string, al
   return { depths, destinations, alternativeOnly, links: [...links.values()] }
 }
 
-function linkGeometry(from: DOMRect, to: DOMRect, bounds: DOMRect, vertical: boolean, radial: boolean) {
+function linkGeometry(from: DOMRect, to: DOMRect, bounds: DOMRect, vertical: boolean, radial: boolean, obstacles: DOMRect[], lane: number) {
   const ax = from.left + from.width / 2, ay = from.top + from.height / 2
   const bx = to.left + to.width / 2, by = to.top + to.height / 2
   if (radial) {
@@ -48,12 +49,25 @@ function linkGeometry(from: DOMRect, to: DOMRect, bounds: DOMRect, vertical: boo
     const x2 = bx - dx * to.width / 2 - bounds.left, y2 = by - dy * to.height / 2 - bounds.top
     return { x1, x2, y1, y2, path: `M ${x1} ${y1} L ${x2} ${y2}` }
   }
+  if (Math.abs(ax - bx) < 1 && obstacles.some(rect => rect.left < ax && rect.right > ax
+    && rect.top > Math.min(ay, by) && rect.bottom < Math.max(ay, by))) {
+    const x1 = from.right - bounds.left, x2 = to.right - bounds.left
+    const y1 = ay - bounds.top, y2 = by - bounds.top
+    const corridor = Math.max(x1, x2) + 10 + lane % 3 * 3
+    return { x1, x2, y1, y2, path: `M ${x1} ${y1} H ${corridor} V ${y2} H ${x2}` }
+  }
   const across = vertical ? Math.abs(ay - by) < 1 : Math.abs(ax - bx) >= 1
   const direction = (across ? bx - ax : by - ay) >= 0 ? 1 : -1
   const x1 = (across ? ax + direction * from.width / 2 : ax) - bounds.left
   const x2 = (across ? bx - direction * to.width / 2 : bx) - bounds.left
   const y1 = (across ? ay : ay + direction * from.height / 2) - bounds.top
   const y2 = (across ? by : by - direction * to.height / 2) - bounds.top
+  if (across && obstacles.some(rect => rect.left > Math.min(x1, x2) + bounds.left
+    && rect.right < Math.max(x1, x2) + bounds.left)) {
+    const corridor1 = x1 + direction * 14, corridor2 = x2 - direction * 14
+    const top = Math.max(6, Math.min(from.top, to.top, ...obstacles.map(rect => rect.top)) - bounds.top - 12 - lane % 4 * 4)
+    return { x1, x2, y1, y2, path: `M ${x1} ${y1} H ${corridor1} V ${top} H ${corridor2} V ${y2} H ${x2}` }
+  }
   const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
   const controls = across ? `${mx} ${y1} ${mx} ${y2}` : `${x1} ${my} ${x2} ${my}`
   return { x1, x2, y1, y2, path: `M ${x1} ${y1} C ${controls} ${x2} ${y2}` }
@@ -61,18 +75,26 @@ function linkGeometry(from: DOMRect, to: DOMRect, bounds: DOMRect, vertical: boo
 
 function Connections({ links, radial = false }: { links: Link[]; radial?: boolean }) {
   const overlay = useRef<SVGSVGElement>(null)
-  const [lines, setLines] = useState<Array<ReturnType<typeof linkGeometry> & Pick<Link, 'id' | 'kind' | 'shared'>>>([])
+  const [lines, setLines] = useState<Array<ReturnType<typeof linkGeometry> & Pick<Link, 'id' | 'kind' | 'shared' | 'from' | 'to'>>>([])
   useLayoutEffect(() => {
     const graph = overlay.current?.parentElement
     if (!graph) return
     const cards = new Map(Array.from(graph.querySelectorAll<HTMLElement>('[data-mesh-node]'), (card) => [card.dataset.meshNode, card]))
     function draw() {
       if (!graph) return
-      const bounds = graph.getBoundingClientRect()
+      const visibleBounds = graph.getBoundingClientRect()
+      const scaleX = visibleBounds.width / graph.offsetWidth || 1
+      const scaleY = visibleBounds.height / graph.offsetHeight || 1
+      const bounds = new DOMRect(0, 0, graph.offsetWidth, graph.offsetHeight)
       const vertical = getComputedStyle(graph).gridAutoFlow === 'row'
-      const rects = new Map(Array.from(cards, ([id, card]) => [id, card.getBoundingClientRect()]))
-      setLines(links.map(({ id, from, to, kind, shared }) => ({
-        id, kind, shared, ...linkGeometry(rects.get(from)!, rects.get(to)!, bounds, vertical, radial),
+      const rects = new Map(Array.from(cards, ([id, card]) => {
+        const rect = card.getBoundingClientRect()
+        return [id, new DOMRect((rect.left - visibleBounds.left) / scaleX, (rect.top - visibleBounds.top) / scaleY,
+          rect.width / scaleX, rect.height / scaleY)]
+      }))
+      setLines(links.filter(({ from, to }) => rects.has(from) && rects.has(to)).map(({ id, from, to, kind, shared }, lane) => ({
+        id, kind, shared, from, to, ...linkGeometry(rects.get(from)!, rects.get(to)!, bounds, vertical, radial,
+          [...rects].filter(([node]) => node !== from && node !== to).map(([, rect]) => rect), lane),
       })))
     }
     draw()
@@ -82,7 +104,7 @@ function Connections({ links, radial = false }: { links: Link[]; radial?: boolea
     return () => observer.disconnect()
   }, [links, radial])
   return <svg ref={overlay} className="mesh-connections" aria-hidden="true">
-    {lines.map(({ id, x1, x2, y1, y2, path, kind, shared }) => <g key={id} className={`mesh-link-${kind}`}>
+    {lines.map(({ id, x1, x2, y1, y2, path, kind, shared, from, to }) => <g key={id} className={`mesh-link-${kind}`} data-from={from} data-to={to}>
       <path d={path} className="mesh-wire-halo" /><path d={path} className="mesh-wire" />
       {shared && <path d={path} className="mesh-wire-shared" />}
       <circle cx={x1} cy={y1} r="3.5" /><circle cx={x2} cy={y2} r="3.5" />
@@ -97,18 +119,21 @@ function NetworkPreview({ current, levels, byId, links }: {
   const positions = [{ id: current.id, x: 0, y: 0 }]
   const startAngle = -5 * Math.PI / 6
   const turn = 2 * Math.PI
-  const spacing = 96
+  // Geometric rings group nearby nodes without implying a hop count; exact hops remain in the detailed map.
+  // A 120px separation clears every complete 80 × 70 node-and-label box, including between rings.
+  const spacing = 120
+  const remaining = [...levels].filter(([depth]) => depth > 0).flatMap(([, members]) => [...members].sort())
   let radius = 0
-  for (const [depth, members] of levels) {
-    if (!depth) continue
+  while (remaining.length) {
+    radius += spacing
+    const capacity = Math.floor(Math.PI / Math.asin(spacing / (2 * radius)) + 1e-9)
+    const members = remaining.splice(0, capacity)
     const ringSize = members.length
-    const minRadius = ringSize > 1 ? spacing / (2 * Math.sin(Math.PI / ringSize)) : 0
-    radius = Math.ceil(Math.max(radius + 88, minRadius))
     const slotCount = angles.size === 0 ? ringSize
       : Math.max(ringSize, Math.floor(Math.PI / Math.asin(spacing / (2 * radius))))
     const slots = Array.from({ length: slotCount }, (_, index) => startAngle + index * turn / slotCount)
-    for (const [index, id] of [...members].sort().entries()) {
-      const parent = byId.get(id)?.activePath?.[depth - 1] ?? links.find((link) => link.to === id && angles.has(link.from))?.from
+    for (const [index, id] of members.entries()) {
+      const parent = byId.get(id)?.activePath?.at(-2) ?? links.find((link) => link.to === id && angles.has(link.from))?.from
       const preferred = angles.get(parent ?? '') ?? startAngle + index * turn / ringSize
       const best = slots.reduce((closest, angle, i) =>
         Math.cos(angle - preferred) > Math.cos(slots[closest] - preferred) ? i : closest, 0)
@@ -117,13 +142,12 @@ function NetworkPreview({ current, levels, byId, links }: {
       positions.push({ id, x: Math.cos(angle) * radius, y: Math.sin(angle) * radius })
     }
   }
-  const yPositions = positions.map(({ y }) => y)
-  const top = Math.min(...yPositions), bottom = Math.max(...yPositions)
-  const centerY = (bottom + top) / 2
-  const spanX = 2 * Math.max(...positions.map(({ x }) => Math.abs(x)))
+  const extent = positions.reduce((bounds, { x, y }) => ({ left: Math.min(bounds.left, x), right: Math.max(bounds.right, x),
+    top: Math.min(bounds.top, y), bottom: Math.max(bounds.bottom, y) }), { left: 0, right: 0, top: 0, bottom: 0 })
+  const width = extent.right - extent.left + 128, height = extent.bottom - extent.top + 118
 
   return <div className="mesh-preview" role="group" aria-label={`已报告的网络拓扑，${positions.length} 个节点，${links.length} 条链路`}
-    style={{ '--preview-span-x': spanX, '--preview-span-y': bottom - top } as CSSProperties}>
+    style={{ width, height }}>
     <Connections links={links} radial />
     {positions.map(({ id, x, y }) => {
       const node = byId.get(id)
@@ -139,7 +163,7 @@ function NetworkPreview({ current, levels, byId, links }: {
       </>
       const props = {
         className: `mesh-preview-node${node?.local ? ' is-local' : ''}${node?.status === 'online' ? ' is-online' : ''}`,
-        style: { '--preview-x': x.toFixed(2), '--preview-y': (y - centerY).toFixed(2) } as CSSProperties,
+        style: { left: x - extent.left + 64, top: y - extent.top + 59 },
         title: label,
       }
       return node ? <a key={id} {...props} href={`#/nodes/${id}`} aria-label={label}>{marker}</a>
@@ -216,7 +240,8 @@ export function NetworkMap({ mini = false, compact = false, showUnplaced = true,
   ]
   return <div className={`mesh-map${mini ? ' mesh-map-mini' : ''}${compact ? ' mesh-map-compact' : ''}`}>
     {alternative && <div className="mesh-map-legend"><span><i />活动路径</span><span><i className="is-alternative" />已验证备路</span></div>}
-    <div className="mesh-map-scroll">
+    <NetworkCanvas mini={mini} compact={compact} current={current.id}
+      label={mini ? '节点关系画布' : compact ? '节点连接拓扑画布' : '网络拓扑画布'}>
       {mini ? <NetworkPreview current={current} levels={levels} byId={byId} links={links} />
         : <div className="mesh-graph" role="group" aria-label={`已报告的网络拓扑，${depths.size} 个节点，${links.length} 条链路`}
           style={compact ? { '--mesh-level-count': levels.size } as CSSProperties : undefined}>
@@ -231,7 +256,7 @@ export function NetworkMap({ mini = false, compact = false, showUnplaced = true,
             })}</div>
           </section>)}
         </div>}
-    </div>
+    </NetworkCanvas>
     {showUnplaced && withoutPaths.filter(({ members }) => members.length > 0).map(({ members, title }) => <section className="mesh-unplaced" key={title}>
         <h4>{title} · {members.length} 个节点</h4>
         <div>{members.map((node) => <MapNode key={node.id} node={node} selected={node.id === target} selectTarget={!mini && !compact} onPick={onPick} />)}</div>
