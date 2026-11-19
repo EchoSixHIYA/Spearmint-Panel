@@ -13,6 +13,7 @@ import subprocess
 import sys
 import sysconfig
 import tarfile
+import tempfile
 import tomllib
 import zipfile
 
@@ -114,7 +115,7 @@ def copy_debian_library_licenses(bundle: Path) -> None:
             json.dumps(sorted(records, key=lambda record: record["package"]), indent=2) + "\n", encoding="utf-8")
 
 
-def main():
+def build_package(work: Path, env: dict[str, str]):
     # The build can use dependencies from an existing virtual environment.
     # Both the manifest and the frozen application must use this checkout.
     source = ROOT / "src"
@@ -125,7 +126,6 @@ def main():
     installed_version = version(project["name"])
     if installed_version != project["version"]:
         raise RuntimeError("Install this checkout in the build environment before packaging")
-    WORK.mkdir(parents=True, exist_ok=True)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     system = platform.system().lower()
     arch = {"AMD64": "amd64", "x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine(), platform.machine())
@@ -137,19 +137,19 @@ def main():
     manifest = {"version": installed_version, "commit": commit, "os": system, "architecture": arch,
                 "python": platform.python_version(), "schema": len(MIGRATIONS),
                 "format": "native-executable-with-runtime-and-web", "grove_update": 1, "web_files": web_files}
-    manifest_path = WORK / "build-manifest.json"
+    manifest_path = work / "build-manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--name", "spearmint",
             "--paths", str(source),
-            "--distpath", str(WORK / "dist"), "--workpath", str(WORK / "pyinstaller"), "--specpath", str(WORK),
+            "--distpath", str(work / "dist"), "--workpath", str(work / "pyinstaller"), "--specpath", str(work),
             "--add-data", f"{manifest_path}:.",
             "--collect-all", "uvicorn", "--collect-all", "fido2", "--recursive-copy-metadata", "spearmint-panel"]
     if os.name == "nt":
         args.extend(["--collect-all", "winpty"])
         for name in ("win32api", "win32security", "win32job", "win32process", "win32pipe", "win32file", "win32con", "win32event", "win32service"):
             args.extend(["--hidden-import", name])
-    subprocess.run([*args, str(ROOT / "deploy/frozen-entry.py")], check=True, cwd=ROOT)
-    bundle = WORK / "dist/spearmint"
+    subprocess.run([*args, str(ROOT / "deploy/frozen-entry.py")], check=True, cwd=ROOT, env=env)
+    bundle = work / "dist/spearmint"
     shutil.copytree(web, bundle / "web", dirs_exist_ok=True)
     shutil.copytree(ROOT / "deploy/package", bundle / "deployment", dirs_exist_ok=True)
     copy_deployment_docs(bundle, commit)
@@ -186,6 +186,25 @@ def main():
     external_manifest = {**manifest, "package_checksums_sha256": hashlib.sha256(checksums_path.read_bytes()).hexdigest()}
     (output / (name + ".manifest.json")).write_text(json.dumps(external_manifest, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"archive": str(archive), "sha256": digest, **external_manifest}, indent=2))
+
+
+def main():
+    WORK.mkdir(parents=True, exist_ok=True)
+    # Keep the final archives, but remove native objects, extracted runtimes,
+    # packager caches and temporary files on both success and failure.
+    with tempfile.TemporaryDirectory(prefix="run-", dir=WORK) as directory:
+        work = Path(directory)
+        temporary = work / "temp"
+        temporary.mkdir()
+        env = {**os.environ, "PYINSTALLER_CONFIG_DIR": str(work / "cache"),
+               "TMPDIR": str(temporary), "TEMP": str(temporary), "TMP": str(temporary),
+               "PYTHONDONTWRITEBYTECODE": "1", "PIP_NO_CACHE_DIR": "1"}
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            build_package(work, env)
+        finally:
+            sys.dont_write_bytecode = previous
 
 
 if __name__ == "__main__":
