@@ -8,7 +8,7 @@ import { Sessions } from './sessions'
 import { GrovePasswordDialog } from './security-pages'
 import { ServiceList } from './service-workspace'
 import { useWorkspace, returnRoute, withReturn } from './workspace-api'
-import { nodeResourcesTarget, groveServiceRegistrationHref, localServiceHref, remoteServiceHref, savedRemoteOperationTarget } from './grove-navigation'
+import { nodeResourcesTarget, groveServiceRegistrationHref, localServiceHref, savedRemoteOperationHref, savedRemoteOperationTarget } from './grove-navigation'
 import { SavedRemoteOperation } from './operation-history'
 import { hostResources, hostTrendSeries, type HostTrend } from './host-resources'
 import { publicPanelLabel } from './grove-directory'
@@ -109,6 +109,6 @@ export function OperationCenter() {
       <select className="input" aria-label="操作来源" value={source} onChange={event => setSource(event.target.value)}><option value="all">全部来源</option><option value="local">本机操作</option><option value="remote">远程操作</option></select>
       <select className="input" aria-label="操作结果" value={status} onChange={event => setStatus(event.target.value)}><option value="all">全部状态</option><option value="pending">待跟踪</option><option value="uncertain">结果待确认</option><option value="succeeded">已完成</option><option value="failed">失败</option></select></div>
       {(local.error || remote.error) && <Notice tone="amber">部分记录正在等待连接恢复。</Notice>}
-      {rows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>服务 / 请求</th><th>所属节点</th><th>动作</th><th>结果</th><th>更新时间</th></tr></thead><tbody>{rows.map(item => <tr key={`${item.source}/${item.request}`}><td><a className="text-link" href={withReturn(item.source === 'local' ? localServiceHref(item.service_id, 'history') : remoteServiceHref(item.node_id, item.service_id, false, item.request))}>{item.service_name || item.service_id}</a><small className="table-secondary">{item.request}</small></td><td>{item.node}</td><td>{{ start: '启动', stop: '停止', restart: '重启' }[item.action as 'start' | 'stop' | 'restart']}</td><td><StateBadge state={item.result?.status || 'queued'} /></td><td>{timestamp(item.updated_at)}</td></tr>)}</tbody></table></div> : !local.data || !remote.data ? <Loading /> : <EmptyState title="没有匹配的操作记录" />}
+      {rows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>服务 / 请求</th><th>所属节点</th><th>动作</th><th>结果</th><th>更新时间</th></tr></thead><tbody>{rows.map(item => <tr key={`${item.source}/${item.request}`}><td><a className="text-link" href={item.source === 'local' ? withReturn(localServiceHref(item.service_id, 'history')) : savedRemoteOperationHref(item.node_id, item.service_id, item.request)}>{item.service_name || item.service_id}</a><small className="table-secondary">{item.request}</small></td><td>{item.node}</td><td>{{ start: '启动', stop: '停止', restart: '重启' }[item.action as 'start' | 'stop' | 'restart']}</td><td><StateBadge state={item.result?.status || 'queued'} /></td><td>{timestamp(item.updated_at)}</td></tr>)}</tbody></table></div> : !local.data || !remote.data ? <Loading /> : <EmptyState title="没有匹配的操作记录" />}
     </Panel></>
 }

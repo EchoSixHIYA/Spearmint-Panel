@@ -26,7 +26,7 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
   const { entries, error } = useRemoteCatalog()
   const query = new URLSearchParams(location.hash.split('?')[1])
   const [search, setSearch] = useState(query.get('q') || '')
-  const [node, setNode] = useState(query.get('node') || initialNode || '')
+  const [node, setNode] = useState((embedded ? initialNode : query.get('node') || initialNode) || '')
   const [status, setStatus] = useState(query.get('status') || '')
   const rows = [
     ...(services.data || []).map(service => ({ service, node: local.data?.node_id || 'local', name: localName, local: true, stale: !!services.error || service.observation.stale, observation: service.observation })),
@@ -44,7 +44,7 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
   </PageHeading>}{embedded && <div className="button-row"><a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(initialNode))}>在此节点登记服务</a></div>}
     <div className="workspace-summary"><strong>{rows.length} 个已登记服务</strong><span>{rows.filter(row => !row.stale && row.observation?.status === 'running').length} 个运行中</span><span>通过 Mesh 在当前面板管理目标节点</span></div>
     <Panel><div className="workspace-filters"><label className="search-box"><Icon name="search" size={16} /><input aria-label="搜索服务" value={search} onChange={e => update('q', e.target.value)} placeholder="搜索服务、节点或程序名称…" /></label>
-      <select className="input" aria-label="按节点筛选" value={node} onChange={e => update('node', e.target.value)}><option value="">全部节点</option>{listedNodes.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+      <select className="input" aria-label="按节点筛选" value={node} disabled={embedded} onChange={e => update('node', e.target.value)}><option value="">全部节点</option>{listedNodes.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
       <select className="input" aria-label="按状态筛选" value={status} onChange={e => update('status', e.target.value)}><option value="">全部状态</option><option value="running">运行中</option><option value="stopped">已停止</option><option value="failed">失败</option><option value="stale">状态待确认</option></select>
       <button className="btn btn-secondary" onClick={refreshConsole}>刷新</button></div>
       {(services.error || error) && <Notice tone="amber">部分服务状态暂时无法更新，保留上次目录供查看。</Notice>}

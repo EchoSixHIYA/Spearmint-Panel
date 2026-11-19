@@ -8,6 +8,7 @@ export function workspace<T>(target: string, session: Session, action: string, b
 }
 export function workspaceError(error: unknown) {
   if (error instanceof ApiError) {
+    if (error.code === 'NOT_FOUND') return '目标节点或服务已不在当前目录，请刷新后核对。'
     if (error.code === 'UNSUPPORTED_METHOD' || error.status === 404) return '目标节点需要通过 Grove 群组更新升级后使用此功能。'
     if (['OFFLINE', 'NO_ROUTE', 'ROUTE_LOST', 'TIMEOUT'].includes(error.code || '')) return '到目标节点的 Mesh 路径暂时不可用，请稍后刷新。'
     if (error.code === 'DENIED') return '请核对 Grove 登录状态和成员目录同步情况。'

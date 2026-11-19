@@ -261,7 +261,8 @@ function FileBrowser({ connection }: { connection: Connection }) {
     await files({ operation: 'finish', transfer })
     const refreshed = await browse(listing.path)
     if (editor?.file.path === destination) {
-      const file = refreshed.items.find(item => item.path === destination)
+      const file = refreshed.items.find(item => item.path === destination) ?? { ...editor.file, size: data.size,
+        version: (await files<FileChunk>({ operation: 'read', path: destination, offset: 0, version: null })).version }
       const text = await data.text()
       if (file && active.current) setEditor({ file, text, original: text })
     }
