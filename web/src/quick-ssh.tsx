@@ -49,7 +49,14 @@ export default function QuickSSH({ targetId }: { targetId?: string }) {
   const [error, setError] = useState('')
   const selected = listedNodes.find(node => node.id === target)
   const openingController = useRef<AbortController | null>(null)
+  const autoStarted = useRef(false)
   useEffect(() => () => openingController.current?.abort(), [])
+  useEffect(() => {
+    if (targetId && selected && !autoStarted.current) {
+      autoStarted.current = true
+      void connect(selected)
+    }
+  }, [targetId, selected?.id])
 
   async function connect(node = selected) {
     if (!node || opening) return
