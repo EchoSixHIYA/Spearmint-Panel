@@ -20,6 +20,7 @@ Each device runs its own panel. Once devices join the same Grove, a Grove admini
 | Service management | Register foreground programs, system services, and containers locally or remotely. View status and logs and run supported start, stop, and restart operations. |
 | Grove and Mesh | Add members by invitation, synchronize the member directory, and see direct connections, relays, and active paths in the topology view. |
 | Node seeding | Choose an initiator in the topology, test SSH, browse one directory at a time, and let the initiator install, start, and enroll the target. |
+| Quick SSH | Select a node in the topology to open an xterm.js terminal over the existing Mesh, browse and transfer files, and edit text. Commands run as the target panel's OS account. |
 | Maintenance | View host resources and operation history, and back up or restore node state with the CLI. |
 
 ## Downloads

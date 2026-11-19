@@ -8,7 +8,7 @@ import { serviceSearchText } from './services'
 
 export const navigation = [
   { group: '工作台', items: [{ id: 'overview', title: '花园总览', icon: 'layout-dashboard' }, { id: 'alerts', title: '告警中心', icon: 'bell', admin: true }] },
-  { group: '基础设施', items: [{ id: 'nodes', title: '节点管理', icon: 'server', admin: true }, { id: 'topology', title: '网络拓扑', icon: 'network', admin: true }, { id: 'services', title: '服务管理', icon: 'layers', admin: true }, { id: 'exposures', title: '公网映射', icon: 'globe', admin: true }, { id: 'operations', title: '操作与审批', icon: 'activity' }] },
+  { group: '基础设施', items: [{ id: 'nodes', title: '节点管理', icon: 'server', admin: true }, { id: 'topology', title: '网络拓扑', icon: 'network', admin: true }, { id: 'ssh', title: '快速 SSH', icon: 'terminal', admin: true }, { id: 'services', title: '服务管理', icon: 'layers', admin: true }, { id: 'exposures', title: '公网映射', icon: 'globe', admin: true }, { id: 'operations', title: '操作与审批', icon: 'activity' }] },
   { group: '网络扩展', items: [{ id: 'seeds', title: '节点播种', icon: 'sprout', admin: true }, { id: 'pollen', title: '移动节点', icon: 'wind', admin: true, planned: true }, { id: 'federation', title: '跨 Grove 连接', icon: 'git-merge', admin: true, planned: true }] },
   { group: '安全与身份', items: [{ id: 'access', title: '用户与授权', icon: 'shield' }, { id: 'audit', title: '安全审计', icon: 'file-text', admin: true }, { id: 'sessions', title: '我的会话', icon: 'monitor' }] },
   { group: '系统与扩展', items: [{ id: 'deployments', title: '应用部署', icon: 'package', admin: true }, { id: 'settings', title: '系统设置', icon: 'settings' }] },

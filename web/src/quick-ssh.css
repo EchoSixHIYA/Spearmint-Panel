@@ -1,0 +1,32 @@
+.quick-ssh-connect { margin-top: 18px; }
+.quick-ssh-workspace { display: grid; gap: 10px; }
+.quick-ssh-workspace .panel { margin: 0; padding: 12px; }
+.quick-ssh-workspace .panel-head { margin-bottom: 8px; gap: 8px; }
+.quick-ssh-workspace .panel-head h3 { font-size: 14px; margin: 0; }
+.quick-ssh-workspace .button-row { gap: 6px; margin: 0; }
+.quick-ssh-workspace .btn { min-height: 30px; padding: 4px 9px; font-size: 12px; }
+.quick-ssh-terminal { height: min(54vh, 560px); min-height: 300px; padding: 8px; background: #102a24; border-radius: 8px; overflow: hidden; }
+.quick-ssh-terminal .xterm { height: 100%; }
+.quick-ssh-path { display: flex; gap: 6px; margin-bottom: 6px; }
+.quick-ssh-path .input { flex: 1; min-width: 0; min-height: 32px; padding: 5px 9px; font-family: Consolas, monospace; }
+.quick-ssh-drives { padding-bottom: 6px; }
+.quick-ssh-list { max-height: min(36vh, 360px); overflow: auto; }
+.quick-ssh-list .data-table th, .quick-ssh-list .data-table td { padding: 5px 9px; font-size: 12px; }
+.quick-ssh-list .data-table th { position: sticky; top: 0; z-index: 1; background: var(--bg); }
+.quick-ssh-list .data-table td:first-child { overflow-wrap: anywhere; }
+.quick-ssh-list .data-table th:nth-child(2) { width: 90px; }
+.quick-ssh-list .data-table th:last-child { width: 190px; }
+.quick-ssh-folder { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none; cursor: pointer; text-align: left; }
+.quick-ssh-editor { min-height: 180px; max-height: 320px; font-family: Consolas, monospace; white-space: pre; }
+.quick-ssh-files .stack-small { gap: 8px; }
+.quick-ssh-files .stack-small > strong { font-size: 12px; overflow-wrap: anywhere; }
+.quick-ssh-files .notice { margin: 6px 0; padding: 8px; }
+.quick-ssh-files p { margin: 6px 0; }
+@media (max-width: 600px) {
+  .quick-ssh-workspace .panel { padding: 8px; }
+  .quick-ssh-workspace .panel-head { align-items: flex-start; flex-wrap: wrap; }
+  .quick-ssh-terminal { min-height: 260px; padding: 6px; }
+  .quick-ssh-path { flex-wrap: wrap; }
+  .quick-ssh-list .data-table th:last-child { width: auto; }
+  .quick-ssh-list .button-row { flex-wrap: wrap; }
+}

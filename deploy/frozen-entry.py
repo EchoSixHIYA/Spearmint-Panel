@@ -18,6 +18,9 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--internal-supervisor"]:
         from spearmint.native_process import supervise
         raise SystemExit(supervise(*sys.argv[2:]))
+    if sys.argv[1:2] == ["--internal-terminal"]:
+        from spearmint.terminal_host import login_shell
+        raise SystemExit(login_shell())
     if sys.argv[1:2] == ["--internal-frp-supervisor"]:
         from spearmint.frp_runtime import supervise
         raise SystemExit(supervise(*sys.argv[2:]))

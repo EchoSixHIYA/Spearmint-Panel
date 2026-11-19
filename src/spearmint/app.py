@@ -33,6 +33,7 @@ from .peer.services import PeerServices, parse_logs
 from .service_details import update_service_details
 from .service_mode import ModeChangeError, change_mode
 from .service_removal import unregister
+from .terminal_service import TerminalService
 from .seeding import SeedDeployments
 from .state import State, StateError
 from .platforms import capabilities
@@ -368,6 +369,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     wizard = seed_wizard.SeedWizard(store, remote)
     remote.seed_wizard = wizard
     remote.service_setup = service_setup.ServiceSetup(store, node_id, config.docker_socket)
+    terminals = TerminalService(store, node_id)
+    remote.terminals = terminals
     remote.mesh_enrollment_policy = enrollment_policy
     remote.manager.use_system_egress = bool(enrollment_policy and enrollment_policy.bind_ip)
     host = deployment_host(capabilities(), schema)
@@ -383,6 +386,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         while True:
             try:
                 await run_in_threadpool(wizard.reap_idle)
+                await run_in_threadpool(terminals.reap)
                 pending_seed = await run_in_threadpool(seed_admission.pending, store)
                 if pending_seed is not None:
                     await seed_admission.finish(store, config, remote, pending_seed)
@@ -408,6 +412,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                     rollout.cancel()
                     await asyncio.gather(task, rollout, return_exceptions=True)
                     wizard.shutdown()
+                    await run_in_threadpool(terminals.shutdown)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.store = store
@@ -423,7 +428,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         policy = "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
-        response.headers["Content-Security-Policy"] = policy + ("; connect-src 'self' https:" if request.url.path == '/' else '')
+        response.headers["Content-Security-Policy"] = policy + ("; connect-src 'self' https:; style-src 'self' 'unsafe-inline'" if request.url.path == '/' else '')
         return response
 
     @app.exception_handler(RequestValidationError)
@@ -469,6 +474,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             "HOST_PERMISSION": 409, "SERVICE_STOPPED": 409, "SERVICE_LOG": 409, "SERVICE_COMMAND": 400,
             "DOCKER_MISSING": 409, "DOCKER_UNAVAILABLE": 409, "DOCKER_PERMISSION": 409,
             "SERVICE_DISCOVERY": 409,
+            "TERMINAL_CLOSED": 409, "TERMINAL_IO": 503, "FILE_UNAVAILABLE": 409,
             "REAUTHENTICATION_REQUIRED": 403, "APPROVAL_VERSION_REQUIRED": 409, "POLICY_CONFLICT": 409,
             "GROVE_INVITATION_EXPIRED": 410,
         }.get(error.code, 503)
@@ -682,6 +688,19 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             if error.code in {'OFFLINE', 'NO_ROUTE', 'ROUTE_LOST', 'TIMEOUT'}:
                 raise PeerError('SEED_SOURCE_OFFLINE', 'The selected executor is not reachable over Mesh') from error
             raise
+
+    @app.post('/api/v1/peers/{target}/terminal/{identifier}/{action}')
+    async def terminal_request(target: str, identifier: str, action: Literal['open', 'exchange', 'close', 'files'],
+                               body: dict = Depends(grove_body), actor: auth.Actor = Depends(require_admin_write)):
+        if re.fullmatch(r'[a-f0-9]{32}', identifier) is None:
+            raise PeerError('INVALID_REQUEST', 'Invalid terminal session ID')
+        owner = auth.digest(actor.token_hash.hex()).hex()[:32]
+        if target in ('local', node_id):
+            return await remote.work(terminals.request, service_setup.LocalAdmin(actor), node_id, owner, identifier, action, body)
+        pair = remote.pair_for(target)
+        identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+        return await remote.call(target, terminals.method, {'identity': identity, 'owner': owner, 'session': identifier,
+                                                           'action': action, 'body': body}, diagnostic=True)
 
     @app.post('/api/v1/peers/{node_id}/service-setup/{action}')
     async def remote_service_setup(node_id: str, action: Literal['kinds', 'candidates', 'register', 'manage', 'running', 'inspect', 'take-over', 'create'],

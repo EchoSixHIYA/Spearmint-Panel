@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ApiError, api, type Session } from './api'
 import { ConsoleData, useConsole, usePreferences } from './console-data'
@@ -17,6 +17,8 @@ import { deploymentTarget, nodeResourcesTarget, seedJoinTarget, seedProgressTarg
 import { Brand, EmptyState, Loading, Notice, PageHeading, Panel } from './ui'
 import './grove.css'
 import './style.css'
+
+const QuickSSH = lazy(() => import('./quick-ssh'))
 
 function webAssetId(url: string, extension: 'js' | 'css') {
   const path = new URL(url).pathname
@@ -37,6 +39,7 @@ function ConsolePage({ route, onFactors, onSave }: { route: ReturnType<typeof us
     case 'overview': return <OverviewPage />
     case 'nodes': return <NodesPage key={id || 'nodes'} nodeId={id} resources={nodeResourcesTarget(location.hash) === id && !!id} onSave={onSave} />
     case 'topology': return <TopologyPage target={id} />
+    case 'ssh': return <Suspense fallback={<Loading label="正在打开终端…" />}><QuickSSH key={id ?? 'picker'} targetId={id} /></Suspense>
     case 'services': return <Services section={id} segments={segments} session={session} onUnauthorized={onUnauthorized} />
     case 'exposures': return <ExposuresPage />
     case 'operations': return <OperationsPage section={id} />

@@ -11,7 +11,7 @@ export const remoteOperationHistoryRoutes = {
   recent: '#/operations', pending: '#/operations/pending', review: '#/operations/review',
 } as const
 export type RemoteOperationHistoryFilter = keyof typeof remoteOperationHistoryRoutes
-const sharedSections = ['overview', 'nodes', 'topology', 'services', 'services/local', 'services/remote', 'operations',
+const sharedSections = ['overview', 'nodes', 'topology', 'ssh', 'services', 'services/local', 'services/remote', 'operations',
   'operations/pending', 'operations/review', 'operations/local', 'operations/approvals', 'exposures', 'alerts', 'access', 'audit', 'deployments', 'settings', 'sessions', 'seeds']
 const sharedRoutes = new Set(sharedSections.map((section) => `#/${section}`))
 const seedProgressRoute = new RegExp(`^#/seeds/progress/([^/]+)(?:/(${nodeId}))?$`)
@@ -19,6 +19,7 @@ const nodeDetailRoute = new RegExp(`^#/nodes/(${nodeId})(?:/(resources))?$`)
 const savedRemoteOperationRoute = new RegExp(`^#/operations/remote/(${nodeId})/(${identifier})/(${identifier})(?:/(pending|review))?$`)
 const seedJoinRoute = new RegExp(`^#/access/join/(${nodeId})$`)
 const topologyTargetRoute = new RegExp(`^#/topology/(${nodeId})$`)
+const terminalTargetRoute = new RegExp(`^#/ssh/(${nodeId})$`)
 const deploymentTargetRoute = new RegExp(`^#/deployments/(${nodeId})$`)
 const remoteServiceRoute = new RegExp(`^#/services/remote/(${nodeId})/(${identifier})(?:/(logs)(?:/(${identifier}))?|/(${identifier}))?$`)
 const remoteServiceSyncRoute = new RegExp(`^#/services/remote/(${nodeId})/(${identifier})/sync$`)
@@ -123,12 +124,13 @@ export function seedProgressTarget(hash: string) {
 export function groveReturnRoute(hash: string) {
   if (hash.startsWith('#/seeds/')) return seedProgressTarget(hash) ? hash : '#/seeds'
   return sharedRoutes.has(hash) || serviceRegistrationTarget(hash) || groveServiceRegistrationTarget(hash) || seedJoinTarget(hash)
-    || nodeDetailRoute.test(hash) || savedRemoteOperationTarget(hash) || topologyTargetRoute.test(hash) || deploymentTarget(hash)
+    || nodeDetailRoute.test(hash) || savedRemoteOperationTarget(hash) || topologyTargetRoute.test(hash) || terminalTargetRoute.test(hash) || deploymentTarget(hash)
     || localServiceRoute.test(hash) || remoteDirectoryRoute.test(hash) || remoteServiceTarget(hash) ? hash : '#/overview'
 }
 
 export function grovePanelRoute(hash: string, targetId: string, currentId?: string, memberOrigins?: ReadonlyMap<string, string>) {
   if (sharedRoutes.has(hash)) return hash
+  if (terminalTargetRoute.test(hash)) return hash
   const setup = groveServiceRegistrationTarget(hash)
   if (setup) return setup.targetId === targetId ? localRegistrationRoute : hash
   const joining = seedJoinTarget(hash)
