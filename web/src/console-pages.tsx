@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { ApiError, api, READ_TIMEOUT_MS, timestamp } from './api'
 import { eventLabel, refreshConsole, useConsole, type AuditEntry, type NodeView, type PeerReputation, type Preferences } from './console-data'
 import { meshPathError, OwnerRegistrationLink, PeerDirectory, RouteDetails, RouteObservations, RouteSelectionStatus } from './remote'
-import { Badge, bytes, CopyValue, duration, EmptyState, GardenArt, HealthRing, Icon, Loading, Metric, Modal, NodeConnectionBadge, Notice, PageHeading, Panel, shortId, Tabs } from './ui'
+import { Badge, bytes, CopyValue, duration, EmptyState, GardenArt, Icon, Loading, Metric, Modal, NodeConnectionBadge, Notice, PageHeading, Panel, shortId, Tabs } from './ui'
 import { drivers, ServiceState } from './services'
 import { NetworkMap } from './network-map'
 import { NodeQuarantine } from './node-quarantine'
@@ -83,12 +83,7 @@ function AuditList({ entries }: { entries: AuditEntry[] }) {
 }
 
 export function OverviewPage() {
-  const { session, admin, listedNodes, memberNodes, remoteNodes, connections, meshCurrent, meshLoading, services, local,
-    alerts, audit, metrics, grove, directoryCurrent, directoryLoading, directoryPending } = useConsole()
-  const standalone = grove.data?.configured === false && !grove.error
-  const memberCount = standalone ? (meshCurrent ? listedNodes.length : '—') : memberNodes?.length ?? '—'
-  const memberDetail = memberNodes ? directoryCurrent ? '来自 Grove 成员目录' : '上次同步的成员目录'
-    : directoryPending ? '等待首次同步成员目录' : directoryLoading ? '正在读取成员目录' : '暂时无法读取成员目录'
+  const { admin, services, audit } = useConsole()
   return <>
     <section className="hero-garden overview-network" aria-labelledby="page-title">
       <header className="overview-network-heading">
@@ -109,19 +104,7 @@ export function OverviewPage() {
         </aside>
       </div>
     </section>
-    {admin ? <>
-      <div className="metrics-grid"><Metric label={standalone ? '节点清单' : 'Grove 成员'}
-        value={memberCount} unit="台" detail={standalone ? '本机及已登记节点' : memberDetail} icon="sprout" />
-        <Metric label="正在生长" value={services.data?.filter((s) => s.observation.status === 'running' && !s.observation.stale).length ?? '—'} unit="项" detail="本机运行的服务" icon="layers" />
-        <Metric label="延伸的根茎" value={meshCurrent ? remoteNodes.filter((n) => n.activePath?.length === 2).length : '—'} unit="条" detail="当前显示的直连路径" icon="network" />
-        <Metric label="需要你的关注" value={local.data ? alerts.length : '—'} unit="项" detail={alerts.length ? '查看节点与服务状态' : '暂未发现需要关注的事项'} icon="bell" /></div>
-      <div className="columns-2"><Panel title="当前节点的连接状态" action={<a className="panel-link" href="#/alerts">全部提醒<Icon name="arrow-up-right" size={14} /></a>}>
-        {meshLoading ? <Loading label="正在读取连接状态…" /> : !meshCurrent ? <Notice tone="amber">当前节点的连接状态暂时无法更新。</Notice>
-          : remoteNodes.length > 0 ? <HealthRing connections={connections} total={remoteNodes.length} />
-          : <EmptyState title="当前节点暂无远程连接记录" />}
-        <div className="divider" /><div className="inline-warning"><Icon name={alerts.length ? 'alert-triangle' : 'check-circle'} size={17} /><span>{alerts.length ? `${alerts.length} 项状态需要关注。` : '节点和服务状态会自动更新。'}</span><a href="#/alerts">查看提醒</a></div></Panel>
-        <Panel title="当前节点与邻居观测" action={<a className="panel-link" href="#/nodes">所有节点<Icon name="arrow-up-right" size={14} /></a>}>{listedNodes.length ? listedNodes.slice(0, 4).map((node) => <NodeMini item={node} key={node.id} />) : <Loading />}</Panel></div>
-      <div className="columns-2"><Panel title="本机资源" action={local.data && <NodeResourceLink id={local.data.node_id} />}><ResourceBars /></Panel>
+    {admin && <div className="columns-2">
         <Panel title="本机服务" action={<a className="panel-link" href="#/services/local">服务管理<Icon name="arrow-up-right" size={14} /></a>}>
           {services.error ? <Notice tone="amber">暂时无法读取本机服务。{services.error}</Notice>
             : !services.data ? <Loading label="正在读取本机服务…" />
@@ -132,10 +115,9 @@ export function OverviewPage() {
               <span className="node-mini-content"><strong>{service.name}</strong><small>{drivers[service.driver]}</small></span>
               <span><ServiceState observation={service.observation} /></span>
             </a>)}
-        </Panel></div>
+        </Panel>
       <Panel title="花园动态" action={<a className="panel-link" href="#/audit">活动记录<Icon name="arrow-up-right" size={14} /></a>}>{audit.data ? <AuditList entries={audit.data.slice(0, 4)} /> : <Loading />}</Panel>
-      <div className="bottom-note"><Icon name="leaf" size={17} />{metrics.data?.sampled_at ? `最近采样 ${timestamp(metrics.data.sampled_at)} · 所有状态均来自节点实际观测。` : '正在等待主机采样。'}</div>
-    </> : <div className="columns-2"><Panel title="开始一次远程操作"><EmptyState icon="shield-check" title="只操作你获准访问的服务" action={<a className="btn btn-primary" href="#/operations">查看授权服务<Icon name="arrow-right" size={16} /></a>}>选择目标，下载挑战，再导入独立工作站签署的批准。</EmptyState></Panel><Panel title="账户与安全"><dl className="facts"><div><dt>当前账户</dt><dd>{session.display_name || session.username}</dd></div><div><dt>账户角色</dt><dd>远程操作员</dd></div></dl><a className="text-link" href="#/sessions">管理我的登录会话<Icon name="arrow-right" size={15} /></a></Panel></div>}
+    </div>}
   </>
 }
 
