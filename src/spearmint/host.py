@@ -22,6 +22,12 @@ class HostTimeout(HostError):
     pass
 
 
+class DockerAccessError(HostError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class Capture:
     code: int
@@ -123,7 +129,7 @@ def command(argv: list[str], *, env: dict[str, str] | None = None, timeout: floa
 def docker_command(socket: Path) -> tuple[list[str], dict[str, str]]:
     executable = shutil.which("docker")
     if executable is None:
-        raise HostError("Docker CLI is not installed")
+        raise DockerAccessError('DOCKER_MISSING', 'Docker CLI is not installed')
     if WINDOWS:
         endpoint = str(socket).replace("\\", "/")
         if endpoint != "//./pipe/docker_engine":
@@ -132,28 +138,33 @@ def docker_command(socket: Path) -> tuple[list[str], dict[str, str]]:
         return [executable, "--host", "npipe:" + endpoint], env
     if not socket.is_absolute():
         raise HostError("Docker requires an absolute local Unix socket path")
+    default = Path(f'/run/user/{os.getuid()}/docker.sock')
+    if socket == default and not socket.exists():
+        socket = Path('/var/run/docker.sock')
     try:
         info = socket.lstat()
     except OSError as exc:
-        raise HostError("Configured Docker socket is unavailable") from exc
-    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid() or os.getuid() == 0:
-        raise HostError("Docker socket must be a Unix socket owned by the non-root panel account")
+        raise DockerAccessError('DOCKER_UNAVAILABLE', 'Local Docker socket is unavailable') from exc
+    if not stat.S_ISSOCK(info.st_mode):
+        raise DockerAccessError('DOCKER_UNAVAILABLE', 'Local Docker endpoint is not a Unix socket')
+    if not os.access(socket, os.R_OK | os.W_OK):
+        raise DockerAccessError('DOCKER_PERMISSION', 'The panel account cannot access the local Docker socket')
     env = {key: value for key, value in os.environ.items() if not key.startswith("DOCKER_")}
     env.update({"LC_ALL": "C", "DOCKER_CONFIG": str(Path.home() / ".config/spearmint/docker-cli")})
     return [executable, "--host", f"unix://{socket}"], env
 
 
-def rootless_command(socket: Path) -> tuple[list[str], dict[str, str]]:
+def local_docker_command(socket: Path) -> tuple[list[str], dict[str, str]]:
     argv, env = docker_command(socket)
     try:
         options = json.loads(command(argv + ["info", "--format", "{{json .SecurityOptions}}"], env=env))
     except (HostError, ValueError) as exc:
-        raise HostError("Cannot verify the configured Rootless Docker daemon") from exc
-    if not isinstance(options, list) or (not WINDOWS and __import__("platform").system() != "Darwin" and "name=rootless" not in options):
-        raise HostError("Configured Docker engine did not identify itself as rootless")
+        raise DockerAccessError('DOCKER_UNAVAILABLE', 'The local Docker daemon did not respond') from exc
+    if not isinstance(options, list):
+        raise DockerAccessError('DOCKER_UNAVAILABLE', 'Docker returned invalid daemon metadata')
     return argv, env
 
 
 def check_docker(socket: Path) -> str:
-    rootless_command(socket)
+    local_docker_command(socket)
     return str(socket)

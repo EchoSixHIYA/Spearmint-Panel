@@ -209,7 +209,7 @@ class NativeProcessDriver:
 
 
 class WindowsChild:
-    def __init__(self, argv: list[str], cwd: str):
+    def __init__(self, argv: list[str], cwd: str, command: str | None = None):
         import win32api
         import win32con
         import win32job
@@ -236,7 +236,10 @@ class WindowsChild:
                                     attributes, win32con.OPEN_EXISTING, 0, None)
         startup.hStdInput = null
         try:
-            process, thread, self.pid, _ = win32process.CreateProcess(argv[0], subprocess.list2cmdline(argv), None, None,
+            commandline = subprocess.list2cmdline(argv)
+            if command is not None:
+                commandline = subprocess.list2cmdline(argv[:1]) + ' /d /s /c "' + command + '"'
+            process, thread, self.pid, _ = win32process.CreateProcess(argv[0], commandline, None, None,
                 True, win32con.CREATE_SUSPENDED | win32con.CREATE_NO_WINDOW, None, cwd, startup)
             self.process = process
             try:
@@ -306,7 +309,7 @@ def supervise(state_dir: str, service_id: str, instance: str | None = None, laun
 
         try:
             if WINDOWS:
-                child = WindowsChild(service.spec["argv"], service.spec["cwd"])
+                child = WindowsChild(service.spec["argv"], service.spec["cwd"], service.spec.get('command'))
                 pipe = child.output
             else:
                 child = subprocess.Popen(service.spec["argv"], cwd=service.spec["cwd"], stdin=subprocess.DEVNULL,

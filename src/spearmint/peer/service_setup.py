@@ -9,7 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .. import auth
 from ..catalog import ACTIONS, RegistrationError, Service, TargetAlreadyRegistered, get_service, list_services, process_spec, register, service_name, validate_endpoint
 from ..drivers import CONTAINER_ID, ContainerNotFound, DockerDriver, SystemUnitDriver
-from ..host import HostError
+from ..host import DockerAccessError, HostError
+from ..service_command import command_spec
 from ..platforms import WINDOWS
 from ..service_mode import ModeChangeError, change_mode
 from ..state import StateError
@@ -55,9 +56,10 @@ class Takeover(Registration):
 class NewService(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     name: str = Field(min_length=1, max_length=80)
-    executable: str = Field(min_length=1, max_length=1024)
+    command: str | None = Field(default=None, min_length=1, max_length=8192)
+    executable: str | None = Field(default=None, min_length=1, max_length=1024)
     arguments: list[str] = Field(default_factory=list, max_length=128)
-    cwd: str = Field(min_length=1, max_length=1024)
+    cwd: str | None = Field(default=None, min_length=1, max_length=1024)
     stop_timeout: int = Field(default=8, ge=1, le=30)
     endpoint: str | None = Field(default=None, max_length=180)
 
@@ -84,7 +86,8 @@ def system_targets(state, kind: Kind) -> dict[str, str]:
 
 def registration_view(service) -> dict:
     return {'id': service.id, 'target': service.target, 'name': service.name, 'version': service.version,
-            'managed': service.managed}
+            'managed': service.managed,
+            **({'command': service.spec['command'], 'cwd': service.spec['cwd']} if 'command' in service.spec else {})}
 
 
 def acting_as(actor: GroveServiceAdmin | LocalAdmin) -> dict:
@@ -113,7 +116,7 @@ class ServiceSetup:
             actor.require(db)
         try:
             if action == 'kinds' and body == {}:
-                return {'kinds': available_kinds(), 'workflow': 2, 'checks': True}
+                return {'kinds': available_kinds(), 'workflow': 2, 'checks': True, 'commands': True}
             if action == 'candidates':
                 return self.candidates(Selection.model_validate(body).kind)
             if action == 'running':
@@ -134,6 +137,8 @@ class ServiceSetup:
             raise PeerError('INVALID_REQUEST', 'Invalid service setup parameters') from error
         except ContainerNotFound as error:
             raise PeerError('NOT_FOUND', 'Target container was removed or replaced') from error
+        except DockerAccessError as error:
+            raise PeerError(error.code, str(error)) from error
         except (HostError, ModeChangeError) as error:
             raise PeerError('CONFLICT', 'The owning node could not verify the workload or its management permissions') from error
         except RegistrationError as error:
@@ -155,6 +160,8 @@ class ServiceSetup:
                     targets = {unit: unit for unit in sorted(SystemUnitDriver.running_units())}
                 else:
                     targets = dict(sorted(WindowsServiceDriver(self.state).running_services().items()))
+                    if not targets:
+                        raise PeerError('SERVICE_DISCOVERY', 'The Windows service manager returned no running services')
             else:
                 targets = system_targets(self.state, kind)
             registered = [service for service in registered if is_kind(service, kind)]
@@ -265,7 +272,14 @@ class ServiceSetup:
 
     def create(self, actor: GroveServiceAdmin | LocalAdmin, body: NewService) -> dict:
         try:
-            spec = process_spec([body.executable, *body.arguments], body.cwd, body.stop_timeout, body.endpoint)
+            if body.command is not None:
+                if body.executable is not None or body.arguments:
+                    raise StateError('Supply one startup command')
+                spec = command_spec(body.command, body.cwd, body.stop_timeout, body.endpoint)
+            elif body.executable is not None and body.cwd is not None:
+                spec = process_spec([body.executable, *body.arguments], body.cwd, body.stop_timeout, body.endpoint)
+            else:
+                raise StateError('Provide a startup command')
         except StateError as error:
             raise PeerError('SERVICE_COMMAND', str(error)) from error
         name = service_name(body.name)

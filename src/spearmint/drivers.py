@@ -9,7 +9,7 @@ import time
 from typing import Protocol
 
 from .catalog import ACTIONS, Service, register
-from .host import Capture, HostError, HostTimeout, capture, rootless_command
+from .host import Capture, HostError, HostTimeout, capture, local_docker_command
 from .state import State, StateError
 
 
@@ -309,7 +309,7 @@ class DockerDriver:
         self.socket = socket
 
     def available_containers(self, registered: set[str], *, running_only: bool = False) -> dict:
-        argv, env = rootless_command(self.socket)
+        argv, env = local_docker_command(self.socket)
         template = '{"id":{{json .ID}},"name":{{json .Names}},"state":{{json .State}}}'
         selection = ['--filter', 'status=running'] if running_only else ['--all']
         result = capture([*argv, "container", "ls", *selection, "--no-trunc", "--format", template],
@@ -341,7 +341,7 @@ class DockerDriver:
         if result.code:
             if b"No such container:" in result.stderr or b"No such object:" in result.stderr:
                 return None
-            raise HostError("Cannot inspect the container on the configured Rootless Docker daemon")
+            raise HostError("Cannot inspect the container on the local Docker daemon")
         try:
             value = json.loads(result.stdout)
             if CONTAINER_ID.fullmatch(value["id"]) is None:
@@ -353,7 +353,7 @@ class DockerDriver:
     def resolve(self, reference: str) -> str:
         if re.fullmatch(CONTAINER_REFERENCE, reference) is None:
             raise HostError("Provide a container name or ID")
-        argv, env = rootless_command(self.socket)
+        argv, env = local_docker_command(self.socket)
         details = self.details(argv, env, reference)
         if details is None:
             raise ContainerNotFound("Container does not exist on the configured Docker engine")
@@ -372,7 +372,7 @@ class DockerDriver:
     def registered(self, service: Service) -> tuple[list[str], dict[str, str], dict | None]:
         if CONTAINER_ID.fullmatch(service.target) is None:
             raise HostError("Registered container target is invalid")
-        argv, env = rootless_command(self.socket)
+        argv, env = local_docker_command(self.socket)
         details = self.details(argv, env, service.target)
         if details is not None and details["id"] != service.target:
             raise HostError("Docker returned a different container ID")
@@ -402,7 +402,7 @@ class DockerDriver:
         timeout = ["--time", str(service.spec["stop_timeout"])] if action != "start" else []
         result = capture([*argv, "container", action, *timeout, "--", service.target], env=env, timeout=service.spec["stop_timeout"] + 5)
         if result.code:
-            raise HostError(f"Rootless Docker could not {action} the registered container")
+            raise HostError(f"Docker could not {action} the registered container")
 
     def logs(self, service: Service, tail: int) -> LogSnapshot:
         argv, env, details = self.registered(service)

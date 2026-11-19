@@ -7,9 +7,9 @@ import { Icon, Loading, Notice, PageHeading, Panel, Tabs } from './ui'
 const kinds = { systemd: 'systemd 系统服务', windows: 'Windows 系统服务', docker: 'Docker 容器' }
 type Kind = keyof typeof kinds
 type Candidate = { target: string; name: string }
-type Registered = Candidate & { id: string; managed: boolean; version: number }
+type Registered = Candidate & { id: string; managed: boolean; version: number; command?: string; cwd?: string }
 type Candidates = { candidates: Candidate[]; registered: Registered[]; truncated: boolean; next_offset?: number | null; previous_offset?: number | null }
-type Capabilities = { kinds: Kind[]; workflow?: number; checks?: boolean }
+type Capabilities = { kinds: Kind[]; workflow?: number; checks?: boolean; commands?: boolean }
 type Readiness = { ready: boolean; log_path?: string | null }
 type SetupProps = { session: Session; onUnauthorized: () => void }
 type Action = 'kinds' | 'running' | 'inspect' | 'take-over' | 'create' | 'manage'
@@ -29,7 +29,11 @@ function setupError(error: unknown, onUnauthorized: () => void) {
     if (error.code === 'UNSUPPORTED_METHOD') return '目标节点需要升级后才能使用此登记流程。'
     if (error.code === 'HOST_PERMISSION') return '目标机的面板账号缺少这个服务的启停或日志权限。'
     if (error.code === 'SERVICE_STOPPED') return '服务已停止运行，请刷新目标节点的运行列表。'
-    if (error.code === 'SERVICE_COMMAND') return '请核对程序和工作目录的绝对路径，并确认目标机上的面板账号能访问它们。'
+    if (error.code === 'SERVICE_COMMAND') return '请填写启动命令，并核对指定的运行目录是否能被目标机账号访问。'
+    if (error.code === 'DOCKER_MISSING') return '目标节点未找到 Docker 命令。请安装 Docker，并让面板账号能找到 docker。'
+    if (error.code === 'DOCKER_UNAVAILABLE') return '目标节点的本机 Docker 未启动或连接不可用。请检查 Docker 服务。'
+    if (error.code === 'DOCKER_PERMISSION') return '目标节点的面板账号没有访问本机 Docker 的权限。'
+    if (error.code === 'SERVICE_DISCOVERY') return '目标 Windows 未能返回运行中的系统服务，请检查目标机服务管理器和面板运行账号。'
     if (error.code === 'SERVICE_LOG') return '目标节点无法读取该应用的日志。请核对日志配置和面板账号权限。'
     if (error.code === 'INVALID_REQUEST' || error.status === 404) return '目标服务或输入已变更，请核对后重试。'
     if (error.code === 'CONFLICT') return '请核对名称或目标是否已登记，以及目标节点能否读取此类服务。'
@@ -84,7 +88,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
   }, [session, nodeId, reads, supported, onUnauthorized])
 
   useEffect(() => {
-    if (mode !== 'take-over' || !kind || supported?.workflow !== 2 || result) return
+    if (mode !== 'take-over' || !kind || !supported?.checks || result) return
     const controller = new AbortController()
     request<Candidates>(session, nodeId, 'running', supported.checks ? { kind, offset } : { kind }, AbortSignal.any([controller.signal, AbortSignal.timeout(18_000)]))
       .then(data => { if (!controller.signal.aborted) setChoices(data) })
@@ -143,10 +147,8 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
       const log_path = String(values.get('log_path') ?? '').trim() || null
       void mutate('take-over', { kind, target: candidate.target, name: name || Array.from(candidate.name).slice(0, 80).join(''), endpoint, log_path })
     } else if (mode === 'create') {
-      const argumentsText = String(values.get('arguments') ?? '')
-      const args = argumentsText ? argumentsText.split(/\r?\n/) : []
-      void mutate('create', { name, endpoint, arguments: args, executable: String(values.get('executable')).trim(),
-        cwd: String(values.get('cwd')).trim() })
+      void mutate('create', { name, endpoint, command: String(values.get('command') ?? '').trim(),
+        cwd: String(values.get('cwd') ?? '').trim() || null })
     }
   }
 
@@ -157,6 +159,8 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
         : supported.workflow !== 2 ? <Notice tone="amber">目标节点需要升级后才能接管运行中的服务或新建服务。</Notice>
         : result ? <>
           <Notice title={`已托管 ${result.name}`}>{mode === 'create' ? '服务已登记。打开服务详情即可启动并查看日志。' : '服务已纳入托管，可以管理启停并查看应用日志。'}</Notice>
+          {result.command && <dl className="facts"><div><dt>启动命令</dt><dd><code>{result.command}</code></dd></div>
+            <div><dt>运行目录</dt><dd>{result.cwd}</dd></div></dl>}
           <div className="button-row">
             <a className="btn btn-primary" href={serviceHref(result.id)}>打开服务</a>
             <button className="btn btn-secondary" type="button" onClick={() => { setResult(undefined); setCandidateId(''); refresh() }}>继续登记</button>
@@ -164,9 +168,8 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
         </> : <>
           <Tabs label="登记方式" current={mode} items={[{ id: 'take-over', label: '接管现有服务' }, { id: 'create', label: '新建服务' }]}
             onChange={value => { if (!busy && value !== mode) { setMode(value as Mode); selectCandidate(''); setChoices(undefined) } }} />
-          {mode === 'take-over' && <>
-            <p className="muted">{supported.checks ? '列表显示正在运行的服务。选择后检查目标机的管理和日志权限。'
-              : '目标节点仍使用旧的接管流程，升级后可发现运行中的服务并自动检查日志。'}</p>
+          {mode === 'take-over' && (!supported.checks ? <Notice tone="amber">目标节点仍在使用允许列表过滤服务。请通过 Grove 群组更新升级目标节点，再读取运行中的服务。</Notice> : <>
+            <p className="muted">列表显示正在运行的服务。选择后检查目标机的管理和日志权限。</p>
             {supported.kinds.length ? <label className="field-label">服务类型<select className="input" value={kind || ''} disabled={busy}
               onChange={event => { setKind(event.target.value as Kind); setOffset(0); refresh() }}>
               {supported.kinds.map(item => <option value={item} key={item}>{kinds[item]}</option>)}
@@ -191,15 +194,18 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
                 </li>)}
               </ul></details>}
             </>}
-          </>}
+          </>)}
+          {mode === 'create' && !supported.commands && <Notice tone="amber">请通过 Grove 群组更新升级目标节点，以使用完整启动命令登记服务。</Notice>}
           {mode === 'take-over' && candidate && supported.checks && !checked && !error && <Loading label="正在检查此服务能否接管…" />}
-          {(mode === 'create' || canTakeOver) && <form className="stack" onSubmit={submit} key={mode === 'create' ? mode : candidate?.target}>
+          {(mode === 'create' && supported.commands || canTakeOver) && <form className="stack" onSubmit={submit} key={mode === 'create' ? mode : candidate?.target}>
             <label className="field-label">服务名称<input className="input" name="name" maxLength={80} required={mode === 'create'} placeholder={candidate?.name} disabled={busy} /></label>
             {mode === 'create' ? <>
-              <p className="muted">程序在目标机的面板账号下运行，标准输出和错误输出会写入服务日志。</p>
-              <label className="field-label">可执行文件的绝对路径<input className="input" name="executable" required maxLength={1024} disabled={busy} /></label>
-              <label className="field-label">工作目录的绝对路径<input className="input" name="cwd" required maxLength={1024} disabled={busy} /></label>
-              <label className="field-label">启动参数（可选，每行一个）<textarea className="input" name="arguments" rows={4} maxLength={8192} disabled={busy} /></label>
+              <label className="field-label">启动命令<textarea className="input" name="command" required rows={3} maxLength={8192} disabled={busy}
+                placeholder={'python "C:\\Apps\\hello.py" 或 python /srv/app/hello.py'} /></label>
+              <p className="muted">填写在目标机终端中使用的完整命令。命令在面板账号下运行，输出会写入服务日志。</p>
+              <details><summary>运行目录（可选）</summary><p className="muted">命令读取相对路径文件时使用的目录。默认采用命令中指定的脚本或程序所在目录，否则使用目标账号的主目录。</p>
+                <label className="field-label">指定运行目录<input className="input" name="cwd" maxLength={1024} disabled={busy} placeholder="留空自动选择" /></label>
+              </details>
             </> : kind === 'windows' && (checked?.log_path ? <p className="muted">已识别应用日志 <code>{checked.log_path}</code></p>
               : <label className="field-label">目标 Windows 应用日志的绝对路径
               <input className="input" name="log_path" maxLength={420} required disabled={busy} placeholder={'C:\\Apps\\MyApp\\logs\\app.log'} />
