@@ -9,7 +9,7 @@ type Kind = keyof typeof kinds
 type Candidate = { target: string; name: string }
 type Registered = Candidate & { id: string; managed: boolean; version: number; command?: string }
 type Candidates = { candidates: Candidate[]; registered: Registered[]; truncated: boolean; next_offset?: number | null; previous_offset?: number | null }
-type Capabilities = { kinds: Kind[]; workflow?: number; checks?: boolean; commands?: boolean }
+type Capabilities = { kinds: Kind[]; workflow?: number; checks?: boolean; commands?: boolean; scripts?: boolean }
 type Readiness = { ready: boolean; log_path?: string | null }
 type SetupProps = { session: Session; onUnauthorized: () => void }
 type Action = 'kinds' | 'running' | 'inspect' | 'take-over' | 'create' | 'manage'
@@ -192,9 +192,9 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
               </ul></details>}
             </>}
           </>)}
-          {mode === 'create' && !supported.commands && <Notice tone="amber">请通过 Grove 群组更新升级目标节点，以使用完整启动命令登记服务。</Notice>}
+          {mode === 'create' && !supported.scripts && <Notice tone="amber">请通过 Grove 群组更新升级目标节点，以保存并执行多行启动脚本。</Notice>}
           {mode === 'take-over' && candidate && supported.checks && !checked && !error && <Loading label="正在检查此服务能否接管…" />}
-          {(mode === 'create' && supported.commands || canTakeOver) && <form className="stack" onSubmit={submit} key={mode === 'create' ? mode : candidate?.target}>
+          {(mode === 'create' && supported.scripts || canTakeOver) && <form className="stack" onSubmit={submit} key={mode === 'create' ? mode : candidate?.target}>
             <label className="field-label">服务名称<input className="input" name="name" maxLength={80} required={mode === 'create'} placeholder={candidate?.name} disabled={busy} /></label>
             {mode === 'create' ? <>
               <label className="field-label">启动命令<textarea className="input" name="command" required rows={3} maxLength={8192} disabled={busy}

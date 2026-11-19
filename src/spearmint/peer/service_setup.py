@@ -116,7 +116,7 @@ class ServiceSetup:
             actor.require(db)
         try:
             if action == 'kinds' and body == {}:
-                return {'kinds': available_kinds(), 'workflow': 2, 'checks': True, 'commands': True}
+                return {'kinds': available_kinds(), 'workflow': 2, 'checks': True, 'commands': True, 'scripts': True}
             if action == 'candidates':
                 return self.candidates(Selection.model_validate(body).kind)
             if action == 'running':
