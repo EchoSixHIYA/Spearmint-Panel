@@ -1,8 +1,10 @@
 import { useLayoutEffect, useRef } from 'react'
 import { useConsole, type NodeView } from './console-data'
+import { shortId } from './ui'
 
-type SavedNode = { id: string; name: string; depth: number; path?: string[] }
-type Snapshot = { version: 1; current: string; realm: string | null; nodes: SavedNode[] }
+export type RememberedEdge = { from: string; to: string; owners: string[] }
+type SavedNode = { id: string; name: string; depth: number; path?: string[]; relay?: true }
+type Snapshot = { version: 1; current: string; realm: string | null; realmKnown?: boolean; nodes: SavedNode[]; edges?: RememberedEdge[] }
 const nodeId = /^spm1-[a-f0-9]{64}$/
 
 function read(key: string): Snapshot | undefined {
@@ -15,12 +17,16 @@ function read(key: string): Snapshot | undefined {
     const seen = new Set<string>()
     for (const node of value.nodes) {
       if (!nodeId.test(node.id) || seen.has(node.id) || typeof node.name !== 'string' || node.name.length > 160
-        || !Number.isInteger(node.depth) || node.depth < 0 || node.depth > 512) return
+        || !Number.isInteger(node.depth) || node.depth < 0 || node.depth > 512 || (node.relay !== undefined && node.relay !== true)) return
       seen.add(node.id)
       if (node.path && (!Array.isArray(node.path) || node.path.length < 2 || node.path.length > 512
         || node.path[0] !== value.current || node.path.at(-1) !== node.id
         || node.path.some(id => !nodeId.test(id)) || new Set(node.path).size !== node.path.length)) return
     }
+    if (value.realmKnown !== undefined && typeof value.realmKnown !== 'boolean') return
+    if (value.edges !== undefined && (!Array.isArray(value.edges) || value.edges.length > 65536 || value.edges.some(edge =>
+      !nodeId.test(edge.from) || !nodeId.test(edge.to) || edge.from === edge.to || !Array.isArray(edge.owners)
+      || edge.owners.length > 4096 || edge.owners.some(id => !seen.has(id))))) return
     if (seen.has(value.current)) return value
   } catch { /* A missing or unavailable display cache must not block the live graph. */ }
 }
@@ -34,30 +40,56 @@ export function useNetworkMemory() {
   let previous = memory.current.key === key ? memory.current.snapshot : read(key)
   const realmKnown = !!grove.data && !grove.error
   const realm = grove.data?.realm?.id ?? null
-  if ((local.data && previous?.current !== local.data.node_id) || (realmKnown && previous?.realm !== realm)) previous = undefined
+  const previousRealmKnown = previous?.realmKnown ?? previous?.realm != null
+  if ((local.data && previous?.current !== local.data.node_id) || (realmKnown && previousRealmKnown && previous?.realm !== realm)) previous = undefined
   const current = local.data?.node_id ?? previous?.current
   const authoritative = directoryCurrent || (grove.data?.configured === false && !grove.error && meshCurrent)
   const live = new Map(listedNodes.map(node => [node.id, node]))
   const allowed = new Set(live.keys())
-  const saved = new Map((previous?.nodes ?? []).filter(node => !authoritative || allowed.has(node.id)).map(node => [node.id, node]))
+  const removed = new Set((previous?.nodes ?? []).filter(node => authoritative && !node.relay && !allowed.has(node.id)).map(node => node.id))
+  const saved = new Map((previous?.nodes ?? []).filter(node => !removed.has(node.id)).map(node => [node.id, node]))
   const ids = [...new Set([...saved.keys(), ...live.keys()])]
-  const nodes: NodeView[] = ids.map(id => {
+  let nodes: NodeView[] = ids.map(id => {
     const cached = saved.get(id), actual = live.get(id)
     if (actual) return { ...actual, name: nodeNotesCurrent ? actual.name : cached?.name ?? actual.name }
     return { id, name: cached!.name, local: id === current, status: 'unknown', observations: [] }
   })
   const paths = new Map<string, string[]>()
   const depths = new Map<string, number>()
-  const stored: SavedNode[] = nodes.map(node => {
+  for (const node of nodes) {
     const cached = saved.get(node.id)
-    const path = node.activePath ?? (cached?.path && (!authoritative || cached.path.every(id => allowed.has(id))) ? cached.path : undefined)
+    const path = node.activePath ?? (cached?.path && !cached.path.some(id => removed.has(id)) ? cached.path : undefined)
     const depth = node.local ? 0 : path ? path.length - 1 : cached?.depth ?? 1
     if (path) paths.set(node.id, path)
     depths.set(node.id, depth)
-    return { id: node.id, name: node.name, depth, ...(path && { path }) }
+  }
+  const edges = new Map<string, RememberedEdge>()
+  function remember(from: string, to: string, owners: string[]) {
+    if (removed.has(from) || removed.has(to) || !owners.length) return
+    const key = [from, to].sort().join('/')
+    const old = edges.get(key)
+    edges.set(key, { from: old?.from ?? from, to: old?.to ?? to, owners: [...new Set([...(old?.owners ?? []), ...owners])] })
+  }
+  for (const edge of previous?.edges ?? []) {
+    remember(edge.from, edge.to, edge.owners.filter(id => saved.has(id) && !live.get(id)?.activePath))
+  }
+  for (const [owner, path] of paths) for (let depth = 1; depth < path.length; depth++) {
+    remember(path[depth - 1], path[depth], [owner])
+    if (!depths.has(path[depth])) depths.set(path[depth], saved.get(path[depth])?.depth ?? depth)
+  }
+  const endpoints = new Set([...edges.values()].flatMap(edge => [edge.from, edge.to]))
+  nodes = nodes.filter(node => !saved.get(node.id)?.relay || live.has(node.id) || endpoints.has(node.id))
+  const plotted = new Set(nodes.map(node => node.id))
+  for (const id of endpoints) if (!plotted.has(id)) {
+    nodes.push({ id, name: saved.get(id)?.name ?? shortId(id), local: id === current, status: 'unknown', observations: [] })
+    if (!depths.has(id)) depths.set(id, saved.get(id)?.depth ?? 1)
+  }
+  const stored: SavedNode[] = nodes.map(node => {
+    const path = paths.get(node.id)
+    return { id: node.id, name: node.name, depth: depths.get(node.id) ?? 1, ...(path && { path }), ...(!live.has(node.id) && (saved.get(node.id)?.relay || !saved.has(node.id)) && { relay: true as const }) }
   })
   const snapshot: Snapshot | undefined = current && nodes.some(node => node.id === current)
-    ? { version: 1, current, realm: realmKnown ? realm : previous?.realm ?? realm, nodes: stored } : undefined
+    ? { version: 1, current, realm: realmKnown ? realm : previous?.realm ?? realm, realmKnown: realmKnown || (previous?.realmKnown ?? previous?.realm != null), nodes: stored, edges: [...edges.values()] } : undefined
   const raw = snapshot && JSON.stringify(snapshot)
   useLayoutEffect(() => {
     if (!snapshot || !raw) return
@@ -67,5 +99,5 @@ export function useNetworkMemory() {
       try { localStorage.setItem(key, raw) } catch { /* The live graph also works without browser storage. */ }
     }
   }, [key, raw])
-  return { nodes, current: nodes.find(node => node.local), paths, depths }
+  return { nodes, current: nodes.find(node => node.local), paths, depths, edges: [...edges.values()] }
 }

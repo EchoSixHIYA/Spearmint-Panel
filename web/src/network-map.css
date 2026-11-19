@@ -98,7 +98,7 @@ button.mesh-node:not(:disabled):hover { border-color: #73a98a; box-shadow: 0 5px
 .mesh-node.is-local .mesh-node-icon { background: #ffffff24; color: #dbf4e2; }
 .mesh-node-info { display: grid; min-width: 0; flex: 1; gap: 3px; }
 .mesh-node-info strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.3; }
-.mesh-node-info small { display: flex; flex-wrap: wrap; align-items: center; column-gap: 5px; color: #587064; font-size: 11px; line-height: 1.4; }
+.mesh-node-info small { display: flex; flex-wrap: nowrap; overflow: hidden; white-space: nowrap; align-items: center; column-gap: 5px; color: #587064; font-size: 11px; line-height: 1.4; }
 .mesh-node.is-local small { color: #cbe8d6; }
 .mesh-status-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: #8b9b90; }
 .mesh-node.is-online .mesh-status-dot { background: #438b62; }

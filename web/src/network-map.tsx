@@ -3,16 +3,20 @@ import { type NodeView } from './console-data'
 import { reachabilityLabel } from './connection-status'
 import { Icon, nodeConnectionLabel, shortId } from './ui'
 import { NetworkCanvas } from './network-canvas'
-import { useNetworkMemory } from './network-memory'
+import { useNetworkMemory, type RememberedEdge } from './network-memory'
 import './network-map.css'
 
 type Link = { id: string; from: string; to: string; kind: 'active' | 'selected' | 'alternative'; shared?: boolean; pending?: boolean }
 
-function reportedLinks(nodes: NodeView[], current: NodeView, paths: Map<string, string[]>, rememberedDepths: Map<string, number>, target?: string, alternative?: readonly string[]) {
+function reportedLinks(nodes: NodeView[], current: NodeView, paths: Map<string, string[]>, rememberedDepths: Map<string, number>, rememberedEdges: RememberedEdge[], target?: string, alternative?: readonly string[]) {
   const destinations = new Map<string, number>()
   const positions = new Map<string, number>()
   const relayPositions = new Map<string, number>()
   const links = new Map<string, Link>()
+  for (const { from, to } of rememberedEdges) {
+    const id = [from, to].sort().join('/')
+    links.set(id, { id, from, to, kind: 'active', pending: true })
+  }
   for (const node of nodes) {
     const path = node.activePath ?? paths.get(node.id)
     if (!path) continue
@@ -187,6 +191,9 @@ function MapNode({ node, plotted = false, hops, selected = false, alternative = 
   const latency = online ? node.peer?.rtt_ms : null
   const evidence = reachabilityLabel(node)
   const relayOnly = plotted && online && !node.local && hops === undefined
+  const pathDetail = hops !== undefined ? hops === 1 ? '直连' : `活动路径 ${hops} 跳`
+    : !online ? evidence || (node.idlePath ? `上次连接 ${node.idlePath.path.length - 1} 跳` : '连接待确认')
+    : awaitingPath ? '路径待报告' : relayOnly ? alternative ? '备路经过' : '中继经过' : undefined
   const props = { className: `mesh-node${node.local ? ' is-local' : ''}${online ? ' is-online' : ''}${selected ? ' is-target' : ''}`,
     'data-mesh-node': plotted ? node.id : undefined, title: node.name }
   const card = <>
@@ -194,12 +201,7 @@ function MapNode({ node, plotted = false, hops, selected = false, alternative = 
     <span className="mesh-node-info">
       <strong>{node.name}</strong>
       <small><span className="mesh-status-dot" />{nodeConnectionLabel(node)}{latency != null && <span className="mesh-latency" title="心跳往返时间">{latency.toFixed(1)} ms</span>}</small>
-      {hops !== undefined && <small>{hops === 1 ? '直连' : `活动路径 ${hops} 跳`}</small>}
-      {awaitingPath && <small>路径待报告</small>}
-      {!online && plotted && <small>连接待确认</small>}
-      {!online && node.idlePath && <small>上次连接 {node.idlePath.path.length - 1} 跳</small>}
-      {relayOnly && <small>{alternative ? '备路经过' : '中继经过'}</small>}
-      {evidence && <small>{evidence}</small>}
+      {pathDetail && <small title={pathDetail}>{pathDetail}</small>}
     </span>
     <Icon name={onPick ? selected ? 'check' : 'arrow-right' : 'arrow-up-right'} className="mesh-node-arrow" size={15} />
   </>
@@ -220,10 +222,10 @@ function MapRelay({ id, alternative }: { id: string; alternative: boolean }) {
 export function NetworkMap({ mini = false, compact = false, target, alternative, onPick }: {
   mini?: boolean; compact?: boolean; target?: string; alternative?: readonly string[]; onPick?: (id: string) => void
 }) {
-  const { nodes, current, paths, depths: rememberedDepths } = useNetworkMemory()
+  const { nodes, current, paths, depths: rememberedDepths, edges } = useNetworkMemory()
   if (!current) return <div className="mesh-map"><p className="mesh-map-message">正在读取本机节点…</p></div>
 
-  const { depths, destinations, alternativeOnly, links } = reportedLinks(nodes, current, paths, rememberedDepths, target, alternative)
+  const { depths, destinations, alternativeOnly, links } = reportedLinks(nodes, current, paths, rememberedDepths, edges, target, alternative)
   const levels = new Map<number, string[]>()
   const byId = new Map(nodes.map((node) => [node.id, node]))
   for (const [id, depth] of [...depths].sort(([, a], [, b]) => a - b)) {
