@@ -15,3 +15,8 @@
 .registration-steps .current { color: var(--green); font-weight: 700; }
 .nav-item.section-active { background: #eaf4eb; color: #246b50; font-weight: 730; }
 @media (max-width: 600px) { .workspace-filters select { flex: 1; max-width: none; } .workspace-summary > :last-child { margin-left: 0; } }
+.app-shell{min-height:100dvh}
+.main-wrap{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh}
+.main-content{display:flex;flex:1;flex-direction:column;width:100%;margin:0 auto}
+.console-page-content{flex:1;min-width:0}
+.topbar,.app-footer{flex-shrink:0}
