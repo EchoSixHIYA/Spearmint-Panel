@@ -52,19 +52,34 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
         const href = withReturn(row.local ? localServiceHref(row.service.id) : remoteServiceHref(row.node, row.service.id))
         return <tr key={`${row.node}/${row.service.id}`}><td><a className="text-link" href={href}><strong>{row.service.name}</strong></a><small className="table-secondary">{row.service.driver === 'docker' ? 'Docker 容器' : '系统服务 / 程序'}</small></td><td><a href={withReturn(`#/nodes/${row.node}`)}>{row.name}</a><small className="table-secondary">{row.local ? '当前面板 · 本机' : '通过 Mesh 管理'}</small></td>
           <td><StateBadge state={row.observation?.status || 'unknown'} stale={row.stale} /></td><td className="muted time-cell">{timestamp(row.observation?.checked_at ?? null)}</td>
-          <td><RowControl path={row.local ? `/services/${row.service.id}` : `/peers/${row.node}/services/${row.service.id}`} name={row.service.name} status={row.observation?.status} allowed={row.service.actions} version={row.service.version || 1} stale={row.stale} /><a className="btn btn-secondary btn-small" href={href}>详情</a> <a className="icon-button inline-icon" aria-label={`查看 ${row.service.name} 日志`} href={withReturn(row.local ? localServiceHref(row.service.id, 'logs') : remoteServiceHref(row.node, row.service.id, true))}><Icon name="file-text" size={16} /></a></td></tr>
+          <td><ServiceRowActions path={row.local ? `/services/${row.service.id}` : `/peers/${row.node}/services/${row.service.id}`}
+            name={row.service.name} status={row.observation?.status} allowed={row.service.actions} version={row.service.version || 1} stale={row.stale}
+            detailsHref={href} logsHref={withReturn(row.local ? localServiceHref(row.service.id, 'logs') : remoteServiceHref(row.node, row.service.id, true))} /></td></tr>
       })}</tbody></table></div> : <EmptyState title="没有匹配的服务" />}
     </Panel></>
 }
 
-function RowControl({ path, name, status, allowed, version, stale }: { path: string; name: string; status?: string; allowed: readonly string[]; version: number; stale: boolean }) {
+function ServiceRowActions({ path, name, status, allowed, version, stale, detailsHref, logsHref }: {
+  path: string; name: string; status?: string; allowed: readonly string[]; version: number; stale: boolean; detailsHref: string; logsHref: string
+}) {
   const { session } = useConsole()
   const flow = useServiceOperation(path, session, version, refreshConsole)
-  const action = status === 'running' ? 'stop' : 'start'
-  if (flow.tracking) return <button className="btn btn-secondary btn-small" onClick={() => void flow.query()}>{flow.intent?.operation?.status === 'uncertain' ? '查询原请求' : '执行中…'}</button>
-  return <button className="btn btn-secondary btn-small" disabled={stale || !allowed.includes(action)} onClick={() => {
-    if (action === 'start' || confirm(`停止 ${name}？操作由所属节点执行。`)) void flow.submit(action)
-  }}>{actionNames[action]}</button>
+  const availableAction = status === 'running' ? 'stop' : status === 'stopped' || status === 'failed' ? 'start' : undefined
+  return <div className="service-row-actions">
+    <div className="service-action-icons" role="group" aria-label={`${name} 的操作`}>
+      {(['start', 'stop'] as const).map(action => <button key={action} type="button"
+        className={`icon-button service-action-${action}`} aria-label={`${actionNames[action]} ${name}`}
+        title={flow.tracking ? '操作执行中，等待回执' : stale ? '状态待确认' : !allowed.includes(action) ? '当前服务不支持此操作' : `${actionNames[action]} ${name}`}
+        disabled={flow.tracking || stale || availableAction !== action || !allowed.includes(action)} onClick={() => {
+          if (action === 'start' || confirm(`停止 ${name}？操作由所属节点执行。`)) void flow.submit(action)
+        }}><Icon name={action === 'start' ? 'play' : 'stop'} size={16} /></button>)}
+      <a className="icon-button" title={`查看 ${name} 详情`} aria-label={`查看 ${name} 详情`} href={detailsHref}><Icon name="info" size={16} /></a>
+      <a className="icon-button" title={`查看 ${name} 日志`} aria-label={`查看 ${name} 日志`} href={logsHref}><Icon name="file-text" size={16} /></a>
+    </div>
+    {flow.tracking && (flow.intent?.operation?.status === 'uncertain'
+      ? <button type="button" className="service-action-receipt" onClick={() => void flow.query()}>查询原请求</button>
+      : <span className="service-action-receipt" role="status">执行中…</span>)}
+  </div>
 }
 
 function ServiceDetail({ target, id, initialTab }: { target: string; id: string; initialTab?: string }) {

@@ -63,6 +63,7 @@ export const iconPaths: Record<string, string> = {
   "log-out": "<path d=\"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m7 14 5-5-5-5m5 5H9\"/>",
   "ellipsis": "<path d=\"M5 12h.01M12 12h.01M19 12h.01\"/>",
   "play": "<path d=\"m7 4 13 8-13 8V4Z\"/>",
+  "stop": "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"1\"/>",
   "pause": "<path d=\"M8 4v16M16 4v16\"/>",
   "sparkles": "<path d=\"m12 3 2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2L12 3Z\"/>",
   "link": "<path d=\"M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2\"/>"

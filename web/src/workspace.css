@@ -20,3 +20,13 @@
 .main-content{display:flex;flex:1;flex-direction:column;width:100%;margin:0 auto}
 .console-page-content{flex:1;min-width:0}
 .topbar,.app-footer{flex-shrink:0}
+.workspace-service-table th { text-align: center; }
+.service-row-actions { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.service-action-icons { display: inline-flex; align-items: center; gap: 6px; }
+.service-action-icons .icon-button { width: 32px; min-width: 32px; height: 32px; border: 1px solid var(--edge); background: #fff; }
+.service-action-icons .icon-button:hover { background: #eff5ef; }
+.service-action-icons button:enabled { color: var(--green); border-color: #bdd9c7; background: #edf6ef; }
+.service-action-icons .service-action-stop:enabled { color: #b6574a; border-color: #e5c6be; background: #fbf1ee; }
+.service-action-icons button:disabled, .service-action-icons button:disabled:hover { color: #93a497; background: #f7f9f6; border-color: var(--edge); opacity: .45; }
+.service-action-receipt { color: var(--muted); font-size: 10px; }
+button.service-action-receipt { border: 0; padding: 0; background: none; color: var(--green); text-decoration: underline; }
