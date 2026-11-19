@@ -186,8 +186,8 @@ function MapRelay({ id, alternative }: { id: string; alternative: boolean }) {
   </div>
 }
 
-export function NetworkMap({ mini = false, target, alternative, onPick }: {
-  mini?: boolean; target?: string; alternative?: readonly string[]; onPick?: (id: string) => void
+export function NetworkMap({ mini = false, compact = false, showUnplaced = true, target, alternative, onPick }: {
+  mini?: boolean; compact?: boolean; showUnplaced?: boolean; target?: string; alternative?: readonly string[]; onPick?: (id: string) => void
 }) {
   const { listedNodes: nodes } = useConsole()
   const current = nodes.find((node) => node.local)
@@ -214,26 +214,27 @@ export function NetworkMap({ mini = false, target, alternative, onPick }: {
     { members: unplaced, title: '暂无活动路径' },
     { members: withoutMesh, title: '本机未配置 Mesh 互联' },
   ]
-  return <div className={`mesh-map${mini ? ' mesh-map-mini' : ''}`}>
+  return <div className={`mesh-map${mini ? ' mesh-map-mini' : ''}${compact ? ' mesh-map-compact' : ''}`}>
     {alternative && <div className="mesh-map-legend"><span><i />活动路径</span><span><i className="is-alternative" />已验证备路</span></div>}
     <div className="mesh-map-scroll">
       {mini ? <NetworkPreview current={current} levels={levels} byId={byId} links={links} />
-        : <div className="mesh-graph" role="group" aria-label={`已报告的网络拓扑，${depths.size} 个节点，${links.length} 条链路`}>
+        : <div className="mesh-graph" role="group" aria-label={`已报告的网络拓扑，${depths.size} 个节点，${links.length} 条链路`}
+          style={compact ? { '--mesh-level-count': levels.size } as CSSProperties : undefined}>
           <Connections links={links} />
           {[...levels].map(([depth, members]) => <section className="mesh-level" key={depth}>
             <h4>{depth === 0 ? '当前节点' : `${depth} 跳`}</h4>
             <div className="mesh-level-nodes">{members.map((id) => {
               const node = byId.get(id)
               return node ? <MapNode key={id} node={node} plotted hops={destinations.get(id)} selected={id === target}
-                alternative={alternativeOnly.has(id)} selectTarget onPick={onPick} />
+                alternative={alternativeOnly.has(id)} selectTarget={!compact} onPick={onPick} />
                 : <MapRelay key={id} id={id} alternative={alternativeOnly.has(id)} />
             })}</div>
           </section>)}
         </div>}
     </div>
-    {withoutPaths.filter(({ members }) => members.length > 0).map(({ members, title }) => <section className="mesh-unplaced" key={title}>
+    {showUnplaced && withoutPaths.filter(({ members }) => members.length > 0).map(({ members, title }) => <section className="mesh-unplaced" key={title}>
         <h4>{title} · {members.length} 个节点</h4>
-        <div>{members.map((node) => <MapNode key={node.id} node={node} selected={node.id === target} selectTarget={!mini} onPick={onPick} />)}</div>
+        <div>{members.map((node) => <MapNode key={node.id} node={node} selected={node.id === target} selectTarget={!mini && !compact} onPick={onPick} />)}</div>
       </section>)}
   </div>
 }

@@ -102,9 +102,14 @@ export function OverviewPage() {
           {admin && <a className="btn btn-white" href="#/seeds"><Icon name="plus" size={16} />添加节点</a>}
         </div>
       </header>
-      <div className="overview-network-map"><NetworkMap mini /></div>
-      <footer className="overview-network-footer"><span><i />当前节点<span className="overview-legend-dot" />已连接</span>
-        <span>SPEARMINT GROVE · GROW WITH YOUR INFRASTRUCTURE</span></footer>
+      <div className="overview-network-layout">
+        <div className="overview-network-main" aria-label="节点连接拓扑"><NetworkMap compact /></div>
+        <aside className="overview-network-mini" aria-labelledby="overview-node-map-title">
+          <h2 id="overview-node-map-title">节点关系</h2>
+          <NetworkMap mini showUnplaced={false} />
+          <div className="overview-network-legend"><span><i />当前节点</span><span><i />已连接</span></div>
+        </aside>
+      </div>
     </section>
     {admin ? <>
       <div className="metrics-grid"><Metric label={standalone ? '节点清单' : 'Grove 成员'}

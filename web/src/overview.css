@@ -1,6 +1,6 @@
 .hero-garden.overview-network {
   display: block;
-  padding: 26px 30px 18px;
+  padding: 20px 24px;
 }
 .overview-network-heading {
   position: relative;
@@ -10,68 +10,100 @@
   align-items: center;
   gap: 20px;
 }
-.overview-network-heading h1 { margin: 13px 0 6px; color: #f3fff5; font-size: 25px; letter-spacing: -.6px; }
+.overview-network .hero-kicker { font-size: 9px; letter-spacing: 1.8px; }
+.overview-network-heading h1 { margin: 9px 0 4px; color: #f3fff5; font-size: 23px; letter-spacing: -.6px; }
 .overview-network-heading p { margin: 0; font-size: 12px; line-height: 1.7; color: #c4dfcf; }
 .overview-network-actions { display: flex; align-items: center; gap: 20px; flex-shrink: 0; }
 .overview-topology-link { display: inline-flex; align-items: center; gap: 6px; color: #d4ebdc; font-size: 12px; }
 .overview-topology-link:hover { color: #fff; }
-.overview-network-map { position: relative; margin: 12px -8px 6px; }
+.overview-network-layout { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) clamp(220px, 23%, 280px); gap: 18px; margin-top: 14px; align-items: stretch; }
+.overview-network-main { min-width: 0; }
+.overview-network-main .mesh-graph {
+  --overview-link-gap: clamp(20px, 3cqi, 36px);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(142px, 1fr);
+  gap: var(--overview-link-gap);
+  width: 100%;
+  min-width: calc(var(--mesh-level-count) * 142px + (var(--mesh-level-count) - 1) * var(--overview-link-gap) + 24px);
+  min-height: 232px;
+  padding: 12px;
+}
+.overview-network-main .mesh-level { width: auto; max-width: none; justify-self: stretch; }
+.overview-network-main .mesh-level h4 { width: auto; margin: 0 0 9px; padding: 0; color: #bfd8c9; font-size: 10px; background: transparent; }
+.overview-network-main .mesh-level-nodes { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.overview-network-main .mesh-node { min-height: 58px; padding: 8px 10px; gap: 8px; border-radius: 10px; box-shadow: 0 2px 8px #072b201a; }
+.overview-network-main .mesh-node-icon { width: 27px; height: 27px; border-radius: 7px; }
+.overview-network-main .mesh-node-icon .icon { width: 17px; height: 17px; }
+.overview-network-main .mesh-node-info strong { font-size: 12px; }
+.overview-network-main .mesh-node-info small { font-size: 10px; }
+.overview-network-main .mesh-node-arrow { display: none; }
+.overview-network-main .mesh-node.is-local { background: #e1efdb; border-color: #e9f8e4; color: #1e513c; }
+.overview-network-main .mesh-node.is-local .mesh-node-icon { background: #c2dec4; color: #265b40; }
+.overview-network-main .mesh-node.is-local .mesh-node-info small { color: #3d7055; }
+.overview-network-main .mesh-node.is-local[href]:hover { background: #edf8e9; }
+.overview-network-mini { min-width: 0; display: flex; flex-direction: column; padding: 13px 12px 11px; border: 1px solid #c5e5d127; border-radius: 12px; background: #123e2e30; }
+.overview-network-mini h2 { margin: 0 0 8px; color: #cce2d4; font-size: 11px; font-weight: 650; }
+.overview-network-mini .mesh-map { flex: 1; display: flex; align-items: center; background: transparent; }
+.overview-network-mini .mesh-map-scroll { width: 100%; }
 .overview-network .mesh-map {
   border: 0;
   border-radius: 12px;
   background: radial-gradient(circle, #d4f2de20 .8px, transparent 1px) center / 20px 20px;
 }
-.overview-network .mesh-preview {
-  --preview-unit: clamp(.65px, .18cqi, 1.1px);
-  --preview-rise: max(.8px, var(--preview-unit));
-  height: max(235px, calc((var(--preview-span-y) + 96) * var(--preview-rise)));
+.overview-network-mini .mesh-preview {
+  --preview-unit: clamp(.35px, .2cqi, .7px);
+  --preview-rise: max(.53px, var(--preview-unit));
+  height: max(180px, calc((var(--preview-span-y) + 88) * var(--preview-rise)));
 }
 .overview-network .mesh-preview::before {
   content: '';
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 156px;
-  height: 156px;
+  width: 88px;
+  height: 88px;
   translate: -50% -50%;
   border: 1px solid #c6e9d619;
   border-radius: 50%;
-  box-shadow: 0 0 0 60px #c6e9d608, 0 0 0 120px #c6e9d604;
+  box-shadow: 0 0 0 32px #c6e9d608, 0 0 0 64px #c6e9d604;
   pointer-events: none;
 }
 .overview-network .mesh-preview-marker { background: #305f4e; border-color: #97b9a8; color: #d3e8db; box-shadow: 0 3px 12px #082e2a33; }
 .overview-network .mesh-preview-node.is-online .mesh-preview-marker { background: #337559; border-color: #a5d9b5; color: #e1f7e7; }
 .overview-network .mesh-preview-node.is-local .mesh-preview-marker {
-  width: clamp(42px, calc(49 * var(--preview-unit)), 54px);
+  width: 34px;
   background: #e0f0dc;
   border-color: #f4fff0;
   color: #1f5840;
   box-shadow: 0 0 0 6px #c8e8d01c, 0 0 28px #d4f4d51a;
 }
-.overview-network .mesh-preview-name { background: #1b503fe6; color: #ecf8ee; font-size: 11px; padding: 2px 6px; }
+.overview-network .mesh-preview-name { background: #1b503fe6; color: #ecf8ee; font-size: 9px; padding: 1px 3px; }
+.overview-network .mesh-preview-marker .icon { width: 14px; height: 14px; }
 .overview-network .mesh-preview-node[href]:hover .mesh-preview-marker { outline-color: #d1edc9; }
 .overview-network .mesh-preview-node:focus-visible { outline-color: #e6f9df; }
-.overview-network .mesh-wire-halo { stroke: #a5dbb41a; stroke-width: 8; }
+.overview-network .mesh-wire-halo { stroke: #a5dbb41a; stroke-width: 6; }
 .overview-network .mesh-wire { stroke: #a8d7b5; stroke-width: 1.5; }
 .overview-network .mesh-connections circle { fill: #d0ebc7; stroke: #356c55; }
-.overview-network .mesh-unplaced { background: #153f2f26; border-color: #d0ebd326; border-radius: 10px; }
-.overview-network .mesh-unplaced h4 { color: #c7dfce; }
+.overview-network .mesh-unplaced { background: #153f2f26; border-color: #d0ebd326; border-radius: 10px; padding: 10px 12px; }
+.overview-network .mesh-unplaced h4 { color: #c7dfce; font-size: 10px; margin-bottom: 8px; }
 .overview-network .mesh-node { background: #ffffff0c; border-color: #c7e9d12e; color: #edf9ef; }
 .overview-network .mesh-node-icon { background: #aedcba1a; color: #badfc7; }
 .overview-network .mesh-node-info small, .overview-network .mesh-node-arrow { color: #c0d7c9; }
 .overview-network .mesh-node[href]:hover { background: #ffffff18; border-color: #bdddc9; }
-.overview-network .mesh-map-message { color: #d3e7d8; min-height: 235px; }
-.overview-network-footer { position: relative; display: flex; justify-content: space-between; align-items: center; gap: 14px; color: #adcdbb; font-size: 9px; }
-.overview-network-footer > span:first-child { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
-.overview-network-footer i, .overview-legend-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #dfefda; }
-.overview-network-footer .overview-legend-dot { margin-left: 11px; background: #5b9974; border: 1px solid #b0d9b9; }
-.overview-network-footer > span:last-child { text-align: right; font-size: 8px; letter-spacing: 1.5px; }
+.overview-network .mesh-map-message { color: #d3e7d8; min-height: 180px; }
+.overview-network-legend { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; color: #bfd8c8; font-size: 9px; margin-top: 9px; }
+.overview-network-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.overview-network-legend i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #dfefda; }
+.overview-network-legend > span:last-child i { background: #5b9974; border: 1px solid #b0d9b9; }
 @media (max-width: 700px) {
-  .hero-garden.overview-network { padding: 22px 18px 16px; }
-  .overview-network-heading { align-items: flex-start; flex-wrap: wrap; gap: 15px; }
-  .overview-network-heading h1 { font-size: 23px; }
+  .hero-garden.overview-network { padding: 18px 16px; }
+  .overview-network-heading { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+  .overview-network-heading h1 { font-size: 22px; }
   .overview-network-actions { gap: 16px; }
   .overview-network .hero-kicker { font-size: 9px; letter-spacing: 1.5px; }
-  .overview-network-map { margin-inline: -8px; }
-  .overview-network-footer > span:last-child { max-width: 52%; font-size: 7px; letter-spacing: .6px; }
+  .overview-network-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .overview-network-main .mesh-graph { grid-auto-flow: row; grid-auto-columns: minmax(0, 1fr); min-width: 100%; gap: 16px; padding: 12px 6px; }
+  .overview-network-main .mesh-level-nodes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview-network-main .mesh-level { width: 100%; max-width: 380px; justify-self: center; }
+  .overview-network-mini .mesh-map-scroll { max-width: 300px; margin-inline: auto; }
 }
