@@ -34,6 +34,7 @@ from .service_details import update_service_details
 from .service_mode import ModeChangeError, change_mode
 from .service_removal import unregister
 from .terminal_service import TerminalService
+from .peer.workspace import Workspace
 from .seeding import SeedDeployments
 from .state import State, StateError
 from .platforms import capabilities
@@ -371,6 +372,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     remote.service_setup = service_setup.ServiceSetup(store, node_id, config.docker_socket)
     terminals = TerminalService(store, node_id)
     remote.terminals = terminals
+    workspace = Workspace(store, node_id, controller, metrics, config.docker_socket)
+    remote.workspace = workspace
     remote.mesh_enrollment_policy = enrollment_policy
     remote.manager.use_system_egress = bool(enrollment_policy and enrollment_policy.bind_ip)
     host = deployment_host(capabilities(), schema)
@@ -688,6 +691,15 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             if error.code in {'OFFLINE', 'NO_ROUTE', 'ROUTE_LOST', 'TIMEOUT'}:
                 raise PeerError('SEED_SOURCE_OFFLINE', 'The selected executor is not reachable over Mesh') from error
             raise
+
+    @app.post('/api/v1/peers/{target}/workspace/{action}')
+    async def workspace_request(target: str, action: Literal['host', 'detail', 'edit', 'remove', 'mode'],
+                                body: dict = Depends(grove_body), actor: auth.Actor = Depends(require_admin_write)):
+        if target in ('local', node_id):
+            return await remote.work(workspace.request, service_setup.LocalAdmin(actor), action, body)
+        pair = remote.pair_for(target)
+        identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+        return await remote.call(target, workspace.method, {'identity': identity, 'action': action, 'body': body}, diagnostic=True)
 
     @app.post('/api/v1/peers/{target}/terminal/{identifier}/{action}')
     async def terminal_request(target: str, identifier: str, action: Literal['open', 'exchange', 'close', 'files'],

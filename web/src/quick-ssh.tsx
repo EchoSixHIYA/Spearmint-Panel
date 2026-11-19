@@ -4,7 +4,9 @@ import { FitAddon } from '@xterm/addon-fit'
 import { ApiError, api, type Session } from './api'
 import { useConsole } from './console-data'
 import { NetworkMap } from './network-map'
-import { bytes, Icon, Notice, PageHeading, Panel } from './ui'
+import { bytes, Icon, Notice, PageHeading, Panel, Tabs } from './ui'
+import { allowNavigation, useUnsavedChanges } from './navigation-guard'
+import { returnRoute } from './workspace-api'
 import '@xterm/xterm/css/xterm.css'
 import './quick-ssh.css'
 
@@ -40,7 +42,7 @@ function request<T>(connection: Connection, session: Session, action: string, bo
 }
 
 export default function QuickSSH({ targetId }: { targetId?: string }) {
-  const { listedNodes, session, onUnauthorized } = useConsole()
+  const { listedNodes, localName, session, onUnauthorized } = useConsole()
   const [target, setTarget] = useState(targetId)
   const [connection, setConnection] = useState<Connection>()
   const [opening, setOpening] = useState(false)
@@ -49,12 +51,12 @@ export default function QuickSSH({ targetId }: { targetId?: string }) {
   const openingController = useRef<AbortController | null>(null)
   useEffect(() => () => openingController.current?.abort(), [])
 
-  async function connect() {
-    if (!selected || opening) return
+  async function connect(node = selected) {
+    if (!node || opening) return
     setOpening(true); setError('')
     const controller = new AbortController()
     openingController.current = controller
-    const next = { target: selected.id, id: crypto.randomUUID().replaceAll('-', ''), name: selected.name }
+    const next = { target: node.id, id: crypto.randomUUID().replaceAll('-', ''), name: node.name }
     try {
       await request(next, session, 'open', { columns: 100, rows: 28 }, controller.signal)
       if (!controller.signal.aborted) setConnection(next)
@@ -71,7 +73,13 @@ export default function QuickSSH({ targetId }: { targetId?: string }) {
   }
 
   return <>
-    <PageHeading eyebrow="INFRASTRUCTURE / SSH" title="快速 SSH" description="从拓扑图选择节点，在当前面板打开终端和文件目录。" />
+    <a className="back-link" href={returnRoute('#/nodes')}>返回来源</a>
+    <PageHeading eyebrow="NODES / TERMINAL" title="终端与文件" description="从拓扑图选择节点，通过 Mesh 在当前面板打开 xterm.js 交互终端。" />
+    {connection && <div className="workspace-context"><span>当前面板 <strong>{localName}</strong></span><span>目标节点</span><select className="input" aria-label="切换终端目标" value={connection.target} disabled={opening} onChange={event => {
+      if (!allowNavigation()) return
+      const node = listedNodes.find(item => item.id === event.target.value)
+      if (node) { setTarget(node.id); setConnection(undefined); void connect(node) }
+    }}>{listedNodes.map(node => <option key={node.id} value={node.id}>{node.name}</option>)}</select></div>}
     {error && <Notice tone="amber">{error}</Notice>}
     {!connection ? <Panel title="选择目标节点">
       <NetworkMap target={target} onPick={setTarget} />
@@ -81,7 +89,7 @@ export default function QuickSSH({ targetId }: { targetId?: string }) {
           <Icon name="terminal" size={16} />{opening ? '正在连接…' : '打开终端'}
         </button>
       </div>
-    </Panel> : <SSHWorkspace key={connection.id} connection={connection} close={() => setConnection(undefined)} />}
+    </Panel> : <SSHWorkspace key={connection.id} connection={connection} close={() => { if (allowNavigation()) setConnection(undefined) }} />}
   </>
 }
 
@@ -91,6 +99,7 @@ function SSHWorkspace({ connection, close }: { connection: Connection; close: ()
   const terminal = useRef<Terminal | null>(null)
   const [error, setError] = useState('')
   const [ended, setEnded] = useState(false)
+  const [tab, setTab] = useState('terminal')
 
   useEffect(() => {
     const term = new Terminal({ cursorBlink: true, fontFamily: '"Courier Prime", Consolas, monospace', fontSize: 14,
@@ -103,7 +112,7 @@ function SSHWorkspace({ connection, close }: { connection: Connection; close: ()
     let timer: number | undefined
     let running = false
     const controller = new AbortController()
-    const observer = new ResizeObserver(() => { if (!stopped) fit.fit() })
+    const observer = new ResizeObserver(() => { if (!stopped && container.current?.clientWidth) fit.fit() })
     observer.observe(container.current!)
     const input = term.onData(data => {
       pending += data
@@ -156,6 +165,8 @@ function SSHWorkspace({ connection, close }: { connection: Connection; close: ()
   }, [connection, session, onUnauthorized])
 
   return <div className="quick-ssh-workspace">
+    <Tabs label="终端工作区" current={tab} onChange={setTab} items={[{ id: 'terminal', label: '终端' }, { id: 'files', label: '文件' }]} />
+    <div hidden={tab !== 'terminal'}>
     <Panel className="quick-ssh-console" title={`${connection.name} · 终端`} action={<div className="button-row">
       <button className="btn btn-secondary" onClick={() => { terminal.current?.clear(); terminal.current?.focus() }}>清屏</button>
       <button className="btn btn-secondary" onClick={close}>{ended ? '重新选择节点' : '断开连接'}</button>
@@ -164,7 +175,8 @@ function SSHWorkspace({ connection, close }: { connection: Connection; close: ()
       {ended && !error && <p className="muted">终端会话已结束。</p>}
       <div className="quick-ssh-terminal" ref={container} aria-label={`${connection.name} 交互终端`} />
     </Panel>
-    {!ended && <FileBrowser connection={connection} />}
+    </div>
+    {!ended && <div hidden={tab !== 'files'}><FileBrowser connection={connection} /></div>}
   </div>
 }
 
@@ -175,13 +187,14 @@ function FileBrowser({ connection }: { connection: Connection }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState('')
-  const [editor, setEditor] = useState<{ file: FileEntry; text: string }>()
+  const [editor, setEditor] = useState<{ file: FileEntry; text: string; original: string }>()
+  useUnsavedChanges(!!editor && editor.text !== editor.original)
   const active = useRef(true)
   const uploadInput = useRef<HTMLInputElement>(null)
   useEffect(() => { active.current = true; return () => { active.current = false } }, [])
 
   async function files<T>(body: object) { return request<T>(connection, session, 'files', body) }
-  async function perform(work: () => Promise<void>) {
+  async function perform(work: () => Promise<unknown>) {
     if (busy) return
     setBusy(true); setError('')
     try { await work() } catch (failure) {
@@ -193,7 +206,8 @@ function FileBrowser({ connection }: { connection: Connection }) {
   }
   async function browse(next: string, offset = 0) {
     const result = await files<Directory>({ operation: 'list', path: next, offset })
-    if (active.current) { setListing(result); setPath(result.path); setEditor(undefined) }
+    if (active.current) { setListing(result); setPath(result.path) }
+    return result
   }
   useEffect(() => { void perform(() => browse('')) }, [connection.id])
   async function download(file: FileEntry, editing: boolean) {
@@ -211,7 +225,11 @@ function FileBrowser({ connection }: { connection: Connection }) {
     const blob = new Blob(chunks)
     if (editing) {
       const data = await blob.arrayBuffer()
-      try { setEditor({ file, text: new TextDecoder('utf-8', { fatal: true }).decode(data) }) }
+      try {
+        if (editor && editor.text !== editor.original && !allowNavigation()) return
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(data)
+        setEditor({ file, text, original: text })
+      }
       catch { setError('文件不是 UTF-8 文本，请下载后使用对应工具编辑。') }
     } else {
       const url = URL.createObjectURL(blob)
@@ -234,7 +252,12 @@ function FileBrowser({ connection }: { connection: Connection }) {
       setProgress(`正在保存 ${name} · ${bytes(result.offset)} / ${bytes(data.size)}`)
     }
     await files({ operation: 'finish', transfer })
-    await browse(listing.path)
+    const refreshed = await browse(listing.path)
+    if (editor?.file.path === destination) {
+      const file = refreshed.items.find(item => item.path === destination)
+      const text = await data.text()
+      if (file && active.current) setEditor({ file, text, original: text })
+    }
   }
   function navigate(event: FormEvent) { event.preventDefault(); void perform(() => browse(path)) }
   const entries = [...(listing?.items ?? [])].sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name))
@@ -259,14 +282,16 @@ function FileBrowser({ connection }: { connection: Connection }) {
       onClick={() => void perform(() => browse(drive))}>{drive}</button>)}</div>}
     {error && <Notice tone="amber">{error}</Notice>}
     {progress && <p className="muted" role="status">{progress}</p>}
-    {editor ? <div className="stack-small">
+    <div className={`quick-ssh-file-columns ${editor ? 'has-editor' : ''}`}>
+    {editor && <div className="stack-small quick-ssh-edit-pane">
       <strong>{editor.file.path}</strong>
       <textarea className="input quick-ssh-editor" aria-label="文件内容" value={editor.text} disabled={busy}
         onChange={event => setEditor({ ...editor, text: event.target.value })} spellCheck={false} />
       <div className="button-row"><button className="btn btn-primary" disabled={busy}
         onClick={() => void perform(() => upload(editor.file.name, new Blob([editor.text]), editor.file))}>保存文件</button>
-        <button className="btn btn-secondary" disabled={busy} onClick={() => setEditor(undefined)}>关闭编辑</button></div>
-    </div> : <div className="table-wrap quick-ssh-list"><table className="data-table"><thead><tr><th>名称</th><th>大小</th><th>操作</th></tr></thead>
+        <button className="btn btn-secondary" disabled={busy} onClick={() => { if (!editor || editor.text === editor.original || allowNavigation()) setEditor(undefined) }}>关闭编辑</button></div>
+    </div>}
+    <div className="table-wrap quick-ssh-list"><table className="data-table"><thead><tr><th>名称</th><th>大小</th><th>操作</th></tr></thead>
       <tbody>{entries.map(file => <tr key={file.path}>
         <td>{file.directory ? <button className="text-link quick-ssh-folder" disabled={busy}
           onClick={() => void perform(() => browse(file.path))}><Icon name="folder" size={16} />{file.name}</button> : file.name}</td>
@@ -280,6 +305,6 @@ function FileBrowser({ connection }: { connection: Connection }) {
       {listing && !entries.length && <p className="muted">当前目录为空。</p>}
       {listing?.next_offset != null && <button className="btn btn-secondary" disabled={busy}
         onClick={() => void perform(() => browse(listing.path, listing.next_offset!))}>下一页</button>}
-    </div>}
+    </div></div>
   </Panel>
 }

@@ -15,6 +15,8 @@ Manage services on Linux, Windows, and NAS devices from a single Grove.
 
 Each device runs its own panel. Once devices join the same Grove, a Grove administrator can sign in to any available panel and manage services across member nodes. Mesh traffic can travel directly or through other online members, so devices without a public IP can still be managed.
 
+The console has six areas: overview, services, nodes, operations, identity, and maintenance. Local and remote services share one workspace for control, logs, metadata editing, and unregistration. Nodes include topology, resources, enrollment, and the xterm.js terminal/file workspace. Personal sessions and display preferences live in the account menu. Planned mobile-node and Grove-federation pages remain visible and marked unfinished.
+
 | Feature | What it does |
 | --- | --- |
 | Service management | Register foreground programs, system services, and containers locally or remotely. View status and logs and run supported start, stop, and restart operations. |

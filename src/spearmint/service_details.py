@@ -9,10 +9,11 @@ from . import auth
 from .catalog import Service, get_service, require_idle, service_name, validate_endpoint
 from .control import ControlError
 from .peer.projection import publish
+from .peer.grove_service_admin import GroveServiceAdmin
 from .state import State, StateError, audit
 
 
-def update_service_details(state: State, service_id: str, actor: auth.Actor, *,
+def update_service_details(state: State, service_id: str, actor: auth.Actor | GroveServiceAdmin, *,
                            name: str, endpoint: str | None, version: int) -> Service:
     try:
         name = service_name(name)
@@ -21,11 +22,14 @@ def update_service_details(state: State, service_id: str, actor: auth.Actor, *,
         raise ControlError(422, str(error)) from error
     endpoint = (endpoint.strip() or None) if endpoint is not None else None
     with state.connect(write=True) as db:
-        session = auth.active_session(db, actor.token_hash, int(time.time()))
-        if session is None or session["id"] != actor.account_id:
-            raise ControlError(401, "Sign in required")
-        if session["role"] != "node_admin":
-            raise ControlError(403, "Node administrator required")
+        if isinstance(actor, GroveServiceAdmin):
+            actor.require(db)
+        else:
+            session = auth.active_session(db, actor.token_hash, int(time.time()))
+            if session is None or session["id"] != actor.account_id:
+                raise ControlError(401, "Sign in required")
+            if session["role"] != "node_admin":
+                raise ControlError(403, "Node administrator required")
         service = get_service(db, service_id)
         if service is None:
             raise ControlError(404, "Unknown service ID")

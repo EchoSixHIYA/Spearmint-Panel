@@ -3,6 +3,8 @@ import { ApiError, api, type Session } from './api'
 import { refreshConsole, useConsole } from './console-data'
 import { groveServiceRegistrationHref, localServiceHref, remoteServiceSyncHref } from './grove-navigation'
 import { Icon, Loading, Notice, PageHeading, Panel, Tabs } from './ui'
+import { returnRoute, withReturn } from './workspace-api'
+import { useUnsavedChanges } from './navigation-guard'
 
 const kinds = { systemd: 'systemd 系统服务', windows: 'Windows 系统服务', docker: 'Docker 容器' }
 type Kind = keyof typeof kinds
@@ -47,11 +49,11 @@ export function GroveServiceSetup({ targetId, session, onUnauthorized }: SetupPr
   const nodeId = targetId === local.data?.node_id ? undefined : targetId
   const remote = targets.find(node => node.id === nodeId && !node.local)
   return <>
-    <a href="#/services" className="back-link"><Icon name="arrow-left" size={15} />返回服务管理</a>
+    <a href={returnRoute()} className="back-link"><Icon name="arrow-left" size={15} />返回来源</a>
     <PageHeading eyebrow="OPERATIONS / SERVICES" title="登记服务" description="选择服务所在的节点，通过当前面板接管或新建服务。" />
     <Panel title="服务所在节点">
       <label className="field-label">节点
-        <select className="input" value={nodeId || ''} onChange={event => { location.hash = groveServiceRegistrationHref(event.target.value) }}>
+        <select className="input" value={nodeId || ''} onChange={event => { location.hash = withReturn(groveServiceRegistrationHref(event.target.value), returnRoute()) }}>
           <option value="">本机节点</option>
           {nodeId && !remote && <option value={nodeId}>正在确认所选节点</option>}
           {targets.filter(node => !node.local).map(node => <option key={node.id} value={node.id}>{node.name}</option>)}
@@ -75,6 +77,10 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
   const [error, setError] = useState('')
   const [reads, setReads] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [step, setStep] = useState(1)
+  const [review, setReview] = useState<{ action: 'take-over' | 'create'; body: object; name: string; command?: string }>()
+  const [dirty, setDirty] = useState(false)
+  useUnsavedChanges(dirty && !result)
   const mutation = useRef<AbortController | null>(null)
   useEffect(() => () => mutation.current?.abort(), [])
 
@@ -127,7 +133,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
     try {
       const response = await request<{ service: Registered }>(session, nodeId, action, body,
         AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]))
-      if (!controller.signal.aborted) { setResult(response.service); refreshConsole() }
+      if (!controller.signal.aborted) { setResult(response.service); setDirty(false); refreshConsole() }
     } catch (failure) {
       if (!controller.signal.aborted) setError(setupError(failure, onUnauthorized))
     } finally {
@@ -137,16 +143,18 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
 
   const candidate = choices?.candidates.find(item => item.target === candidateId)
   const canTakeOver = !!candidate && (!supported?.checks || checked?.ready === true)
-  const serviceHref = (id: string) => nodeId === 'local' ? localServiceHref(id) : remoteServiceSyncHref(nodeId, id)
+  const serviceHref = (id: string) => withReturn(nodeId === 'local' ? localServiceHref(id) : remoteServiceSyncHref(nodeId, id), returnRoute())
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const values = new FormData(event.currentTarget)
     const name = String(values.get('name') ?? '').trim()
     if (mode === 'take-over' && canTakeOver && candidate && kind) {
       const log_path = String(values.get('log_path') ?? '').trim() || null
-      void mutate('take-over', { kind, target: candidate.target, name: name || Array.from(candidate.name).slice(0, 80).join(''), log_path })
+      const chosenName = name || Array.from(candidate.name).slice(0, 80).join('')
+      setReview({ action: 'take-over', name: chosenName, body: { kind, target: candidate.target, name: chosenName, log_path } }); setStep(3)
     } else if (mode === 'create') {
-      void mutate('create', { name, command: String(values.get('command') ?? '').trim() })
+      const command = String(values.get('command') ?? '').trim()
+      setReview({ action: 'create', name, command, body: { name, command } }); setStep(3)
     }
   }
 
@@ -163,8 +171,11 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
             <button className="btn btn-secondary" type="button" onClick={() => { setResult(undefined); setCandidateId(''); refresh() }}>继续登记</button>
           </div>
         </> : <>
-          <Tabs label="登记方式" current={mode} items={[{ id: 'take-over', label: '接管现有服务' }, { id: 'create', label: '新建服务' }]}
+          <ol className="registration-steps">{['选择节点与方式', '填写登记信息', '核对并登记'].map((label, index) => <li key={label} className={step === index + 1 ? 'current' : ''}>{index + 1} · {label}</li>)}</ol>
+          {step === 1 && <><Tabs label="登记方式" current={mode} items={[{ id: 'take-over', label: '接管现有服务' }, { id: 'create', label: '新建服务' }]}
             onChange={value => { if (!busy && value !== mode) { setMode(value as Mode); selectCandidate(''); setChoices(undefined) } }} />
+            <p className="muted">{mode === 'create' ? '登记完整启动命令。完成后保持停止，由你主动启动。' : '读取目标节点正在运行的服务，选择后检查是否可以接管。'}</p><div><button className="btn btn-primary" onClick={() => setStep(2)}>下一步</button></div></>}
+          <div hidden={step !== 2}>
           {mode === 'take-over' && (!supported.checks ? <Notice tone="amber">目标节点仍在使用允许列表过滤服务。请通过 Grove 群组更新升级目标节点，再读取运行中的服务。</Notice> : <>
             <p className="muted">列表显示正在运行的服务。选择后检查目标机的管理和日志权限。</p>
             {supported.kinds.length ? <label className="field-label">服务类型<select className="input" value={kind || ''} disabled={busy}
@@ -194,7 +205,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
           </>)}
           {mode === 'create' && !supported.scripts && <Notice tone="amber">请通过 Grove 群组更新升级目标节点，以保存并执行多行启动脚本。</Notice>}
           {mode === 'take-over' && candidate && supported.checks && !checked && !error && <Loading label="正在检查此服务能否接管…" />}
-          {(mode === 'create' && supported.scripts || canTakeOver) && <form className="stack" onSubmit={submit} key={mode === 'create' ? mode : candidate?.target}>
+          {(mode === 'create' && supported.scripts || canTakeOver) && <form className="stack" onSubmit={submit} onChange={() => setDirty(true)} key={mode === 'create' ? mode : candidate?.target}>
             <label className="field-label">服务名称<input className="input" name="name" maxLength={80} required={mode === 'create'} placeholder={candidate?.name} disabled={busy} /></label>
             {mode === 'create' ? <>
               <label className="field-label">启动命令<textarea className="input" name="command" required rows={3} maxLength={8192} disabled={busy}
@@ -204,8 +215,10 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
               : <label className="field-label">目标 Windows 应用日志的绝对路径
               <input className="input" name="log_path" maxLength={420} required disabled={busy} placeholder={'C:\\Apps\\MyApp\\logs\\app.log'} />
             </label>)}
-            <div><button className="btn btn-primary" disabled={busy}>{busy ? '正在登记…' : mode === 'create' ? '新建并托管' : '接管此服务'}</button></div>
+            <div className="button-row"><button type="button" className="btn btn-secondary" onClick={() => setStep(1)}>上一步</button><button className="btn btn-primary" disabled={busy}>核对登记信息</button></div>
           </form>}
+          </div>
+          {step === 3 && review && <><dl className="facts"><div><dt>服务名称</dt><dd>{review.name}</dd></div><div><dt>登记方式</dt><dd>{review.action === 'create' ? '新建脚本服务 · 登记后保持停止' : '接管现有服务 · 保留运行状态'}</dd></div></dl>{review.command && <pre className="command-block">{review.command}</pre>}<div className="button-row"><button className="btn btn-secondary" disabled={busy} onClick={() => setStep(2)}>上一步</button><button className="btn btn-primary" disabled={busy} onClick={() => void mutate(review.action, review.body)}>{busy ? '正在登记…' : '确认登记'}</button></div></>}
         </>}
     </div>
   </Panel>

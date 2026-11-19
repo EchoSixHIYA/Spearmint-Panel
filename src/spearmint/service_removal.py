@@ -9,6 +9,7 @@ from .control import ControlError
 from .native_process import process_driver
 from .peer.operation_policy import required_version
 from .peer.projection import publish
+from .peer.grove_service_admin import GroveServiceAdmin
 from .state import State, StateError, audit
 
 
@@ -17,7 +18,7 @@ def latest_operation(db: sqlite3.Connection, service_id: str) -> str | None:
     return row[0] if row else None
 
 
-def unregister(state: State, service_id: str, *, actor: auth.Actor | None = None,
+def unregister(state: State, service_id: str, *, actor: auth.Actor | GroveServiceAdmin | None = None,
                version: int | None = None) -> None:
     frp_runtime.reconcile(state)
     with state.connect() as db:
@@ -27,13 +28,13 @@ def unregister(state: State, service_id: str, *, actor: auth.Actor | None = None
     if service is None and actor is None:
         raise StateError("Unknown service ID")
     if service is not None and service.driver == "process" and not service.existing_system_service:
-        if actor is not None:
-            raise ControlError(409, "Unregister foreground processes from the node terminal")
         if process_driver(state).inspect(service).status not in {"stopped", "failed"}:
             raise ControlError(409, "Stop the managed process before unregistering it")
 
     with state.connect(write=True) as db:
-        if actor is not None:
+        if isinstance(actor, GroveServiceAdmin):
+            actor.require(db)
+        elif actor is not None:
             session = auth.active_session(db, actor.token_hash, int(time.time()))
             if session is None or session["id"] != actor.account_id:
                 raise ControlError(401, "Sign in required")

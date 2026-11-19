@@ -197,7 +197,7 @@ function MemberDirectoryNotice() {
   </div>
 }
 
-function NodeNote({ nodeId, onSave }: { nodeId: string; onSave: (value: Preferences) => void }) {
+export function NodeNote({ nodeId, onSave }: { nodeId: string; onSave: (value: Preferences) => void }) {
   const { preferences, nodeNotes, session, grove } = useConsole()
   const [draft, setDraft] = useState<string>()
   const [message, setMessage] = useState('')
@@ -507,7 +507,7 @@ const futurePages: Record<string, { title: string; eyebrow: string; icon: string
 export function FuturePage({ page }: { page: string }) {
   const content = futurePages[page]
   if (!content) return <Panel><EmptyState title="没有找到这个页面" action={<a className="btn btn-primary" href="#/overview">返回花园总览</a>} /></Panel>
-  return <><PageHeading eyebrow={content.eyebrow} title={content.title} description={content.description}><Badge tone="purple">规划中</Badge></PageHeading>
+  return <><PageHeading eyebrow={content.eyebrow} title={content.title} description={content.description}><Badge tone="purple">未完成</Badge></PageHeading>
     <div className="hero-garden future-hero"><div className="hero-copy"><div className="hero-kicker"><Icon name={content.icon} size={16} />ROOM TO GROW</div><h2>{content.phrase}</h2><p>这片空间为下一步生长预留。当前版本尚未开放此功能。</p><a href="#/nodes" className="btn btn-white">查看当前节点<Icon name="arrow-right" size={15} /></a></div><GardenArt /></div>
     <div className="columns-3">{content.steps.map(([title, description], index) => <Panel key={title} className="planned-step"><span className="planned-number">0{index + 1}</span><h3>{title}</h3><p className="muted">{description}</p></Panel>)}</div>
     <Notice icon="info">这里是后续能力的说明，未连接模拟节点，也不会改变当前节点策略。</Notice></>

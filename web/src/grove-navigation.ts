@@ -12,7 +12,8 @@ export const remoteOperationHistoryRoutes = {
 } as const
 export type RemoteOperationHistoryFilter = keyof typeof remoteOperationHistoryRoutes
 const sharedSections = ['overview', 'nodes', 'topology', 'ssh', 'services', 'services/local', 'services/remote', 'operations',
-  'operations/pending', 'operations/review', 'operations/local', 'operations/approvals', 'exposures', 'alerts', 'access', 'audit', 'deployments', 'settings', 'sessions', 'seeds']
+  'operations/pending', 'operations/review', 'operations/local', 'exposures', 'alerts', 'access', 'audit', 'deployments', 'settings', 'sessions', 'seeds',
+  'identity', 'maintenance', 'account', 'account/sessions', 'account/settings', 'pollen', 'federation']
 const sharedRoutes = new Set(sharedSections.map((section) => `#/${section}`))
 const seedProgressRoute = new RegExp(`^#/seeds/progress/([^/]+)(?:/(${nodeId}))?$`)
 const nodeDetailRoute = new RegExp(`^#/nodes/(${nodeId})(?:/(resources))?$`)
@@ -20,7 +21,7 @@ const savedRemoteOperationRoute = new RegExp(`^#/operations/remote/(${nodeId})/(
 const seedJoinRoute = new RegExp(`^#/access/join/(${nodeId})$`)
 const topologyTargetRoute = new RegExp(`^#/topology/(${nodeId})$`)
 const terminalTargetRoute = new RegExp(`^#/ssh/(${nodeId})$`)
-const deploymentTargetRoute = new RegExp(`^#/deployments/(${nodeId})$`)
+const deploymentTargetRoute = new RegExp(`^#/(?:deployments|maintenance)/(${nodeId})$`)
 const remoteServiceRoute = new RegExp(`^#/services/remote/(${nodeId})/(${identifier})(?:/(logs)(?:/(${identifier}))?|/(${identifier}))?$`)
 const remoteServiceSyncRoute = new RegExp(`^#/services/remote/(${nodeId})/(${identifier})/sync$`)
 const validIdentifier = new RegExp(`^${identifier}$`)
@@ -121,7 +122,9 @@ export function seedProgressTarget(hash: string) {
   }
 }
 
-export function groveReturnRoute(hash: string) {
+export function groveReturnRoute(hash: string): string {
+  const base = hash.split('?')[0]
+  if (base !== hash) return groveReturnRoute(base) === base ? hash : '#/services'
   if (hash.startsWith('#/seeds/')) return seedProgressTarget(hash) ? hash : '#/seeds'
   return sharedRoutes.has(hash) || serviceRegistrationTarget(hash) || groveServiceRegistrationTarget(hash) || seedJoinTarget(hash)
     || nodeDetailRoute.test(hash) || savedRemoteOperationTarget(hash) || topologyTargetRoute.test(hash) || terminalTargetRoute.test(hash) || deploymentTarget(hash)

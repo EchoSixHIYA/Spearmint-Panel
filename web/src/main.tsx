@@ -3,9 +3,11 @@ import { createRoot } from 'react-dom/client'
 import { ApiError, api, type Session } from './api'
 import { ConsoleData, useConsole, usePreferences } from './console-data'
 import { adminPages, ConsoleLayout, useRoute } from './console-layout'
-import { AlertsPage, AuditPage, FuturePage, NodesPage, OverviewPage, SeedsPage, SettingsPage, TopologyPage } from './console-pages'
+import { AlertsPage, AuditPage, FuturePage, OverviewPage, SeedsPage, TopologyPage } from './console-pages'
 import { DeploymentsPage } from './deployments'
 import { Services } from './services'
+import { ServiceWorkspace } from './service-workspace'
+import { SectionNavigation, NodesWorkspace, IdentityWorkspace, AccountWorkspace, OperationCenter } from './workspace-pages'
 import { ExposuresPage } from './frp-mappings'
 import { AccessPage, OperationsPage } from './security-pages'
 import { Sessions } from './sessions'
@@ -13,10 +15,11 @@ import { SignIn } from './sign-in'
 import { FirstFactor, Setup, takeSetupEntry } from './onboarding'
 import { GroveAuthorize, GroveReturn, takeGroveDestination, takeGroveReturn } from './grove-auth'
 import { rememberQuorumInvitation } from './grove-invitation'
-import { deploymentTarget, nodeResourcesTarget, seedJoinTarget, seedProgressTarget } from './grove-navigation'
+import { deploymentTarget, seedProgressTarget } from './grove-navigation'
 import { Brand, EmptyState, Loading, Notice, PageHeading, Panel } from './ui'
 import './grove.css'
 import './style.css'
+import './workspace.css'
 
 const QuickSSH = lazy(() => import('./quick-ssh'))
 
@@ -37,21 +40,22 @@ function ConsolePage({ route, onFactors, onSave }: { route: ReturnType<typeof us
   if (!admin && adminPages.has(page)) return <Panel><EmptyState title="此页面仅对节点管理员开放" action={<a className="btn btn-primary" href="#/operations">查看我获准访问的服务</a>}>你可以提交已授权的远程操作，并管理自己的登录会话。</EmptyState></Panel>
   switch (page) {
     case 'overview': return <OverviewPage />
-    case 'nodes': return <NodesPage key={id || 'nodes'} nodeId={id} resources={nodeResourcesTarget(location.hash) === id && !!id} onSave={onSave} />
-    case 'topology': return <TopologyPage target={id} />
-    case 'ssh': return <Suspense fallback={<Loading label="正在打开终端…" />}><QuickSSH key={id ?? 'picker'} targetId={id} /></Suspense>
-    case 'services': return <Services section={id} segments={segments} session={session} onUnauthorized={onUnauthorized} />
+    case 'nodes': return <><SectionNavigation page="nodes" /><NodesWorkspace key={id || 'nodes'} nodeId={id} onSave={onSave} /></>
+    case 'topology': return <><SectionNavigation page="topology" /><TopologyPage target={id} /></>
+    case 'ssh': return <><SectionNavigation page="ssh" /><Suspense fallback={<Loading label="正在打开终端…" />}><QuickSSH key={id ?? 'picker'} targetId={id} /></Suspense></>
+    case 'services': return <ServiceWorkspace section={id} segments={segments} />
     case 'exposures': return <ExposuresPage />
-    case 'operations': return <OperationsPage section={id} />
-    case 'alerts': return <AlertsPage />
-    case 'audit': return <AuditPage />
+    case 'operations': return <><SectionNavigation page="operations" /><OperationCenter /></>
+    case 'alerts': return <><SectionNavigation page="alerts" /><AlertsPage /></>
+    case 'audit': return <><SectionNavigation page="audit" /><AuditPage /></>
     case 'sessions': return <><PageHeading eyebrow="SECURITY / SESSIONS" title="我的会话" description="查看你的登录记录，及时关闭不再使用或无法确认的会话。" /><Sessions session={session} onUnauthorized={onUnauthorized} /></>
-    case 'access': return <AccessPage onFactors={onFactors} expectedJoinNode={seedJoinTarget(location.hash)} />
-    case 'settings': return <SettingsPage onSave={onSave} />
-    case 'deployments': return <DeploymentsPage targetId={deploymentTarget(location.hash)} />
+    case 'identity': case 'access': return <><SectionNavigation page="identity" /><IdentityWorkspace /></>
+    case 'account': return <AccountWorkspace section={id} onFactors={onFactors} onSave={onSave} />
+    case 'settings': return <AccountWorkspace section="settings" onFactors={onFactors} onSave={onSave} />
+    case 'maintenance': case 'deployments': return <DeploymentsPage targetId={id || deploymentTarget(location.hash)} />
     case 'seeds': {
       const target = seedProgressTarget(location.hash)
-      return <SeedsPage progressOrigin={target?.origin} progressNodeId={target?.nodeId} />
+      return <><SectionNavigation page="seeds" /><SeedsPage progressOrigin={target?.origin} progressNodeId={target?.nodeId} /></>
     }
     default: return <FuturePage page={page} />
   }
@@ -107,7 +111,7 @@ function App() {
   function signedIn(current: Session) {
     setError(''); setSession(current); setChangingFactors(false)
     if (route.page === 'grove-authorize' && route.id) setGroveRequestSignIn({ request: route.id, csrf: current.csrf_token })
-    if (['signin', 'auth-recover'].includes(route.page)) location.hash = '#/overview'
+    if (['signin', 'auth-recover'].includes(route.page)) location.hash = '#/services'
   }
   async function openFactors() {
     try {
@@ -143,7 +147,7 @@ function App() {
   if (route.page === 'grove-authorize' && route.id) return <GroveAuthorize key={route.id} request={route.id} session={session}
     signedInForRequest={groveRequestSignIn?.request === route.id && groveRequestSignIn.csrf === session.csrf_token}
     onReauthenticate={() => void signOut(null)} reauthenticating={pending} reauthenticationError={error} />
-  const page = ['signin', 'auth-recover'].includes(route.page) ? 'overview' : route.page
+  const page = ['signin', 'auth-recover'].includes(route.page) ? 'services' : route.page
   return <ConsoleData key={session.username} session={session} onUnauthorized={expireSession} preferences={preferences} webBuild={webBuild}>
     <ConsoleLayout page={page} onSignOut={() => void signOut()} signingOut={pending}>
       {error && <Notice tone="amber">{error}</Notice>}

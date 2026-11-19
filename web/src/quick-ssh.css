@@ -22,6 +22,12 @@
 .quick-ssh-files .stack-small > strong { font-size: 12px; overflow-wrap: anywhere; }
 .quick-ssh-files .notice { margin: 6px 0; padding: 8px; }
 .quick-ssh-files p { margin: 6px 0; }
+.quick-ssh-file-columns.has-editor { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(0, 1.5fr); gap: 12px; align-items: start; }
+.quick-ssh-edit-pane { grid-column: 2; grid-row: 1; }
+.quick-ssh-file-columns.has-editor .quick-ssh-list { grid-column: 1; grid-row: 1; max-height: 440px; }
+.quick-ssh-file-columns.has-editor .quick-ssh-list .button-row { flex-wrap: wrap; }
+.quick-ssh-file-columns.has-editor .quick-ssh-editor { min-height: 320px; }
+.workspace-context select { width: auto; max-width: 280px; min-height: 30px; padding: 4px 8px; }
 @media (max-width: 600px) {
   .quick-ssh-workspace .panel { padding: 8px; }
   .quick-ssh-workspace .panel-head { align-items: flex-start; flex-wrap: wrap; }
@@ -29,4 +35,6 @@
   .quick-ssh-path { flex-wrap: wrap; }
   .quick-ssh-list .data-table th:last-child { width: auto; }
   .quick-ssh-list .button-row { flex-wrap: wrap; }
+  .quick-ssh-file-columns.has-editor { display: flex; flex-direction: column; }
+  .quick-ssh-file-columns > * { width: 100%; }
 }

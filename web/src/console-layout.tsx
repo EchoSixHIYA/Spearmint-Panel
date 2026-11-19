@@ -5,27 +5,35 @@ import { grovePanelRoute, remoteServiceHref } from './grove-navigation'
 import { publicPanelLabel } from './grove-directory'
 import { useRemoteCatalog } from './remote-catalog'
 import { serviceSearchText } from './services'
+import { allowNavigation } from './navigation-guard'
 
 export const navigation = [
-  { group: '工作台', items: [{ id: 'overview', title: '花园总览', icon: 'layout-dashboard' }, { id: 'alerts', title: '告警中心', icon: 'bell', admin: true }] },
-  { group: '基础设施', items: [{ id: 'nodes', title: '节点管理', icon: 'server', admin: true }, { id: 'topology', title: '网络拓扑', icon: 'network', admin: true }, { id: 'ssh', title: '快速 SSH', icon: 'terminal', admin: true }, { id: 'services', title: '服务管理', icon: 'layers', admin: true }, { id: 'exposures', title: '公网映射', icon: 'globe', admin: true }, { id: 'operations', title: '操作与审批', icon: 'activity' }] },
-  { group: '网络扩展', items: [{ id: 'seeds', title: '节点播种', icon: 'sprout', admin: true }, { id: 'pollen', title: '移动节点', icon: 'wind', admin: true, planned: true }, { id: 'federation', title: '跨 Grove 连接', icon: 'git-merge', admin: true, planned: true }] },
-  { group: '安全与身份', items: [{ id: 'access', title: '用户与授权', icon: 'shield' }, { id: 'audit', title: '安全审计', icon: 'file-text', admin: true }, { id: 'sessions', title: '我的会话', icon: 'monitor' }] },
-  { group: '系统与扩展', items: [{ id: 'deployments', title: '应用部署', icon: 'package', admin: true }, { id: 'settings', title: '系统设置', icon: 'settings' }] },
+  { group: '工作台', items: [{ id: 'overview', title: '总览', icon: 'layout-dashboard' }, { id: 'services', title: '服务', icon: 'layers', admin: true }, { id: 'nodes', title: '节点', icon: 'server', admin: true }, { id: 'operations', title: '操作中心', icon: 'activity' }] },
+  { group: '管理', items: [{ id: 'identity', title: '身份与安全', icon: 'shield' }, { id: 'maintenance', title: '平台维护', icon: 'package', admin: true }] },
+  { group: '待实现', items: [{ id: 'pollen', title: '移动节点', icon: 'wind', admin: true, planned: true }, { id: 'federation', title: '跨 Grove 连接', icon: 'git-merge', admin: true, planned: true }] },
 ]
-export const adminPages = new Set(navigation.flatMap((group) => group.items).filter((item) => 'admin' in item && item.admin).map((item) => item.id))
-export function pageName(page: string) { return navigation.flatMap((group) => group.items).find((item) => item.id === page)?.title || '花园总览' }
+export const adminPages = new Set([...navigation.flatMap((group) => group.items).filter((item) => 'admin' in item && item.admin).map((item) => item.id), 'topology', 'ssh', 'seeds', 'deployments', 'exposures', 'audit'])
+const area: Record<string, string> = { topology: 'nodes', ssh: 'nodes', seeds: 'nodes', alerts: 'operations', audit: 'identity', access: 'identity', deployments: 'maintenance', exposures: 'services' }
+export function pageName(page: string) { return ({ ssh: '终端与文件', seeds: '添加节点', sessions: '我的会话', settings: '显示偏好', account: '我的账户', audit: '安全审计', topology: '网络拓扑', deployments: '平台维护', exposures: '公网映射' } as Record<string, string>)[page] || navigation.flatMap((group) => group.items).find((item) => item.id === page)?.title || '服务' }
 export function useRoute() {
-  function read() { return location.hash.replace(/^#\/?/, '').split('/').map((part) => { try { return decodeURIComponent(part) } catch { return part } }) }
+  function read() { return location.hash.split('?')[0].replace(/^#\/?/, '').split('/').map((part) => { try { return decodeURIComponent(part) } catch { return part } }) }
   const [path, setPath] = useState(read)
-  useEffect(() => { const change = () => setPath(read()); window.addEventListener('hashchange', change); return () => window.removeEventListener('hashchange', change) }, [])
-  return { page: path[0] || 'overview', id: path[1], segments: path.slice(2) }
+  useEffect(() => {
+    let accepted = location.hash
+    const change = () => {
+      if (!allowNavigation()) { history.replaceState(null, '', accepted); return }
+      accepted = location.hash; setPath(read())
+    }
+    window.addEventListener('hashchange', change)
+    return () => window.removeEventListener('hashchange', change)
+  }, [])
+  return { page: path[0] || 'services', id: path[1], segments: path.slice(2) }
 }
 
 export function ConsoleLayout({ page, children, onSignOut, signingOut }: {
   page: string; children: ReactNode; onSignOut: () => void; signingOut: boolean
 }) {
-  const { local, admin, alerts, preferences, session, grove } = useConsole()
+  const { local, localName, admin, alerts, preferences, session, grove } = useConsole()
   const build = local.error ? undefined : local.data?.build
   const [menu, setMenu] = useState(false); const [search, setSearch] = useState(false); const [account, setAccount] = useState(false)
   const [panelPicker, setPanelPicker] = useState(false)
@@ -63,15 +71,15 @@ export function ConsoleLayout({ page, children, onSignOut, signingOut }: {
           <small>{publicPanelLabel(location.origin)}</small></span>
         <Icon name="chevron-down" size={14} />
       </button>
-      <nav>{navigation.map((group) => { const items = group.items.filter((item) => !('admin' in item && item.admin) || admin); return items.length ? <div key={group.group} className="nav-group"><div className="nav-label">{group.group}</div>{items.map((item) => <a key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} href={`#/${item.id}`} aria-current={page === item.id ? 'page' : undefined} onClick={() => setMenu(false)}><Icon name={item.icon} size={17} /><span>{item.title}</span>{item.id === 'alerts' && alerts.length > 0 && <span className="nav-count">{alerts.length}</span>}{'planned' in item && Boolean(item.planned) && <span className="nav-planned">规划</span>}</a>)}</div> : null })}</nav>
+      <nav>{navigation.map((group) => { const items = group.items.filter((item) => !('admin' in item && item.admin) || admin); return items.length ? <div key={group.group} className="nav-group"><div className="nav-label">{group.group}</div>{items.map((item) => <a key={item.id} className={`nav-item ${(area[page] || page) === item.id ? 'active' : ''}`} href={`#/${item.id}`} aria-current={(area[page] || page) === item.id ? 'page' : undefined} onClick={() => setMenu(false)}><Icon name={item.icon} size={17} /><span>{item.title}</span>{item.id === 'operations' && alerts.length > 0 && <span className="nav-count">{alerts.length}</span>}{'planned' in item && Boolean(item.planned) && <span className="nav-planned">未完成</span>}</a>)}</div> : null })}</nav>
       <div className="sidebar-footer"><div className="sidebar-health"><span className={`pulse-dot ${local.error ? 'disconnected' : ''}`} /><span>{local.error ? '面板连接待恢复' : local.data ? '已连接当前节点' : '正在连接节点'}</span></div>
         <div className="sidebar-version" title={build?.commit || undefined}><Icon name="info" size={12} />
           {build?.version ? `后端 v${build.version}` : local.data || local.error ? '后端版本未知' : '正在读取后端版本'}
           {build?.commit && <code>{build.commit.slice(0, 8)}</code>}</div></div>
     </aside>
-    <div className="main-wrap"><header className="topbar"><div className="topbar-left"><button ref={menuButton} className="icon-button mobile-menu" aria-label="打开导航" aria-expanded={menu} aria-controls="console-sidebar" onClick={() => setMenu(true)}><Icon name="menu" size={22} /></button><div className="breadcrumbs"><a href="#/overview">Spearmint</a><span>/</span>{pageName(page)}</div><span className="sync-label"><span className={`pulse-dot ${local.error ? 'disconnected' : ''}`} />{local.error ? '等待重连' : '实时状态'}</span></div>
+    <div className="main-wrap"><header className="topbar"><div className="topbar-left"><button ref={menuButton} className="icon-button mobile-menu" aria-label="打开导航" aria-expanded={menu} aria-controls="console-sidebar" onClick={() => setMenu(true)}><Icon name="menu" size={22} /></button><div className="breadcrumbs"><a href="#/overview">Spearmint</a><span>/</span>{pageName(page)}</div><span className="sync-label"><span className={`pulse-dot ${local.error ? 'disconnected' : ''}`} />{local.error ? '等待重连' : `当前面板 · ${localName}`}</span></div>
       <div className="topbar-actions"><button className="search-trigger" aria-label="搜索节点、服务或页面" onClick={() => setSearch(true)}><Icon name="search" size={15} /><span>搜索节点、服务…</span><kbd>⌘ K</kbd></button>{admin && <a href="#/alerts" className="icon-button" aria-label={alerts.length ? `${alerts.length} 项需要关注` : '查看状态提醒'}><Icon name="bell" size={19} />{alerts.length > 0 && <span className="tiny-alert" />}</a>}
-        <div className="account-menu"><button className="user-avatar" aria-label="打开账户菜单" aria-expanded={account} onClick={() => setAccount(!account)}>{(session.display_name || session.username).slice(0, 1).toUpperCase()}</button>{account && <><button className="account-menu-backdrop" aria-label="关闭账户菜单" onClick={() => setAccount(false)} /><div className="account-dropdown"><strong>{session.display_name || session.username}</strong><small>{admin ? '节点管理员' : '远程操作员'}</small><a href="#/access"><Icon name="shield" size={15} />账户与验证器</a><a href="#/sessions"><Icon name="monitor" size={15} />我的会话</a><button disabled={signingOut} onClick={onSignOut}><Icon name="log-out" size={15} />{signingOut ? '正在退出…' : '退出登录'}</button></div></>}</div>
+        <div className="account-menu"><button className="user-avatar" aria-label="打开账户菜单" aria-expanded={account} onClick={() => setAccount(!account)}>{(session.display_name || session.username).slice(0, 1).toUpperCase()}</button>{account && <><button className="account-menu-backdrop" aria-label="关闭账户菜单" onClick={() => setAccount(false)} /><div className="account-dropdown"><strong>{session.display_name || session.username}</strong><small>{admin ? '节点管理员' : '远程操作员'}</small><a href="#/account"><Icon name="shield" size={15} />账户与验证器</a><a href="#/account/sessions"><Icon name="monitor" size={15} />我的会话</a><a href="#/account/settings"><Icon name="settings" size={15} />显示偏好</a><button disabled={signingOut} onClick={() => { if (allowNavigation()) onSignOut() }}><Icon name="log-out" size={15} />{signingOut ? '正在退出…' : '退出登录'}</button></div></>}</div>
       </div></header>
       <main className="main-content" id="main-content" tabIndex={-1}>{children}<footer className="app-footer"><span><Icon name="sprout" size={15} />Spearmint · Grow with your infrastructure</span><span>YOUR INFRASTRUCTURE. YOUR GROVE.</span></footer></main>
     </div>
@@ -88,7 +96,7 @@ function GrovePanels({ onClose, onSettings }: { onClose: () => void; onSettings:
   const otherMembers = memberNodes?.filter(node => !node.local)
   const panels = currentId && !local.error ? [...(otherMembers ?? [])].sort((a, b) => a.name.localeCompare(b.name)) : []
   const meshPending = directoryCurrent && otherMembers?.length && otherMembers.every(node => node.status === 'unconfigured')
-  return <Modal title="Grove 节点面板" onClose={onClose} className="grove-panels">
+  return <Modal title="Grove 节点" onClose={onClose} className="grove-panels">
     <div className="grove-panel-entry">
       <span className="service-symbol"><Icon name="server" size={18} /></span>
       <span className="grove-panel-name"><strong>{localName}</strong>
@@ -105,10 +113,7 @@ function GrovePanels({ onClose, onSettings }: { onClose: () => void; onSettings:
       const origin = memberPanelOrigins.get(id)
       const entry = <><span className="service-symbol"><Icon name="server" size={18} /></span>
         <span className="grove-panel-name"><strong>{name}</strong><small>{publicPanelLabel(memberOrigin)} · {shortId(id)}</small></span></>
-      return <li key={id}>{origin && origin !== location.origin
-        ? <a className="grove-panel-entry" href={`${origin}/${grovePanelRoute(location.hash, id, currentId, memberPanelOrigins)}`} target="_blank" rel="noopener noreferrer" onClick={onClose}>
-          {entry}<Icon name="arrow-up-right" size={16} /></a>
-        : <div className="grove-panel-entry">{entry}</div>}</li>
+      return <li key={id}><a className="grove-panel-entry" href={`#/nodes/${id}`} onClick={onClose}>{entry}<Icon name="arrow-right" size={16} /></a></li>
     })}</ul>}
     {admin && !panels.length && grove.data?.configured && <p className="muted grove-panel-message" role="status">
       {local.error ? '暂时无法读取当前节点身份。' : directoryPending ? '正在自动同步成员目录…'

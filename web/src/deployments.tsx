@@ -189,7 +189,7 @@ export function DeploymentsPage({ targetId }: { targetId?: string }) {
 
   return <>
     {targetId && <a className="back-link" href="#/deployments"><Icon name="arrow-left" size={15} />查看全部节点版本</a>}
-    <PageHeading eyebrow="SYSTEM / DEPLOYMENTS" title="应用部署" description={`查看 ${localName} 的面板版本和前端资源。`}>
+    <PageHeading eyebrow="MANAGEMENT / PLATFORM" title="平台维护" description={`检查 Spearmint 版本、群组更新与部署资源。当前面板：${localName}。`}>
       <button type="button" className="btn btn-secondary" onClick={refreshConsole}><Icon name="refresh" size={15} />刷新状态</button>
       {localDirectory && localNodeId && groveDetails?.realm && <label className="inline-checkbox"><input type="checkbox" checked={includeMembers}
         onChange={event => setIncludeMembers(event.target.checked)} />报告包含成员地址及启用状态</label>}

@@ -1,0 +1,17 @@
+.workspace-summary { display: flex; flex-wrap: wrap; gap: 20px; align-items: center; margin: 0 0 20px; color: var(--muted); font-size: 12px; }
+.workspace-summary strong { color: var(--ink); }
+.workspace-summary > :last-child { margin-left: auto; }
+.workspace-filters { display: flex; gap: 10px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+.workspace-filters .search-box { flex: 1; min-width: 200px; }
+.workspace-filters select { width: auto; max-width: 210px; }
+.workspace-service-table td { padding-top: 12px; padding-bottom: 12px; }
+.inline-icon { display: inline-flex; vertical-align: middle; }
+.workspace-context { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 10px 14px; border: 1px solid var(--edge); background: #f0f7f1; border-radius: 10px; margin-bottom: 18px; font-size: 12px; }
+.workspace-context .badge { margin-left: auto; }
+.resource-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--edge); font-size: 12px; }
+.section-tabs { margin-bottom: 16px; }
+.workspace-plan-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.registration-steps { display: flex; gap: 12px; padding: 0; margin: 0 0 14px; list-style: none; color: var(--muted); flex-wrap: wrap; font-size: 12px; }
+.registration-steps .current { color: var(--green); font-weight: 700; }
+.nav-item.section-active { background: #eaf4eb; color: #246b50; font-weight: 730; }
+@media (max-width: 600px) { .workspace-filters select { flex: 1; max-width: none; } .workspace-summary > :last-child { margin-left: 0; } }

@@ -55,7 +55,7 @@ export function AccessPage({ onFactors, expectedJoinNode }: { onFactors: () => v
   </>
 }
 
-function GrovePasswordDialog({ session, onClose, onUnauthorized }: { session: Session; onClose: () => void; onUnauthorized: () => void }) {
+export function GrovePasswordDialog({ session, onClose, onUnauthorized }: { session: Session; onClose: () => void; onUnauthorized: () => void }) {
   const [pending, setPending] = useState(false)
   const [message, setMessage] = useState('')
 

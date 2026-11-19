@@ -136,6 +136,7 @@ class PeerServices:
         self.grove_updates = None
         self.service_setup = None
         self.terminals = None
+        self.workspace = None
         self.grove_directory_issuer: str | None = None
         self.grove_issuer_connection_id: str | None = None
         self.manager = PeerManager(state, local_id, self.handle, dial_enabled=dial_enabled)
@@ -486,6 +487,8 @@ class PeerServices:
             return await self.work(self.service_setup.dispatch, pair, params, rpc=True)
         if self.terminals is not None and method == self.terminals.method:
             return await self.work(self.terminals.dispatch, pair, params, rpc=True)
+        if self.workspace is not None and method == self.workspace.method:
+            return await self.work(self.workspace.dispatch, pair, params, rpc=True)
         if method in frp_access.METHODS:
             return await self.work(frp_access.handle, self.state, self.local_id, pair, method, params, rpc=True)
         if method in OPERATIONS:

@@ -10,7 +10,7 @@ export function Icon({ name, size = 18, className = '' }: { name: string; size?:
 }
 
 export function Brand() {
-  return <a className="brand-link" href="#/overview" aria-label="Spearmint 花园总览">
+  return <a className="brand-link" href="#/services" aria-label="Spearmint 服务工作区">
     <span className="brand-mark"><Icon name="sprout" size={25} /></span>
     <span className="brand-type"><strong>spearmint</strong><small>GROVE CONSOLE</small></span>
   </a>
