@@ -64,6 +64,8 @@ export type Metrics = {
   root_disk: { total: number; used: number; free: number; percent: number } | null
   state_disk: { total: number; used: number; free: number; percent: number } | null
   state_disk_is_root?: boolean | null
+  gpu?: { sampled_at: number | null; valid_until: number | null; status: 'available' | 'unavailable'; stale?: boolean;
+    devices: { id: string; name: string; utilization_percent: number | null; memory_used_bytes: number | null; memory_total_bytes: number | null }[] }
   network: { received_per_second: number; sent_per_second: number } | null; uptime_seconds: number | null
 }
 export type AuditEntry = { id: number; recorded_at: number; actor: string; source: string; event: string; target: string | null; reason?: string | null; count?: number }

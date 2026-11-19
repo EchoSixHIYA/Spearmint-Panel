@@ -1,15 +1,14 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { type NodeView } from './console-data'
-import { reachabilityLabel } from './connection-status'
 import { Icon, nodeConnectionLabel, shortId } from './ui'
 import { NetworkCanvas } from './network-canvas'
 import { useNetworkMemory, type RememberedEdge } from './network-memory'
+import { NodeResourceStats, useNodeResources, type NodeResourceSample } from './node-resources'
 import './network-map.css'
 
 type Link = { id: string; from: string; to: string; kind: 'active' | 'selected' | 'alternative'; shared?: boolean; pending?: boolean }
 
 function reportedLinks(nodes: NodeView[], current: NodeView, paths: Map<string, string[]>, rememberedDepths: Map<string, number>, rememberedEdges: RememberedEdge[], target?: string, alternative?: readonly string[]) {
-  const destinations = new Map<string, number>()
   const positions = new Map<string, number>()
   const relayPositions = new Map<string, number>()
   const links = new Map<string, Link>()
@@ -21,7 +20,6 @@ function reportedLinks(nodes: NodeView[], current: NodeView, paths: Map<string, 
     const path = node.activePath ?? paths.get(node.id)
     if (!path) continue
     positions.set(node.id, path.length - 1)
-    if (node.activePath) destinations.set(node.id, path.length - 1)
     for (let depth = 1; depth < path.length; depth++) {
       const from = path[depth - 1], to = path[depth]
       if (depth < path.length - 1) relayPositions.set(to, Math.min(depth, relayPositions.get(to) ?? depth))
@@ -46,7 +44,7 @@ function reportedLinks(nodes: NodeView[], current: NodeView, paths: Map<string, 
     links.set(id, previous ? { ...previous, shared: true }
       : { id, from, to, kind: 'alternative' })
   }
-  return { depths, destinations, alternativeOnly, links: [...links.values()] }
+  return { depths, alternativeOnly, links: [...links.values()] }
 }
 
 function linkGeometry(from: DOMRect, to: DOMRect, bounds: DOMRect, vertical: boolean, radial: boolean, obstacles: DOMRect[], lane: number) {
@@ -182,28 +180,22 @@ function NetworkPreview({ current, levels, byId, links, paths }: {
   </div>
 }
 
-function MapNode({ node, plotted = false, hops, selected = false, alternative = false, selectTarget = false, onPick }: {
-  node: NodeView; plotted?: boolean; hops?: number; selected?: boolean; alternative?: boolean; selectTarget?: boolean
+function MapNode({ node, sample, plotted = false, selected = false, selectTarget = false, onPick }: {
+  node: NodeView; sample?: NodeResourceSample; plotted?: boolean; selected?: boolean; selectTarget?: boolean
   onPick?: (id: string) => void
 }) {
   const online = node.status === 'online'
-  const awaitingPath = online && !node.local && hops === undefined
   const latency = online ? node.peer?.rtt_ms : null
-  const evidence = reachabilityLabel(node)
-  const relayOnly = plotted && online && !node.local && hops === undefined
-  const pathDetail = hops !== undefined ? hops === 1 ? '直连' : `活动路径 ${hops} 跳`
-    : !online ? evidence || (node.idlePath ? `上次连接 ${node.idlePath.path.length - 1} 跳` : '连接待确认')
-    : awaitingPath ? '路径待报告' : relayOnly ? alternative ? '备路经过' : '中继经过' : undefined
   const props = { className: `mesh-node${node.local ? ' is-local' : ''}${online ? ' is-online' : ''}${selected ? ' is-target' : ''}`,
     'data-mesh-node': plotted ? node.id : undefined, title: node.name }
   const card = <>
+    <span className="mesh-node-header">
     <span className="mesh-node-icon"><Icon name={node.local ? 'monitor' : 'server'} size={21} /></span>
-    <span className="mesh-node-info">
-      <strong>{node.name}</strong>
-      <small><span className="mesh-status-dot" />{nodeConnectionLabel(node)}{latency != null && <span className="mesh-latency" title="心跳往返时间">{latency.toFixed(1)} ms</span>}</small>
-      {pathDetail && <small title={pathDetail}>{pathDetail}</small>}
+    <span className="mesh-node-info"><strong>{node.name}</strong></span>
+    <span className="mesh-node-connection"><small><span className="mesh-status-dot" />{nodeConnectionLabel(node)}</small>
+      <small className="mesh-latency" title="心跳往返时间">{latency != null ? `${latency.toFixed(1)} ms` : node.local ? '本机' : '—'}</small></span>
     </span>
-    <Icon name={onPick ? selected ? 'check' : 'arrow-right' : 'arrow-up-right'} className="mesh-node-arrow" size={15} />
+    <NodeResourceStats sample={sample} online={online} />
   </>
   if (onPick) return <button {...props} type="button" aria-pressed={selected}
     disabled={node.local ? !online : !node.peer?.enabled || ['disabled', 'quarantined'].includes(node.status)}
@@ -213,9 +205,10 @@ function MapNode({ node, plotted = false, hops, selected = false, alternative = 
 }
 
 function MapRelay({ id, alternative }: { id: string; alternative: boolean }) {
-  return <div className="mesh-node mesh-relay" data-mesh-node={id} title={id}>
-    <span className="mesh-node-icon"><Icon name="route" size={21} /></span>
-    <span className="mesh-node-info"><strong>{shortId(id)}</strong><small>{alternative ? '备路经过' : '中继经过'}</small></span>
+  return <div className="mesh-node mesh-relay" data-mesh-node={id} title={`${id} · ${alternative ? '备路经过' : '中继经过'}`}>
+    <span className="mesh-node-header"><span className="mesh-node-icon"><Icon name="route" size={21} /></span>
+      <span className="mesh-node-info"><strong>{shortId(id)}</strong></span><span className="mesh-node-connection"><small>状态未知</small><small>—</small></span></span>
+    <NodeResourceStats online={false} />
   </div>
 }
 
@@ -223,9 +216,10 @@ export function NetworkMap({ mini = false, compact = false, target, alternative,
   mini?: boolean; compact?: boolean; target?: string; alternative?: readonly string[]; onPick?: (id: string) => void
 }) {
   const { nodes, current, paths, depths: rememberedDepths, edges } = useNetworkMemory()
+  const resources = useNodeResources(nodes, !mini)
   if (!current) return <div className="mesh-map"><p className="mesh-map-message">正在读取本机节点…</p></div>
 
-  const { depths, destinations, alternativeOnly, links } = reportedLinks(nodes, current, paths, rememberedDepths, edges, target, alternative)
+  const { depths, alternativeOnly, links } = reportedLinks(nodes, current, paths, rememberedDepths, edges, target, alternative)
   const levels = new Map<number, string[]>()
   const byId = new Map(nodes.map((node) => [node.id, node]))
   for (const [id, depth] of [...depths].sort(([, a], [, b]) => a - b)) {
@@ -245,8 +239,8 @@ export function NetworkMap({ mini = false, compact = false, target, alternative,
             <h4>{depth === 0 ? '当前节点' : `${depth} 跳`}</h4>
             <div className="mesh-level-nodes">{members.map((id) => {
               const node = byId.get(id)
-              return node ? <MapNode key={id} node={node} plotted hops={destinations.get(id)} selected={id === target}
-                alternative={alternativeOnly.has(id)} selectTarget={!compact} onPick={onPick} />
+              return node ? <MapNode key={id} node={node} sample={resources.get(id)} plotted selected={id === target}
+                selectTarget={!compact} onPick={onPick} />
                 : <MapRelay key={id} id={id} alternative={alternativeOnly.has(id)} />
             })}</div>
           </section>)}

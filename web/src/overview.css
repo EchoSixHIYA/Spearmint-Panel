@@ -21,7 +21,7 @@
 .overview-network-main .mesh-graph {
   --overview-link-gap: 44px;
   grid-auto-flow: column;
-  grid-auto-columns: 190px;
+  grid-auto-columns: 256px;
   gap: var(--overview-link-gap);
   width: max-content;
   min-width: 0;
@@ -31,7 +31,7 @@
 .overview-network-main .mesh-level { width: auto; max-width: none; justify-self: stretch; }
 .overview-network-main .mesh-level h4 { width: auto; margin: 0 0 9px; padding: 0; color: #bfd8c9; font-size: 10px; background: transparent; }
 .overview-network-main .mesh-level-nodes { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-.overview-network-main .mesh-node { min-height: 72px; padding: 8px 10px; gap: 8px; border-radius: 10px; box-shadow: 0 2px 8px #072b201a; }
+.overview-network-main .mesh-node { min-height: 78px; height: 78px; padding: 8px 10px; gap: 6px; border-radius: 10px; box-shadow: 0 2px 8px #072b201a; }
 .overview-network-main .mesh-node-icon { width: 27px; height: 27px; border-radius: 7px; }
 .overview-network-main .mesh-node-icon .icon { width: 17px; height: 17px; }
 .overview-network-main .mesh-node-info strong { font-size: 12px; }
@@ -82,6 +82,10 @@
 .overview-network .mesh-node { background: #ffffff0c; border-color: #c7e9d12e; color: #edf9ef; }
 .overview-network .mesh-node-icon { background: #aedcba1a; color: #badfc7; }
 .overview-network .mesh-node-info small, .overview-network .mesh-node-arrow { color: #c0d7c9; }
+.overview-network .mesh-node-connection small, .overview-network .mesh-resource > span { color: #b9d3c2; }
+.overview-network .mesh-node.is-local .mesh-resource > span, .overview-network .mesh-node.is-local .mesh-node-connection small { color: #3d7055; }
+.overview-network .mesh-resource.is-high b { color: #f1ca94; }
+.overview-network .mesh-node.is-local .mesh-resource.is-high b { color: #986628; }
 .overview-network .mesh-node[href]:hover { background: #ffffff18; border-color: #bdddc9; }
 .overview-network .mesh-map-message { color: #d3e7d8; min-height: 180px; }
 .overview-network .mesh-node:not(.is-online) { background: #84908928; border-color: #a4b0a852; color: #c5ceca; }
@@ -103,7 +107,7 @@
   .overview-network-actions { gap: 16px; }
   .overview-network .hero-kicker { font-size: 9px; letter-spacing: 1.5px; }
   .overview-network-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
-  .overview-network-main .mesh-graph { grid-auto-flow: column; grid-auto-columns: 190px; min-width: 0; gap: 44px; padding: 20px; }
+  .overview-network-main .mesh-graph { grid-auto-flow: column; grid-auto-columns: 256px; min-width: 0; gap: 44px; padding: 20px; }
   .overview-network-main .mesh-level-nodes { grid-template-columns: minmax(0, 1fr); }
   .overview-network-main .mesh-level { width: auto; max-width: none; justify-self: stretch; }
 }

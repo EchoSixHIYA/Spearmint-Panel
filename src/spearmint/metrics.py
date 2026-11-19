@@ -10,6 +10,7 @@ from typing import TypeVar
 import psutil
 
 from .platforms import WINDOWS
+from .gpu_metrics import collect as collect_gpu
 
 
 T = TypeVar("T")
@@ -68,6 +69,7 @@ class Metrics:
         self.system_directory = system_directory()
         self.stop = Event()
         self.latest: dict | None = None
+        self.gpu_latest: dict | None = None
         self.history = deque(maxlen=HISTORY_SECONDS // INTERVAL + 1)
         self.history_lock = Lock()
 
@@ -76,14 +78,23 @@ class Metrics:
         self.stop.clear()
         with self.history_lock:
             self.latest = None
+            self.gpu_latest = None
             self.history.clear()
         worker = Thread(target=self.sample, name="host-metrics", daemon=True)
+        gpu_worker = Thread(target=self.sample_gpu, name="gpu-metrics", daemon=True)
         worker.start()
+        gpu_worker.start()
         try:
             yield
         finally:
             self.stop.set()
             worker.join(timeout=3)
+            gpu_worker.join(timeout=3)
+
+    def sample_gpu(self) -> None:
+        while not self.stop.is_set():
+            self.gpu_latest = collect_gpu()
+            self.stop.wait(5)
 
     def sample(self) -> None:
         previous: dict = {}
@@ -133,11 +144,15 @@ class Metrics:
 
     def snapshot(self) -> dict:
         sample = self.latest
+        gpu = self.gpu_latest
+        gpu = {**gpu, 'stale': time.time() > gpu['valid_until']} if gpu else {
+            'sampled_at': None, 'valid_until': None, 'status': 'unavailable', 'devices': [], 'stale': True}
         if sample is None:
             return {
                 "sampled_at": None, "valid_until": None, "source": "local", "stale": True,
                 "cpu_percent": None, "memory": None, "root_disk": None, "state_disk": None,
                 "state_disk_is_root": None,
                 "network": None, "uptime_seconds": None,
+                "gpu": gpu,
             }
-        return {**sample, "stale": time.time() > sample["valid_until"]}
+        return {**sample, "gpu": gpu, "stale": time.time() > sample["valid_until"]}
