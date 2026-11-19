@@ -22,13 +22,14 @@ export function NetworkCanvas({ children, mini, compact, current, label }: {
   const pointers = useRef(new Map<number, Point>())
   const suppressClick = useRef(false)
   const touched = useRef(false)
+  const controls = !mini && !compact
 
   function move(next: Camera) { camera.current = next; setView(next) }
   function bounds() {
     const outer = viewport.current, inner = stage.current
     return outer && inner ? { width: outer.clientWidth, height: outer.clientHeight, contentWidth: inner.offsetWidth, contentHeight: inner.offsetHeight } : null
   }
-  function centered(scale: number, focusCurrent = false, nearLeft = false) {
+  function centered(scale: number, focusCurrent = false) {
     const size = bounds()
     if (!size) return
     let x = size.contentWidth / 2, y = size.contentHeight / 2
@@ -40,15 +41,13 @@ export function NetworkCanvas({ children, mini, compact, current, label }: {
         y = (rect.top + rect.height / 2 - parent.top) / camera.current.scale
       }
     }
-    move({ scale, x: (nearLeft ? Math.min(140, size.width / 4) : size.width / 2) - x * scale, y: size.height / 2 - y * scale })
+    move({ scale, x: size.width / 2 - x * scale, y: size.height / 2 - y * scale })
   }
-  function fit(initial = false) {
+  function fit() {
     const size = bounds()
     if (!size?.width || !size.contentWidth || !size.contentHeight) return
     const scale = Math.min(1, (size.width - 16) / size.contentWidth, (size.height - 16) / size.contentHeight)
-    const large = size.contentWidth > size.width * 2 || size.contentHeight > size.height * 2
-    const readable = large ? mini ? .55 : .85 : limits.min
-    centered(clamp(initial ? Math.max(readable, scale) : scale), initial && scale < readable, initial && large && !mini)
+    centered(clamp(scale))
   }
   function zoom(scale: number, point?: Point) {
     const size = bounds()
@@ -65,7 +64,10 @@ export function NetworkCanvas({ children, mini, compact, current, label }: {
       const size = bounds()
       if (!size) return
       setOverflow(size.contentWidth > size.width || size.contentHeight > size.height - 32)
-      if (!touched.current) fit(true)
+      if (!touched.current) {
+        if (mini) centered(1, true)
+        else fit()
+      }
     }
     resize()
     const observer = new ResizeObserver(resize)
@@ -154,20 +156,20 @@ export function NetworkCanvas({ children, mini, compact, current, label }: {
   }
   function control(action: () => void) { touched.current = true; action() }
   return <div className={`mesh-canvas-shell${mini ? ' is-mini' : ''}${compact ? ' is-compact' : ''}`} role="region" aria-label={label}>
-    <div className="mesh-canvas-controls" role="group" aria-label="画布视图">
+    {controls && <div className="mesh-canvas-controls" role="group" aria-label="画布视图">
       <button type="button" aria-label="缩小拓扑" title="缩小" disabled={view.scale <= limits.min} onClick={() => control(() => zoom(camera.current.scale / 1.2))}>−</button>
       <output aria-label="画布缩放比例">{view.scale < .1 ? (view.scale * 100).toFixed(1) : Math.round(view.scale * 100)}%</output>
       <button type="button" aria-label="放大拓扑" title="放大" disabled={view.scale >= limits.max} onClick={() => control(() => zoom(camera.current.scale * 1.2))}>+</button>
       <button type="button" aria-label="适配画布" title="适配全部节点（0）" onClick={() => control(() => fit())}><Icon name="maximize" size={14} /></button>
       <button type="button" aria-label="回到当前节点" title="回到当前节点（Home）" onClick={() => control(() => centered(1, true))}><Icon name="monitor" size={14} /></button>
-    </div>
+    </div>}
     <div ref={viewport} className={`mesh-canvas${dragging ? ' is-dragging' : ''}`} tabIndex={0} aria-label="拖动和缩放画布" onKeyDown={keyboard}
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={endPointer} onPointerCancel={endPointer}
       onLostPointerCapture={(event) => { if (pointers.current.has(event.pointerId)) endPointer(event) }}
       onDragStart={(event) => event.preventDefault()}
       onClickCapture={(event) => { if (suppressClick.current && event.detail > 0) { event.preventDefault(); event.stopPropagation() } }}>
       <div ref={stage} className="mesh-canvas-stage" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}>{children}</div>
-      {overflow && !mini && <span className="mesh-canvas-hint">拖动画布 · Ctrl + 滚轮缩放</span>}
+      {overflow && controls && <span className="mesh-canvas-hint">拖动画布 · Ctrl + 滚轮缩放</span>}
     </div>
   </div>
 }

@@ -94,9 +94,7 @@ export function OverviewPage() {
       <header className="overview-network-heading">
         <div><div className="hero-kicker"><span className="pulse-dot" />RHIZOME · GROVE NETWORK</div>
           <h1 tabIndex={-1} id="page-title">Grove 网络</h1>
-          <p>{admin ? meshLoading ? '正在读取节点与连接状态…' : !meshCurrent ? '当前节点的连接状态暂时无法更新。'
-            : `当前节点已连接 ${connections.connected} 个远程节点。`
-            : '查看当前节点及网络连接。'}</p></div>
+          <p>拖动画布 · Ctrl + 滚轮缩放</p></div>
         <div className="overview-network-actions">
           <a className="overview-topology-link" href="#/topology">打开拓扑<Icon name="arrow-up-right" size={15} /></a>
           {admin && <a className="btn btn-white" href="#/seeds"><Icon name="plus" size={16} />添加节点</a>}

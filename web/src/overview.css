@@ -86,10 +86,6 @@
 .overview-network .mesh-node-info small, .overview-network .mesh-node-arrow { color: #c0d7c9; }
 .overview-network .mesh-node[href]:hover { background: #ffffff18; border-color: #bdddc9; }
 .overview-network .mesh-map-message { color: #d3e7d8; min-height: 180px; }
-.overview-network .mesh-canvas-controls { background: #1c503eae; border-color: #badcc52b; }
-.overview-network .mesh-canvas-controls button, .overview-network .mesh-canvas-controls output { color: #d3e7d8; }
-.overview-network .mesh-canvas-controls button:hover { background: #b5d7c42b; }
-.overview-network .mesh-canvas-hint { background: #1d503de6; color: #b5d4c1; }
 .overview-network-main .mesh-map { max-height: 380px; overflow-y: auto; }
 .overview-network-main .mesh-unplaced > div { max-height: 160px; overflow: auto; }
 .overview-network-legend { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; color: #bfd8c8; font-size: 9px; margin-top: 9px; }
