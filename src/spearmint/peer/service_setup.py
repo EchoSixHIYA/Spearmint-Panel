@@ -87,7 +87,7 @@ def system_targets(state, kind: Kind) -> dict[str, str]:
 def registration_view(service) -> dict:
     return {'id': service.id, 'target': service.target, 'name': service.name, 'version': service.version,
             'managed': service.managed,
-            **({'command': service.spec['command'], 'cwd': service.spec['cwd']} if 'command' in service.spec else {})}
+            **({'command': service.spec['command']} if 'command' in service.spec else {})}
 
 
 def acting_as(actor: GroveServiceAdmin | LocalAdmin) -> dict:
@@ -275,7 +275,7 @@ class ServiceSetup:
             if body.command is not None:
                 if body.executable is not None or body.arguments:
                     raise StateError('Supply one startup command')
-                spec = command_spec(body.command, body.cwd, body.stop_timeout, body.endpoint)
+                spec = command_spec(body.command, body.cwd, body.stop_timeout, body.endpoint, state=self.state)
             elif body.executable is not None and body.cwd is not None:
                 spec = process_spec([body.executable, *body.arguments], body.cwd, body.stop_timeout, body.endpoint)
             else:

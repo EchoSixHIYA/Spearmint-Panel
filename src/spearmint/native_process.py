@@ -16,6 +16,7 @@ import psutil
 from .catalog import Service, get_service
 from .drivers import LOG_LIMIT, Driver, LogSnapshot, Observation, ProcessDriver, SystemUnitDriver
 from .host import HostError, HostTimeout
+from .service_command import ensure_command_script
 from .platforms import WINDOWS, boot_id, process_start, read_file, secure_private, systemd_available, replace_file
 from .state import State, private_path
 from .windows_services import WindowsServiceDriver
@@ -26,6 +27,7 @@ START_CONFIRMATION_SECONDS = 10
 
 class RegisteredProcessDriver:
     def __init__(self, workload: Driver, state: State):
+        self.state = state
         self.workload = workload
         self.system_units = SystemUnitDriver()
         self.windows_services = WindowsServiceDriver(state)
@@ -39,6 +41,8 @@ class RegisteredProcessDriver:
         return self.backend(service).inspect(service)
 
     def apply(self, service: Service, action: str, before: Observation) -> None:
+        if action != 'stop':
+            ensure_command_script(self.state, service.spec)
         self.backend(service).apply(service, action, before)
 
     def logs(self, service: Service, tail: int) -> LogSnapshot:
@@ -308,8 +312,12 @@ def supervise(state_dir: str, service_id: str, instance: str | None = None, laun
                 pass
 
         try:
+            ensure_command_script(state, service.spec)
             if WINDOWS:
-                child = WindowsChild(service.spec["argv"], service.spec["cwd"], service.spec.get('command'))
+                command = service.spec.get('command')
+                if service.spec.get('command_script'):
+                    command = '"' + service.spec['command_script'] + '"'
+                child = WindowsChild(service.spec["argv"], service.spec["cwd"], command)
                 pipe = child.output
             else:
                 child = subprocess.Popen(service.spec["argv"], cwd=service.spec["cwd"], stdin=subprocess.DEVNULL,
