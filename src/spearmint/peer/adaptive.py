@@ -607,7 +607,8 @@ class AdaptiveRoutes:
                 self.remember_watched_failure(node)
                 self.retire(node, binding)
             elif (not watching and node not in self.pending_targets
-                  and now - self.used.get(node, binding.created_at) >= IDLE):
+                  and now - max(self.used.get(node, binding.created_at),
+                                getattr(binding.session, 'last_workload', binding.created_at)) >= IDLE):
                 if binding.circuit is not None:
                     self.idle_paths[node] = IdlePath(self.manager.pairs[node], binding.route.path, now)
                 self.retire(node, binding)
@@ -634,7 +635,7 @@ class AdaptiveRoutes:
                          and same_path
                          and primary.circuit.identity < binding.circuit.identity)
             expired_idle = (primary is not None and not same_path and node not in demand
-                            and now - binding.created_at >= IDLE
+                            and now - max(binding.created_at, getattr(binding.session, 'last_workload', binding.created_at)) >= IDLE
                             and primary.candidate().measured_cost(now) is not None)
             if not self.live(binding) or (not qualified and age >= TRIAL_AGE) or sample_timeout or unused:
                 self.retire(node, binding)

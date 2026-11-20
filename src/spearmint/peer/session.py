@@ -36,6 +36,8 @@ RELAY_QUEUE_FRAMES = 8
 RPC_RTT_ALLOWANCE = 2.0
 TRANSFER_WINDOW_BYTES = 64 * 1024
 TRANSFER_EXTENSION = 7.0
+MAINTENANCE_METHODS = frozenset({'peer.ping', 'catalog.sync', CATALOG_HEALTH_METHOD,
+                                 'mesh.pex', 'mesh.observe', 'mesh.grove_endpoints'})
 
 
 async def close_stream(writer: asyncio.StreamWriter) -> None:
@@ -89,6 +91,7 @@ class Session:
         self.last_pong = self.loop.time()
         self.last_seen = time.time()
         self.last_business = self.loop.time()
+        self.last_workload = self.last_business
         self.rtt_ms: float | None = None
         self.latency = Latency()
         self.closed = False
@@ -227,6 +230,8 @@ class Session:
             raise PeerError("BUSY", "Too many requests to the peer")
         request_id = token_hex(16)
         self.last_business = self.loop.time()
+        if method not in MAINTENANCE_METHODS:
+            self.last_workload = self.last_business
         result = self.loop.create_future()
         had_logs = any(name == "service.logs" and not future.done() for name, future in self.pending.values())
         log_generation = self.logs_started
@@ -344,6 +349,8 @@ class Session:
                     self.accept_response(frame, size)
                 case "request":
                     self.last_business = self.loop.time()
+                    if frame['method'] not in MAINTENANCE_METHODS:
+                        self.last_workload = self.last_business
                     key = frame["id"]
                     if key in self.handling:
                         raise ProtocolError("Duplicate in-flight request ID")

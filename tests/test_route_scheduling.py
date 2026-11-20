@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 from spearmint.peer.adaptive import AdaptiveRoutes, Binding, COOLDOWN, MAX_TRIALS
 from spearmint.peer.path_selection import Latency, Selector
-from spearmint.peer.protocol import PeerError, wire_b64
+from spearmint.peer.protocol import PeerError, encode, wire_b64
 from spearmint.peer.relay import CIRCUITS, PRIMARY_RESERVE, Circuit, Relay
 from spearmint.peer.routing import Route
 from spearmint.peer.session import RELAY_QUEUE_CIRCUITS, Session
@@ -265,6 +265,38 @@ class RouteSchedulingTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(f.scheduler.active['nas'],old)
         self.assertIn('z',f.circuits)
         self.assertEqual(f.scheduler.counts['switches_deferred'],1)
+
+    async def test_remote_workload_renews_reused_session_without_local_console(self):
+        f=Fixture();route=f.route('shanghai','nas')
+        binding=f.primary(route,40);binding.circuit.created=0;binding.session.created_at=0
+        binding.session.last_workload=f.now
+        f.scheduler.used.clear();f.options['nas']=[route]
+        await f.scheduler.step()
+        self.assertIs(f.scheduler.connection_for('nas'),binding.session)
+
+    async def test_maintenance_does_not_renew_workload_lease(self):
+        session=Session(None,None,AsyncMock())
+        session.last_workload=0
+        def answer(frame):
+            asyncio.get_running_loop().call_soon(session.accept_response,
+                {'type':'response','id':frame['id'],'result':{'status':'ok'}},100)
+        session.send=answer
+        await session.call('peer.ping',{})
+        self.assertEqual(session.last_workload,0)
+        await session.call('service.status',{})
+        self.assertGreater(session.last_workload,0)
+
+    async def test_incoming_workload_renews_shared_session_lease(self):
+        reader=asyncio.StreamReader();received=asyncio.Event()
+        async def handle(*_):
+            received.set();return {'status':'running'}
+        session=Session(reader,None,handle);session.last_workload=0
+        async with asyncio.TaskGroup() as group:
+            task=group.create_task(session.read_frames(group))
+            reader.feed_data(encode({'type':'request','id':'f'*32,'method':'service.status','params':{}}))
+            await asyncio.wait_for(received.wait(),2)
+            self.assertGreater(session.last_workload,0)
+            task.cancel()
 
 
 if __name__=='__main__':
