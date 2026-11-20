@@ -11,6 +11,7 @@ from typing import Protocol
 from .catalog import ACTIONS, Service, register
 from .host import Capture, HostError, HostTimeout, capture, local_docker_command
 from .state import State, StateError
+from .systemd_compat import literal_arguments
 
 
 LOG_LIMIT = 256 * 1024
@@ -154,11 +155,11 @@ class ProcessDriver:
             raise HostError("Registered working directory is missing")
         result = capture([
             "/usr/bin/systemd-run", "--user", "--no-ask-password", f"--unit={service.target}",
-            f"--description={self.description(service)}", "--service-type=exec", "--expand-environment=no",
+            f"--description={self.description(service)}", "--service-type=exec",
             f"--working-directory={service.spec['cwd']}", "--property=KillMode=control-group",
             "--property=TimeoutStartSec=8s", f"--property=TimeoutStopSec={service.spec['stop_timeout']}s",
             "--property=Restart=no", "--property=StandardOutput=journal", "--property=StandardError=journal",
-            "--", *argv,
+            "--", *literal_arguments(argv),
         ], timeout=10)
         if result.code:
             raise HostError("systemd could not launch the registered executable. Check permissions and the journal")

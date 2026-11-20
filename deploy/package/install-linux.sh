@@ -480,7 +480,14 @@ check_loaded_unit() {
 run_panel_command() {
     directory=$1
     shift
-    systemd-run --user --quiet --pipe --collect --expand-environment=no \
+    # Ubuntu 22.04 ships systemd 249, before --expand-environment=no existed.
+    # Preserve literal dollar characters using systemd's ExecStart escaping.
+    for argument do
+        escaped=$(printf '%s_' "$argument" | sed 's/\$/$$/g')
+        set -- "$@" "${escaped%_}"
+        shift
+    done
+    systemd-run --user --quiet --pipe --collect \
         --property="EnvironmentFile=$config" --property=RuntimeMaxSec=30s \
         --working-directory="$directory" -- "$@"
 }

@@ -10,6 +10,7 @@ import time
 
 from . import maintenance, update_release
 from .platforms import WINDOWS, replace_file, secure_private
+from .systemd_compat import literal_arguments
 
 
 def write_record(path: Path, value: dict) -> None:
@@ -101,7 +102,7 @@ def launch(state_directory: Path, job: str) -> None:
                        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
     else:
         subprocess.run(['systemd-run', '--user', '--quiet', '--collect', f'--unit=spearmint-update-{job}',
-                        '--property=RuntimeMaxSec=900', '--expand-environment=no', '--', *command],
+                        '--property=RuntimeMaxSec=900', '--', *literal_arguments(command)],
                        check=True, stdin=subprocess.DEVNULL, capture_output=True, timeout=10, env=installer_env())
 
 
