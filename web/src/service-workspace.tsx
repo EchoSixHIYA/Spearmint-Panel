@@ -8,7 +8,7 @@ import { GroveServiceSetup } from './remote-service-setup'
 import { type Service, actions as actionNames, serviceDriver } from './services'
 import { groveServiceRegistrationHref, localServiceHref, remoteServiceHref } from './grove-navigation'
 import { useServiceOperation, useWorkspace, workspace, workspaceError, returnRoute, withReturn } from './workspace-api'
-import { bytes, CopyValue, duration, EmptyState, Icon, Loading, Modal, Notice, PageHeading, Panel, StateBadge, Tabs } from './ui'
+import { Badge, bytes, CopyValue, duration, EmptyState, Icon, Loading, Modal, Notice, PageHeading, Panel, StateBadge, Tabs } from './ui'
 
 type ServiceResources = { pid: number | null; sampled_at: number | null; valid_until: number | null; scope: string | null;
   cpu_percent: number | null; memory_bytes: number | null; uptime_seconds: number | null;
@@ -192,11 +192,14 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
           <label><input type="radio" name="service-management-mode" value="observe" checked={!current.managed} onChange={() => void mutate('mode', { mode: 'observe' })} />观察模式</label>
         </fieldset></div>
       {current.command && <details className="service-settings-command"><summary>启动命令</summary><pre className="command-block">{current.command}</pre></details>}
-      <div className="service-settings-links"><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={15} />终端与文件</a>
-        <button className="btn btn-ghost btn-small" onClick={() => setTab('mapping')}>公网映射<Icon name="arrow-right" size={14} /></button></div>
-      <div className="service-settings-remove"><button className="btn btn-danger btn-small" disabled={blocked || !current.can_unregister} title={current.unregister_reason} onClick={() => setConfirmation('remove')}>取消登记</button></div>
+      <section className="service-advanced-management" role="group" aria-labelledby="service-advanced-title"><h3 id="service-advanced-title">高级管理</h3>
+        <div className="service-settings-links"><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={15} />打开该节点终端</a>
+          <button className="btn btn-ghost btn-small" onClick={() => setTab('mapping')}>公网映射<Badge tone="amber">规划中</Badge><Icon name="arrow-right" size={14} /></button></div>
+        <div className="service-settings-remove"><button className="btn btn-danger btn-small" disabled={blocked || !current.can_unregister} title={current.unregister_reason} onClick={() => setConfirmation('remove')}>取消登记</button></div>
+      </section>
     </Panel>}
-    {current && tab === 'mapping' && <FrpMappings path={path} session={session} onUnauthorized={onUnauthorized} stale={unavailable} />}
+    {current && tab === 'mapping' && <div className="stack"><div className="button-row"><button className="btn btn-ghost btn-small" onClick={() => setTab('settings')}><Icon name="arrow-left" size={14} />返回高级管理</button><Badge tone="amber">规划中</Badge></div>
+      <FrpMappings path={path} session={session} onUnauthorized={onUnauthorized} stale={unavailable} /></div>}
     {confirmation && <Modal title={confirmation === 'remove' ? `取消登记 ${current?.name}？` : `${actionNames[confirmation as keyof typeof actionNames]} ${current?.name}？`} onClose={() => setConfirmation(undefined)}>
       <p>目标节点：{nodeName}。操作结果将在当前面板显示。</p><div className="modal-actions"><button className="btn btn-secondary" onClick={() => setConfirmation(undefined)}>取消</button><button className="btn btn-danger" onClick={() => { const action = confirmation; setConfirmation(undefined); if (action === 'remove') void mutate('remove', {}); else void flow.submit(action) }}>确认{confirmation === 'remove' ? '取消登记' : actionNames[confirmation as keyof typeof actionNames]}</button></div></Modal>}
     {editing && current && <Modal title="编辑服务信息" onClose={() => setEditing(false)}><form className="stack" onSubmit={event => { event.preventDefault(); const values = new FormData(event.currentTarget); void mutate('edit', { name: values.get('name'), endpoint: current.endpoint }) }}>
