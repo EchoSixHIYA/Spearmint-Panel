@@ -8,7 +8,7 @@ import { GroveServiceSetup } from './remote-service-setup'
 import { type Service, actions as actionNames, serviceDriver } from './services'
 import { groveServiceRegistrationHref, localServiceHref, remoteServiceHref } from './grove-navigation'
 import { useServiceOperation, useWorkspace, workspace, workspaceError, returnRoute, withReturn } from './workspace-api'
-import { Badge, bytes, CopyValue, duration, EmptyState, Icon, Loading, Modal, Notice, PageHeading, Panel, StateBadge, Tabs } from './ui'
+import { bytes, CopyValue, duration, EmptyState, Icon, Loading, Modal, Notice, PageHeading, Panel, StateBadge, Tabs } from './ui'
 
 type ServiceResources = { pid: number | null; sampled_at: number | null; valid_until: number | null; scope: string | null;
   cpu_percent: number | null; memory_bytes: number | null; uptime_seconds: number | null;
@@ -186,14 +186,15 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
     {current && tab === 'settings' && <Panel className="service-settings-panel">
       <div className="service-setting-row"><span className="service-setting-label">服务名称</span><strong className="service-setting-value">{current.name}</strong>
         <button className="btn btn-secondary btn-small" disabled={blocked || !current.can_edit_details} onClick={() => setEditing(true)}>重命名</button></div>
-      <div className="service-setting-row"><span className="service-setting-label">管理方式</span><div className="service-setting-value"><Badge>{current.actions.length ? '托管启停' : '观察模式'}</Badge></div>
-        {current.can_change_mode && <button className="btn btn-secondary btn-small" disabled={blocked} onClick={() => void mutate('mode', { mode: current.actions.length ? 'observe' : 'manage' })}>{current.actions.length ? '改为观察模式' : '启用托管'}</button>}</div>
+      <div className="service-setting-row"><span className="service-setting-label">管理方式</span>
+        <fieldset className="service-mode-options" aria-label="管理方式" disabled={blocked || !current.can_change_mode}>
+          <label><input type="radio" name="service-management-mode" value="manage" checked={current.managed} onChange={() => void mutate('mode', { mode: 'manage' })} />托管启停</label>
+          <label><input type="radio" name="service-management-mode" value="observe" checked={!current.managed} onChange={() => void mutate('mode', { mode: 'observe' })} />观察模式</label>
+        </fieldset></div>
       {current.command && <details className="service-settings-command"><summary>启动命令</summary><pre className="command-block">{current.command}</pre></details>}
-      <div className="service-settings-footer"><div className="service-settings-meta"><span>服务标识</span><CopyValue value={id} short /><span>修订 {current.version}</span></div>
-        <div className="service-settings-links"><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={15} />终端与文件</a>
-          <button className="btn btn-ghost btn-small" onClick={() => setTab('mapping')}>公网映射<Icon name="arrow-right" size={14} /></button></div></div>
-      <div className="service-settings-remove"><p>{current.unregister_reason || '仅移除登记，保留程序和数据。'}</p>
-        <button className="btn btn-danger btn-small" disabled={blocked || !current.can_unregister} onClick={() => setConfirmation('remove')}>取消登记</button></div>
+      <div className="service-settings-links"><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={15} />终端与文件</a>
+        <button className="btn btn-ghost btn-small" onClick={() => setTab('mapping')}>公网映射<Icon name="arrow-right" size={14} /></button></div>
+      <div className="service-settings-remove"><button className="btn btn-danger btn-small" disabled={blocked || !current.can_unregister} title={current.unregister_reason} onClick={() => setConfirmation('remove')}>取消登记</button></div>
     </Panel>}
     {current && tab === 'mapping' && <FrpMappings path={path} session={session} onUnauthorized={onUnauthorized} stale={unavailable} />}
     {confirmation && <Modal title={confirmation === 'remove' ? `取消登记 ${current?.name}？` : `${actionNames[confirmation as keyof typeof actionNames]} ${current?.name}？`} onClose={() => setConfirmation(undefined)}>
