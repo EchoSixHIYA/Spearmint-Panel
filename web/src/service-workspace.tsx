@@ -193,9 +193,9 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
         </fieldset></div>
       {current.command && <details className="service-settings-command"><summary>启动命令</summary><pre className="command-block">{current.command}</pre></details>}
       <section className="service-advanced-management" role="group" aria-labelledby="service-advanced-title"><h3 id="service-advanced-title">高级管理</h3>
-        <div className="service-settings-links"><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={15} />打开该节点终端</a>
-          <button className="btn btn-ghost btn-small" onClick={() => setTab('mapping')}>公网映射<Badge tone="amber">规划中</Badge><Icon name="arrow-right" size={14} /></button></div>
-        <div className="service-settings-remove"><button className="btn btn-danger btn-small" disabled={blocked || !current.can_unregister} title={current.unregister_reason} onClick={() => setConfirmation('remove')}>取消登记</button></div>
+        <div className="service-advanced-actions"><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={15} />打开该节点终端</a>
+          <button className="btn btn-secondary btn-small" onClick={() => setTab('mapping')}><Icon name="globe" size={15} />公网映射<Badge tone="amber">规划中</Badge></button>
+          <button className="btn btn-danger btn-small" disabled={blocked || !current.can_unregister} title={current.unregister_reason} onClick={() => setConfirmation('remove')}>取消登记</button></div>
       </section>
     </Panel>}
     {current && tab === 'mapping' && <div className="stack"><div className="button-row"><button className="btn btn-ghost btn-small" onClick={() => setTab('settings')}><Icon name="arrow-left" size={14} />返回高级管理</button><Badge tone="amber">规划中</Badge></div>

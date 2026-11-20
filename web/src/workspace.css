@@ -58,11 +58,12 @@ button.service-action-receipt { border: 0; padding: 0; background: none; color: 
 .service-settings-command { padding: 12px 0; border-bottom: 1px solid var(--edge); font-size: 12px; }
 .service-settings-command summary { cursor: pointer; color: var(--green); }
 .service-settings-command .command-block { margin: 10px 0 0; max-height: 240px; overflow: auto; }
-.service-advanced-management { padding-top: 12px; }
+.service-advanced-management { padding: 12px 0; }
 .service-advanced-management > h3 { margin: 0 0 10px; font-size: 12px; font-weight: 650; }
-.service-settings-links { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-bottom: 12px; }
-.service-settings-remove { display: flex; align-items: center; justify-content: flex-end; border-top: 1px solid var(--edge); padding: 12px 0; }
-.service-settings-remove .btn { flex-shrink: 0; }
+.service-advanced-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.service-advanced-actions > .btn { flex: 0 0 160px; max-width: 100%; height: 36px; justify-content: center; }
+.service-advanced-actions > .btn-danger { color: #b14849; background: #fff; border-color: #e4c5c5; box-shadow: none; }
+.service-advanced-actions > .btn-danger:hover:not(:disabled) { background: #fcf0ef; }
 @media (max-width: 1000px) { .service-overview-content.has-receipt { grid-template-columns: minmax(0,1fr); } }
 @media (max-width: 600px) {
   .service-settings-panel { padding: 4px 14px 0; }
