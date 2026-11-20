@@ -6,6 +6,7 @@ import { ServiceLogs } from './service-logs'
 import { FrpMappings } from './frp-mappings'
 import { GroveServiceSetup } from './remote-service-setup'
 import { ServiceDeployment } from './service-deployment'
+import { HostServiceAuthorization } from './host-service-authorization'
 import { allowNavigation } from './navigation-guard'
 import { type Service, actions as actionNames, serviceDriver } from './services'
 import { groveServiceRegistrationHref, localServiceHref, remoteServiceHref } from './grove-navigation'
@@ -192,7 +193,8 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
         <fieldset className="service-mode-options" aria-label="管理方式" disabled={blocked || !current.can_change_mode}>
           <label><input type="radio" name="service-management-mode" value="manage" checked={current.managed} onChange={() => void mutate('mode', { mode: 'manage' })} />托管启停</label>
           <label><input type="radio" name="service-management-mode" value="observe" checked={!current.managed} onChange={() => void mutate('mode', { mode: 'observe' })} />观察模式</label>
-        </fieldset></div>
+        </fieldset>{current.runtime === 'systemd-system' && !current.managed && <HostServiceAuthorization nodeId={target} session={session} onUnauthorized={onUnauthorized}
+          disabled={busy} onAuthorized={() => { void mutate('mode', { mode: 'manage' }) }} />}</div>
       {current.command && <details className="service-settings-command"><summary>启动命令</summary><pre className="command-block">{current.command}</pre></details>}
       <section className="service-advanced-management" role="group" aria-labelledby="service-advanced-title"><h3 id="service-advanced-title">高级管理</h3>
         <div className="service-advanced-actions"><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={15} />打开该节点终端</a>

@@ -6,13 +6,14 @@ import { Icon, Loading, Notice, PageHeading, Panel, Tabs } from './ui'
 import { returnRoute, withReturn } from './workspace-api'
 import { allowNavigation, useUnsavedChanges } from './navigation-guard'
 import { ServiceDeployment } from './service-deployment'
+import { HostServiceAuthorization } from './host-service-authorization'
 
 const kinds = { systemd: 'systemd 系统服务', windows: 'Windows 系统服务', docker: 'Docker 容器' }
 type Kind = keyof typeof kinds
 type Candidate = { target: string; name: string }
 type Registered = Candidate & { id: string; managed: boolean; version: number; command?: string }
 type Candidates = { candidates: Candidate[]; registered: Registered[]; truncated: boolean; next_offset?: number | null; previous_offset?: number | null }
-type Capabilities = { kinds: Kind[]; workflow?: number; checks?: boolean; commands?: boolean; scripts?: boolean }
+type Capabilities = { kinds: Kind[]; workflow?: number; checks?: boolean; commands?: boolean; scripts?: boolean; host_authorization?: number }
 type Readiness = { ready: boolean; log_path?: string | null; observe_ready?: boolean; logs_ready?: boolean;
   control?: Record<string, boolean>; reason?: string; account?: string; enable_command?: string }
 type SetupProps = { session: Session; onUnauthorized: () => void }
@@ -212,8 +213,10 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
             {(['start', 'stop', 'restart'] as const).map(action => <span key={action}>{({ start: '启动', stop: '停止', restart: '重启' })[action]}：{checked.control?.[action] ? '可用' : '需要节点授权'}</span>)}
             <span>日志：{checked.logs_ready ? '可读取' : '需要节点授权'}</span></div>
             {!checked.ready && <Notice tone="amber" title="此节点尚未启用系统服务管理">
-              当前可先观察服务{checked.logs_ready ? '并读取日志' : '状态'}。安装或 SSH 播种时完成一次主机授权，此后接管其他服务无需逐个配置。
-              {checked.enable_command && <details><summary>已有节点如何启用</summary><p>请由主机管理员通过设备本机终端或独立 SSH 会话执行一次：</p><pre className="command-block">{checked.enable_command}</pre><p>该操作安装节点级主机管理服务，不重启业务服务；面板保持普通用户运行。</p></details>}
+              当前可先观察服务{checked.logs_ready ? '并读取日志' : '状态'}，也可在此授权目标主机后直接托管。
+              {supported.host_authorization === 1 ? <div className="button-row"><HostServiceAuthorization nodeId={nodeId} session={session} onUnauthorized={onUnauthorized}
+                onAuthorized={() => { setChecked(undefined); setRegistrationMode('manage'); setReads(value => value + 1) }} disabled={busy} /></div>
+                : <p>请先通过 Grove 群组更新升级目标节点，以使用网页主机授权。</p>}
             </Notice>}
           </div>}
           {canTakeOver && <form className="stack" onSubmit={submit} onChange={() => setDirty(true)} key={candidate?.target}>

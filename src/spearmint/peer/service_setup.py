@@ -10,6 +10,7 @@ from .. import auth
 from ..catalog import ACTIONS, RegistrationError, Service, TargetAlreadyRegistered, get_service, list_services, process_spec, register, service_name, validate_endpoint
 from ..drivers import CONTAINER_ID, ContainerNotFound, DockerDriver, SystemUnitDriver
 from ..host import DockerAccessError, HostError
+from ..host_service_authorization import Authorization, HostServiceAuthorization, StatusRequest
 from ..service_command import command_spec
 from ..platforms import WINDOWS
 from ..service_mode import ModeChangeError, change_mode
@@ -104,6 +105,7 @@ class ServiceSetup:
         self.local_id = local_id
         self.docker = DockerDriver(docker_socket)
         self.docker_socket = docker_socket
+        self.host_authorization = HostServiceAuthorization(state)
 
     def dispatch(self, pair, params: dict) -> dict:
         if params.keys() != {'identity', 'action', 'body'}:
@@ -117,7 +119,16 @@ class ServiceSetup:
             actor.require(db)
         try:
             if action == 'kinds' and body == {}:
-                return {'kinds': available_kinds(), 'workflow': 2, 'checks': True, 'commands': True, 'scripts': True}
+                return {'kinds': available_kinds(), 'workflow': 2, 'checks': True, 'commands': True, 'scripts': True,
+                        'host_authorization': 1}
+            if action == 'host-access' and body == {}:
+                return self.host_authorization.capabilities()
+            if action == 'host-authorize':
+                identity = acting_as(actor)
+                identity.pop('authorize')
+                return self.host_authorization.start(actor, identity, Authorization.model_validate(body))
+            if action == 'host-authorization-status':
+                return self.host_authorization.status(acting_as(actor), StatusRequest.model_validate(body))
             if action == 'candidates':
                 return self.candidates(Selection.model_validate(body).kind)
             if action == 'running':

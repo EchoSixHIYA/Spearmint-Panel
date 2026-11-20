@@ -420,6 +420,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                     rollout.cancel()
                     await asyncio.gather(task, rollout, return_exceptions=True)
                     wizard.shutdown()
+                    await run_in_threadpool(remote.service_setup.host_authorization.shutdown)
                     await run_in_threadpool(deployments.shutdown)
                     await run_in_threadpool(terminals.shutdown)
 
@@ -732,7 +733,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                                                            'action': action, 'body': body}, diagnostic=True)
 
     @app.post('/api/v1/peers/{node_id}/service-setup/{action}')
-    async def remote_service_setup(node_id: str, action: Literal['kinds', 'candidates', 'register', 'manage', 'running', 'inspect', 'take-over', 'create'],
+    async def remote_service_setup(node_id: str, action: Literal['kinds', 'candidates', 'register', 'manage', 'running', 'inspect', 'take-over', 'create',
+                                                              'host-access', 'host-authorize', 'host-authorization-status'],
                                    body: dict = Depends(grove_body), actor: auth.Actor = Depends(require_admin_write)):
         if node_id in ('local', remote.local_id):
             return await remote.work(remote.service_setup.setup, service_setup.LocalAdmin(actor), action, body)

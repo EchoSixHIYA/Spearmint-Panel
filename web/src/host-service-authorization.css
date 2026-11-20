@@ -1,0 +1,5 @@
+.host-authorization-form { display: grid; gap: 14px; }
+.host-authorization-form > p, .host-authorization-form .field-label { margin: 0; }
+.host-authorization-form p strong { display: inline; color: inherit; }
+.host-authorization-form details > .stack { gap: 12px; margin-top: 12px; }
+.host-authorization-form .modal-actions { margin-top: 4px; }

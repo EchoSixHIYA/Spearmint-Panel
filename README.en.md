@@ -73,7 +73,9 @@ Set up a browser-accessible HTTPS address and a local reverse proxy to `127.0.0.
 
 SSH seeding enables node-wide system-service management by default. The initiator uses the existing SSH session for a one-time host installation. When sudo requires a password, it uses the SSH login password unless a separate sudo password is provided. Credentials are only used during installation. There is no per-service allowlist; the panel continues to run as its ordinary account with `NoNewPrivileges=true`.
 
-For existing nodes, upgrade to a package containing this capability, then have a host administrator run this once from the installation directory through a device-local terminal or an independent SSH session:
+After upgrading an existing node, select **Authorize this node** on the service registration page or an observed service's management settings. Enter a host administrator account and password or SSH private key. The target authorizes its panel account through its own loopback SSH service, so no terminal or public IP is required. Advanced options accept a different SSH port and sudo password. Progress appears in the page; completion refreshes adoption readiness and switches an existing observed service to managed mode. Credentials remain in memory for this operation and are not written to task records, logs, or browser storage.
+
+For command-line maintenance, the installation directory also provides:
 
 ```sh
 sudo ./spearmint host-services enable --user "$(id -un)"
@@ -81,7 +83,7 @@ sudo ./spearmint host-services enable --user "$(id -un)"
 
 `host-services plan --user <panel-account>` prints the exact configuration first. Installation backs up existing configuration, installs a root-owned helper under `/usr/local/lib/spearmint/`, and registers `spearmint-host-<UID>.socket/.service`. The panel's OS account can request lifecycle operations and journal reads for existing system services through this local socket. The helper uses the host's existing `/usr/bin/python3` and does not install system packages or offer an arbitrary-command interface. Authorization covers the node and does not restart business services.
 
-Before authorization, register a service in observation mode; directly readable logs remain available. The UI reports start, stop, restart, and log access separately. Once host access is enabled, refresh and switch the registration to managed mode. Seeding can also leave this option off to install a panel for foreground programs and Docker without system-service management.
+Before authorization, register a service in observation mode; directly readable logs remain available. The UI reports start, stop, restart, and log access separately. Seeding can also leave this option off to install a panel for foreground programs and Docker without system-service management.
 
 ### Deploy and update services
 
