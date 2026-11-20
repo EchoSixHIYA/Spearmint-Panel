@@ -46,8 +46,23 @@ button.service-action-receipt { border: 0; padding: 0; background: none; color: 
 .service-log-preview .log-terminal { min-height: 180px; height: 220px; max-height: 300px; overflow: auto; }
 .service-receipt p { margin: 12px 0 0; overflow-wrap: anywhere; }
 .service-receipt > .button-row { margin-top: 12px; }
+.service-settings-panel { padding: 8px 20px 0; }
+.service-setting-row { display: grid; grid-template-columns: 100px minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--edge); font-size: 12px; }
+.service-setting-label { color: var(--muted); }
+.service-setting-value { min-width: 0; overflow-wrap: anywhere; }
+.service-settings-command { padding: 12px 0; border-bottom: 1px solid var(--edge); font-size: 12px; }
+.service-settings-command summary { cursor: pointer; color: var(--green); }
+.service-settings-command .command-block { margin: 10px 0 0; max-height: 240px; overflow: auto; }
+.service-settings-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 20px; padding: 12px 0; }
+.service-settings-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; color: var(--muted); font-size: 11px; }
+.service-settings-links { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.service-settings-remove { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid var(--edge); padding: 12px 0; }
+.service-settings-remove p { margin: 0; color: var(--muted); font-size: 11px; }
+.service-settings-remove .btn { flex-shrink: 0; }
 @media (max-width: 1000px) { .service-overview-content.has-receipt { grid-template-columns: minmax(0,1fr); } }
 @media (max-width: 600px) {
+  .service-settings-panel { padding: 4px 14px 0; }
+  .service-setting-row { grid-template-columns: 64px minmax(0,1fr) auto; gap: 8px; }
   .service-usage { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px 12px; }
   .service-usage > div:nth-child(odd) { border-left: 0; padding-left: 0; }
   .service-usage dd { font-size: 22px; }

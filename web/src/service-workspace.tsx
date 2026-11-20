@@ -182,14 +182,19 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
       </div>
     </div>}
     {current && tab === 'logs' && <ServiceLogs path={path} serviceId={id} onUnauthorized={onUnauthorized} remote={!local} active={!unavailable && current.logs_available !== false} />}
-    {current && tab === 'history' && <Panel title="目标节点最近的操作">{current.operations.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>动作</th><th>结果</th><th>时间</th><th>说明</th></tr></thead><tbody>{current.operations.map(item => <tr key={item.id}><td>{actionNames[item.action as keyof typeof actionNames]}</td><td><StateBadge state={item.status} /></td><td>{timestamp(item.updated_at)}</td><td>{item.message}</td></tr>)}</tbody></table></div> : <EmptyState title="暂无操作记录" />}</Panel>}
-    {current && tab === 'settings' && <div className="stack"><Panel title="登记信息" action={<button className="btn btn-secondary" disabled={blocked || !current.can_edit_details} onClick={() => setEditing(true)}>编辑服务信息</button>}><p>{current.name}</p><p className="muted">所属节点：{nodeName}。修改在当前面板提交，由目标节点执行。</p></Panel>
-      <Panel title="运行配置"><dl className="facts"><div><dt>服务标识</dt><dd><CopyValue value={id} short /></dd></div><div><dt>配置修订</dt><dd>{current.version}</dd></div></dl>
-        {current.command && <details><summary>查看已登记的启动命令</summary><pre className="command-block">{current.command}</pre></details>}
-        <div className="button-row"><a className="btn btn-secondary" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={16} />终端与文件</a><button className="btn btn-ghost" onClick={() => setTab('mapping')}>公网映射</button></div></Panel>
-      <Panel title="管理方式"><Badge>{current.actions.length ? '托管启停' : '观察模式'}</Badge>{current.can_change_mode && <button className="btn btn-secondary" disabled={blocked} onClick={() => void mutate('mode', { mode: current.actions.length ? 'observe' : 'manage' })}>{current.actions.length ? '改为观察模式' : '启用托管'}</button>}</Panel>
-      <Panel title="取消登记"><p className="muted">移除 Spearmint 中的登记，不删除目标机上的程序和数据。</p>{current.unregister_reason && <p>{current.unregister_reason}</p>}<button className="btn btn-danger" disabled={blocked || !current.can_unregister} onClick={() => setConfirmation('remove')}>取消登记</button></Panel>
-    </div>}
+    {current && tab === 'history' && <Panel title="此服务的操作记录">{current.operations.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>动作</th><th>结果</th><th>时间</th><th>说明</th></tr></thead><tbody>{current.operations.map(item => <tr key={item.id}><td>{actionNames[item.action as keyof typeof actionNames] || item.action}</td><td><StateBadge state={item.status} /></td><td>{timestamp(item.updated_at)}</td><td>{item.message || receiptReason(item) || '—'}</td></tr>)}</tbody></table></div> : <EmptyState title="此服务暂无操作记录" />}</Panel>}
+    {current && tab === 'settings' && <Panel className="service-settings-panel">
+      <div className="service-setting-row"><span className="service-setting-label">服务名称</span><strong className="service-setting-value">{current.name}</strong>
+        <button className="btn btn-secondary btn-small" disabled={blocked || !current.can_edit_details} onClick={() => setEditing(true)}>重命名</button></div>
+      <div className="service-setting-row"><span className="service-setting-label">管理方式</span><div className="service-setting-value"><Badge>{current.actions.length ? '托管启停' : '观察模式'}</Badge></div>
+        {current.can_change_mode && <button className="btn btn-secondary btn-small" disabled={blocked} onClick={() => void mutate('mode', { mode: current.actions.length ? 'observe' : 'manage' })}>{current.actions.length ? '改为观察模式' : '启用托管'}</button>}</div>
+      {current.command && <details className="service-settings-command"><summary>启动命令</summary><pre className="command-block">{current.command}</pre></details>}
+      <div className="service-settings-footer"><div className="service-settings-meta"><span>服务标识</span><CopyValue value={id} short /><span>修订 {current.version}</span></div>
+        <div className="service-settings-links"><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={15} />终端与文件</a>
+          <button className="btn btn-ghost btn-small" onClick={() => setTab('mapping')}>公网映射<Icon name="arrow-right" size={14} /></button></div></div>
+      <div className="service-settings-remove"><p>{current.unregister_reason || '仅移除登记，保留程序和数据。'}</p>
+        <button className="btn btn-danger btn-small" disabled={blocked || !current.can_unregister} onClick={() => setConfirmation('remove')}>取消登记</button></div>
+    </Panel>}
     {current && tab === 'mapping' && <FrpMappings path={path} session={session} onUnauthorized={onUnauthorized} stale={unavailable} />}
     {confirmation && <Modal title={confirmation === 'remove' ? `取消登记 ${current?.name}？` : `${actionNames[confirmation as keyof typeof actionNames]} ${current?.name}？`} onClose={() => setConfirmation(undefined)}>
       <p>目标节点：{nodeName}。操作结果将在当前面板显示。</p><div className="modal-actions"><button className="btn btn-secondary" onClick={() => setConfirmation(undefined)}>取消</button><button className="btn btn-danger" onClick={() => { const action = confirmation; setConfirmation(undefined); if (action === 'remove') void mutate('remove', {}); else void flow.submit(action) }}>确认{confirmation === 'remove' ? '取消登记' : actionNames[confirmation as keyof typeof actionNames]}</button></div></Modal>}
