@@ -13,6 +13,11 @@ import tarfile
 from typing import BinaryIO
 import zipfile
 
+if __package__:
+    from .linux_compatibility import verify_arm64_glibc
+else:
+    from linux_compatibility import verify_arm64_glibc
+
 
 TARGETS = ("linux-amd64", "linux-arm64", "windows-amd64")
 ROOT = "spearmint/"
@@ -65,6 +70,9 @@ def read_entries(entries: list[str], open_entry: Callable[[str], BinaryIO], targ
             raise ValueError(f"Duplicate package path: {name}")
         folded.add(path.casefold())
         with closing(open_entry(name)) as stream:
+            if target == 'linux-arm64':
+                verify_arm64_glibc(stream, path)
+                stream.seek(0)
             if path in ("checksums.json", "build-manifest.json"):
                 raw = stream.read(METADATA_LIMIT + 1)
                 if len(raw) > METADATA_LIMIT:

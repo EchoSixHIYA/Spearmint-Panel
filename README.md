@@ -32,7 +32,7 @@
 | 平台 | 文件名包含 |
 | --- | --- |
 | Linux x86-64，glibc 2.39 或更新版本 | `linux-amd64` · `.tar.gz` |
-| Linux ARM64，glibc 2.39 或更新版本 | `linux-arm64` · `.tar.gz` |
+| Linux ARM64，Ubuntu 22.04 / glibc 2.35 或更新版本 | `linux-arm64` · `.tar.gz` |
 | Windows x64 | `windows-amd64` · `.zip` |
 
 将归档与同名的 `.sha256` 文件放在一起。Linux 用 `sha256sum -c <归档名>.sha256` 校验。Windows 用 `Get-FileHash <归档名> -Algorithm SHA256`，将结果与校验文件中的值比较。解包后保留整个 `spearmint/` 目录。
@@ -95,7 +95,9 @@ npm --prefix web run build
 spearmint --web-dir web/dist --origin https://127.0.0.1:18443 serve --bind 127.0.0.1 --port 8765 --open-setup
 ```
 
-Windows 可用 `py -3.12 -m venv .venv`、`.\.venv\Scripts\Activate.ps1` 执行等效步骤。本机 HTTPS 沿用上文的 Caddy 示例，源码路径为 [deploy/package/Caddyfile.local](deploy/package/Caddyfile.local)。要在目标平台生成原生归档，在已准备好的环境中安装 `pyinstaller==6.22.3`，运行 `python scripts/build_package.py`。归档输出到 `work/tmp/package-build/artifacts/`。
+Windows 可用 `py -3.12 -m venv .venv`、`.\.venv\Scripts\Activate.ps1` 执行等效步骤。本机 HTTPS 沿用上文的 Caddy 示例，源码路径为 [deploy/package/Caddyfile.local](deploy/package/Caddyfile.local)。要在目标平台生成原生归档，在已准备好的虚拟环境中运行 `python -m pip install --no-cache-dir -r requirements-build.lock`，再运行 `python -m scripts.build_package`。归档输出到 `work/tmp/package-build/artifacts/`。
+
+ARM64 发布包以 Ubuntu 22.04（glibc 2.35）为兼容基线。在该环境中使用 Python 3.12 创建 `.venv`；可使用 [固定版本的 CPython 运行库及基础镜像](scripts/arm64-runtime.json)，下载后按记录的 SHA-256 校验。原生 ARM64 机器和本机 QEMU 构建均可。构建和验包会逐一检查 ELF 原生文件的 glibc 依赖，拒绝高于 2.35 的运行库；仅在较新系统上运行成功不足以作为 ARM64 发布验收。
 
 ## 许可证
 

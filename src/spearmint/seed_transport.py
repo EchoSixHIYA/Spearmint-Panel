@@ -57,11 +57,33 @@ class SSHConnectionRejected(subprocess.SubprocessError):
 
 
 class UnconfirmedInstall(subprocess.SubprocessError):
-    def __init__(self, stage: str, message: str, checkpoint: str | None, reported_node_id: str | None = None):
+    def __init__(self, stage: str, message: str, checkpoint: str | None, reported_node_id: str | None = None,
+                 *, returncode: int | None = None, stderr: bytes | None = None):
         super().__init__(message)
         self.stage = stage
         self.checkpoint = checkpoint
         self.reported_node_id = reported_node_id
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def diagnostic(error: subprocess.SubprocessError) -> tuple[str, int | None, str]:
+    """Expose a bounded error summary, never SSH arguments or first-run links."""
+    _, stage, message = failure(error)
+    raw = getattr(error, 'stderr', None) or b''
+    text = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else str(raw)
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+    # Some installers print setup URLs or authorization data while failing.
+    if re.search(r'-----BEGIN .*PRIVATE KEY-----', text):
+        text = '[private key omitted]'
+    text = re.sub(r'https?://[^\s<>]+', '[url omitted]', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?im)\b(password|passwd|secret|token|invitation|authorization|setup[_-]?code)'
+                  r'([\s\"\x27]*[:=][^\r\n]*)', r'\1=[redacted]', text)
+    text = re.sub(r'[A-Za-z0-9_+/=-]{64,}', '[opaque value omitted]', text)
+    text = ''.join(char for char in text if char in '\n\t' or char.isprintable()).strip()
+    checkpoint = getattr(error, 'checkpoint', None)
+    summary = '\n'.join(part for part in (message, f'checkpoint={checkpoint}' if checkpoint else '', text) if part)
+    return stage, getattr(error, 'returncode', None), summary[-2048:]
 
 
 LINUX_INSTALL = r'''
@@ -749,7 +771,9 @@ def _deploy(archive_path: Path | None, work: Path, *, host: str, target: str, di
                                     or (isinstance(error, subprocess.CalledProcessError) and error.returncode in SSH_DISCONNECT_CODES))
                 if lost_exit_status and confirmed_before_disconnect(output):
                     return output
-                raise UnconfirmedInstall(stage, message, last_checkpoint(output), node_receipt(output)[0]) from None
+                raise UnconfirmedInstall(stage, message, last_checkpoint(output), node_receipt(output)[0],
+                                         returncode=getattr(error, 'returncode', None),
+                                         stderr=getattr(error, 'stderr', None)) from None
             raise
         finally:
             if not quiet:

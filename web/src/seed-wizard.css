@@ -5,3 +5,4 @@
 .seed-directory-list .btn { justify-content: flex-start; text-align: left; width: 100%; }
 .seed-directory-list .btn svg:last-child { margin-left: auto; }
 .seed-wizard dd { overflow-wrap: anywhere; }
+.seed-failure-detail { margin: 8px 0 0; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }

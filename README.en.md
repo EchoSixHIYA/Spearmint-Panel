@@ -32,7 +32,7 @@ Choose a platform in [GitHub Releases](https://github.com/EchoSixHIYA/Spearmint-
 | Platform | Archive name contains |
 | --- | --- |
 | Linux x86-64 with glibc 2.39 or later | `linux-amd64` · `.tar.gz` |
-| Linux ARM64 with glibc 2.39 or later | `linux-arm64` · `.tar.gz` |
+| Linux ARM64, Ubuntu 22.04 / glibc 2.35 or later | `linux-arm64` · `.tar.gz` |
 | Windows x64 | `windows-amd64` · `.zip` |
 
 Keep the archive and its matching `.sha256` file in the same directory. On Linux, run `sha256sum -c <archive>.sha256`. On Windows, run `Get-FileHash <archive> -Algorithm SHA256` and compare the result with the value in the checksum file. Extract the archive and keep the `spearmint/` directory intact.
@@ -95,7 +95,9 @@ npm --prefix web run build
 spearmint --web-dir web/dist --origin https://127.0.0.1:18443 serve --bind 127.0.0.1 --port 8765 --open-setup
 ```
 
-On Windows, use `py -3.12 -m venv .venv` and `.\.venv\Scripts\Activate.ps1` for the equivalent setup. For local HTTPS, use the same Caddy instructions with [deploy/package/Caddyfile.local](deploy/package/Caddyfile.local). To build a native package on its target platform, install `pyinstaller==6.22.3` in the prepared environment and run `python scripts/build_package.py`. Archives are written to `work/tmp/package-build/artifacts/`.
+On Windows, use `py -3.12 -m venv .venv` and `.\.venv\Scripts\Activate.ps1` for the equivalent setup. For local HTTPS, use the same Caddy instructions with [deploy/package/Caddyfile.local](deploy/package/Caddyfile.local). To build a native package on its target platform, run `python -m pip install --no-cache-dir -r requirements-build.lock` in the prepared virtual environment, then run `python -m scripts.build_package`. Archives are written to `work/tmp/package-build/artifacts/`.
+
+ARM64 releases target Ubuntu 22.04 (glibc 2.35). Create `.venv` with Python 3.12 in that environment; [pinned CPython and base-image downloads](scripts/arm64-runtime.json) include their SHA-256 digests. Build on native ARM64 or with local QEMU. Packaging and release verification inspect the glibc requirements of every ELF file and reject libraries requiring versions newer than 2.35. A successful run on a newer Linux distribution is insufficient to validate the ARM64 baseline.
 
 ## License
 

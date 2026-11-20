@@ -85,6 +85,8 @@ class Job:
     error: str | None = None
     failed_stage: str | None = None
     failure_detail: str | None = None
+    failure_phase: str | None = None
+    failure_exit: int | None = None
 
     @property
     def actor(self) -> str:
@@ -99,7 +101,8 @@ class Job:
                 'platform': self.platform, 'package': self.package.metadata if self.package else None,
                 'path': self.current, 'directory': self.directory,
                 'install': self.install, 'state': self.state, 'origin': self.origin, 'node_id': self.node,
-                'error': self.error, 'failed_stage': self.failed_stage, 'failure_detail': self.failure_detail}
+                'error': self.error, 'failed_stage': self.failed_stage, 'failure_detail': self.failure_detail,
+                'failure_phase': self.failure_phase, 'failure_exit': self.failure_exit}
 
     def close(self):
         self.login = None
@@ -227,6 +230,8 @@ class SeedWizard:
                 with self.lock:
                     job.failed_stage = job.status
                     job.failure_detail = error.detail if isinstance(error, seed_ssh.WindowsSeedFailure) else None
+                    if isinstance(error, SubprocessError):
+                        job.failure_phase, job.failure_exit, job.failure_detail = seed_transport.diagnostic(error)
                     if job.status == 'reading' and job.directory is not None:
                         job.status, job.error = 'choose', 'SEED_DIRECTORY'
                         return

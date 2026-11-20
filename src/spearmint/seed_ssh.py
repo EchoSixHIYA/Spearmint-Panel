@@ -124,6 +124,7 @@ class Connection:
             sender = Thread(target=send, daemon=True)
             sender.start()
             size = 0
+            diagnostic = bytearray()
             try:
                 while monotonic() < deadline:
                     if channel.recv_ready():
@@ -133,15 +134,20 @@ class Connection:
                             raise PeerError('LIMIT', 'SSH output exceeds the seed response limit')
                         output.write(data)
                     elif channel.recv_stderr_ready():
-                        channel.recv_stderr(32768)
+                        data = channel.recv_stderr(32768)
+                        size += len(data)
+                        if size > limit:
+                            raise PeerError('LIMIT', 'SSH output exceeds the seed response limit')
+                        diagnostic.extend(data)
+                        del diagnostic[:-8192]
                     elif channel.exit_status_ready():
                         status = channel.recv_exit_status()
                         if status or writer_error:
-                            raise CalledProcessError(status or 255, 'seed')
+                            raise CalledProcessError(status or 255, 'seed', stderr=bytes(diagnostic))
                         return
                     else:
                         sleep(.02)
-                raise TimeoutExpired('seed', timeout)
+                raise TimeoutExpired('seed', timeout, stderr=bytes(diagnostic))
             finally:
                 channel.close()
                 sender.join(3)

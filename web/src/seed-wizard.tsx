@@ -10,7 +10,7 @@ type Directory = { parent: string | null; writable: boolean; free: number | null
   items: Array<{ name: string; path: string }> }
 type SeedView = { status: string; fingerprint?: string; platform?: string; package?: { name: string; size: number; commit: string };
   path?: string; directory?: Directory; install?: string; state?: string; origin?: string; node_id?: string; error?: string
-  failed_stage?: string; failure_detail?: string }
+  failed_stage?: string; failure_detail?: string; failure_phase?: string; failure_exit?: number }
 
 const progress: Record<string, string> = {
   'host-check': '正在核对 SSH 主机身份…', 'ssh-login': '正在测试 SSH 登录并读取系统信息…',
@@ -43,6 +43,11 @@ const problems: Record<string, string> = {
   NOT_FOUND: '播种任务已过期、发起节点未配对或已重启。',
 }
 const storageKey = 'spearmint-seed-wizard'
+const failurePhases: Record<string, string> = {
+  target: '目标系统预检', transfer: '部署包传输', verify: '验包与运行库检查', install: '安装器执行与启动检查',
+  systemd: 'systemd 用户服务预检', staging: '临时目录检查', 'staging-space': '临时空间检查',
+  timeout: '等待安装回执超时', receipt: '启动回执检查', ssh: 'SSH 执行',
+}
 
 function savedJob(): Job | undefined {
   try {
@@ -164,7 +169,10 @@ export function SeedWizard({ follow }: { follow: (origin: string, nodeId?: strin
       </div>}
       {view?.error && <div className="error" role="alert">
         <p>{problems[view.error] || '播种操作尚未完成。'}{view.node_id && ` 节点 ID · ${view.node_id}`}</p>
-        <small>{[view.failed_stage && stages[view.failed_stage], view.error, view.failure_detail].filter(Boolean).join(' · ')}</small>
+        <small>{[view.failed_stage && stages[view.failed_stage], view.error,
+          view.failure_phase && (failurePhases[view.failure_phase] || view.failure_phase),
+          view.failure_exit != null && `退出码 ${view.failure_exit}`].filter(Boolean).join(' · ')}</small>
+        {view.failure_detail && <pre className="seed-failure-detail">{view.failure_detail}</pre>}
       </div>}
       {windowsPolicyBlocked && <Notice tone="amber" title="检查目标机的智能应用控制">
         若目标机的代码完整性日志确认是智能应用控制拦截，请在目标机打开「Windows 安全中心 → 应用和浏览器控制 → 智能应用控制设置」，选择「关」。
