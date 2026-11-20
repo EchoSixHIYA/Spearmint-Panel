@@ -203,6 +203,12 @@ printf 'SPEARMINT_SEED_CHECKPOINT=archive\n'
 tar -xzf "$archive" -C "$work" || exit 42
 bundle="$work/spearmint"
 "$bundle/spearmint" --verify-package "$bundle" || exit 42
+if [ "${SPEARMINT_REQUIRE_HOST_SERVICES:-0}" = 1 ]; then
+    "$bundle/spearmint" host-services status | grep -q '"enabled": true' || {
+        echo 'The package or host service access is not ready; use a package with host-services support.' >&2
+        exit 42
+    }
+fi
 printf '%s' "$invitation" | base64 -d > "$work/grove.json" || exit 42
 validate_invitation() {
     if [ -n "$grove_ca" ]; then
@@ -634,7 +640,7 @@ def install(archive_path: Path | None, work: Path, *, host: str, target: str, di
             quiet: bool = False, linux_grove_ca: str | None = None, linux_listener: tuple[str | None, str | None, str | None] = (None, None, None),
             target_archive: str | None = None, timeout: int = DEFAULT_INSTALL_TIMEOUT,
             capture_progress: bool = False, before_connect: Callable[[], None] | None = None,
-            runner=None, linux_state: str = '') -> InstallReceipt | None:
+            runner=None, linux_state: str = '', linux_host_services: bool | None = None) -> InstallReceipt | None:
     if archive_path is None and target_archive is None:
         raise ValueError('No native archive was provided')
     if type(timeout) is not int or not MIN_INSTALL_TIMEOUT <= timeout <= MAX_INSTALL_TIMEOUT:
@@ -643,7 +649,7 @@ def install(archive_path: Path | None, work: Path, *, host: str, target: str, di
                      origin=origin, port=port, windows=windows, ssh=ssh, config=config, quiet=quiet,
                      linux_grove_ca=linux_grove_ca, linux_listener=linux_listener,
                      target_archive=target_archive, check_only=False, timeout=timeout,
-                     capture_progress=capture_progress, before_connect=before_connect, runner=runner, linux_state=linux_state)
+                     capture_progress=capture_progress, before_connect=before_connect, runner=runner, linux_state=linux_state, linux_host_services=linux_host_services)
     if len(STARTUP_RECEIPT.findall(output)) != 1:
         raise UnconfirmedInstall('receipt', 'SSH ended without a startup confirmation', last_checkpoint(output),
                                  node_receipt(output)[0])
@@ -655,7 +661,7 @@ def _deploy(archive_path: Path | None, work: Path, *, host: str, target: str, di
             linux_grove_ca: str | None = None, target_archive: str | None = None,
             linux_listener: tuple[str | None, str | None, str | None] = (None, None, None),
             archive_size: int | None = None, capture_progress: bool = False,
-            before_connect: Callable[[], None] | None = None, runner=None, linux_state: str = '') -> bytes:
+            before_connect: Callable[[], None] | None = None, runner=None, linux_state: str = '', linux_host_services: bool | None = None) -> bytes:
     if target_archive is not None:
         if archive_path is not None:
             raise ValueError('A staged target archive requires no local archive')
@@ -706,6 +712,9 @@ def _deploy(archive_path: Path | None, work: Path, *, host: str, target: str, di
             arguments.extend(('--seed-state', linux_state))
         arguments.extend(listener)
         command = shlex.join(arguments)
+        if linux_host_services is not None:
+            setting = 'SPEARMINT_REQUIRE_HOST_SERVICES=1' if linux_host_services else 'SPEARMINT_SKIP_HOST_SERVICES=1'
+            command = 'env ' + setting + ' ' + command
     payload = None
     if header or archive_path is not None:
         payload = work / TRANSFER_FILE

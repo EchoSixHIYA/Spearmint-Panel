@@ -43,7 +43,9 @@ def change_mode(state: State, service_id: str, mode: Literal["observe", "manage"
     if update:
         if service.existing_systemd_unit and managed:
             SystemUnitDriver.configured_unit(service.target, host_permissions=service.host_permissions)
-            SystemUnitDriver.require_sudo()
+            permissions = SystemUnitDriver.delegation_status(service.target, host_permissions=service.host_permissions)
+            if not all(permissions.get('listed_actions', {}).get(action) for action in ('start', 'stop', 'restart')):
+                raise ModeChangeError(409, '此节点尚未启用主机服务管理。请完成一次节点授权后再切换为托管。')
         elif service.existing_windows_service and managed:
             WindowsServiceDriver(state).verify_management(service.target, host_permissions=service.host_permissions)
         elif service.driver == "docker" and managed:

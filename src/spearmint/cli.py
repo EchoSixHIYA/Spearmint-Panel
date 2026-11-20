@@ -662,6 +662,9 @@ def main() -> int:
     diagnostics.add_argument("--tls-ca", type=Path, help="PEM trust bundle for the native HTTPS health check")
     diagnostics.add_argument("--check-web", action="store_true", help="Also verify the homepage and its assets over the local listener")
     service_parser(subparsers.add_parser("service", help="Manage the local service catalog"))
+    host_access = subparsers.add_parser('host-services', help='Enable node-wide Linux system service management once')
+    host_access.add_argument('host_action', choices=['status', 'plan', 'enable'])
+    host_access.add_argument('--user', help='Dedicated panel OS account to authorize (enable requires root)')
     frp_parser(subparsers.add_parser("frp", help="Manage local FRP mappings"))
     peer_parser(subparsers.add_parser("peer", help="Manage the authenticated Peer link"))
     configure_approve(subparsers.add_parser("approve", help="Sign an operation challenge"))
@@ -736,6 +739,16 @@ def main() -> int:
             parser.error("Use --expected-node with --renew-if-expired alone to preserve the existing invitation")
     os.umask(0o077)
     try:
+        if args.command == 'host-services':
+            from . import host_service_access
+            if args.host_action in {'enable', 'plan'}:
+                if not args.user:
+                    raise StateError('Supply --user with the dedicated panel account')
+                result = host_service_access.enable(args.user) if args.host_action == 'enable' else host_service_access.plan(args.user)
+            else:
+                result = {'enabled': host_service_access.available(), 'protocol': host_service_access.PROTOCOL}
+            print(json.dumps(result))
+            return 0
         if args.command == "approve":
             sign_approval(args)
             return 0

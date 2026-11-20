@@ -8,9 +8,9 @@ import './seed-wizard.css'
 type Job = { source: string; id: string }
 type Directory = { parent: string | null; writable: boolean; free: number | null; truncated: boolean;
   items: Array<{ name: string; path: string }> }
-type SeedView = { status: string; fingerprint?: string; platform?: string; package?: { name: string; size: number; commit: string };
+type SeedView = { status: string; fingerprint?: string; platform?: string; package?: { name: string; size: number; commit: string; host_services?: number };
   path?: string; directory?: Directory; install?: string; state?: string; origin?: string; node_id?: string; error?: string
-  failed_stage?: string; failure_detail?: string; failure_phase?: string; failure_exit?: number }
+  failed_stage?: string; failure_detail?: string; failure_phase?: string; failure_exit?: number; host_services_supported?: boolean }
 
 const progress: Record<string, string> = {
   'host-check': '正在核对 SSH 主机身份…', 'ssh-login': '正在测试 SSH 登录并读取系统信息…',
@@ -35,6 +35,8 @@ const problems: Record<string, string> = {
   SEED_WINDOWS_PORT: '目标 Windows 的面板端口已占用。',
   SEED_WINDOWS_STARTUP: 'Windows 计划任务已注册，面板未通过本地启动检查。',
   SEED_SERVICE: 'SSH 账号无法启用 Linux 用户服务的开机运行。',
+  SEED_HOST_AUTHORIZATION: '未能启用主机服务管理。请核对目标账号的 sudo 权限或管理员密码，也可关闭该选项仅安装普通面板。',
+  SEED_HOST_PACKAGE: '当前部署包尚不支持主机服务管理。请使用包含该能力的新版发布，或关闭此选项仅安装普通面板。',
   SEED_GROVE_STATE: '面板正在等待 Grove 成员目录或签发状态同步。',
   SEED_SOURCE_OFFLINE: '当前面板通过 Mesh 联系不上所选发起节点。',
   DENIED: '请用当前 Grove 的管理员账号登录。发起节点也应是 Grove 的有效成员。',
@@ -66,6 +68,8 @@ export function SeedWizard({ follow, sourceId }: { follow: (origin: string, node
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [key, setKey] = useState(false)
+  const [hostServices, setHostServices] = useState(true)
+  const [hostPassword, setHostPassword] = useState('')
   const polling = useRef(false)
 
   async function request(target: Job, action: string, body: object = {}) {
@@ -166,8 +170,15 @@ export function SeedWizard({ follow, sourceId }: { follow: (origin: string, node
         {view.path && <dl className="facts"><div><dt>安装位置</dt><dd>{view.install}</dd></div><div><dt>数据位置</dt><dd>{view.state}</dd></div>
           <div><dt>可用空间</dt><dd>{directory.free == null ? '未知' : `${(directory.free / 1024 ** 3).toFixed(1)} GiB`}</dd></div></dl>}
         {view.path && !directory.writable && <p className="error">当前目录不可写或可用空间不足。</p>}
-        <div><button className="btn btn-primary" type="button" disabled={busy || view.status !== 'choose' || !directory.writable}
-          onClick={() => void send(job, 'install', { path: view.path })}>安装到此位置</button></div>
+        {view.platform?.startsWith('linux') && <div className="stack">
+          <label className="checkbox-row"><input type="checkbox" checked={hostServices} onChange={event => { setHostServices(event.target.checked); if (!event.target.checked) setHostPassword('') }} />启用节点系统服务管理</label>
+          <p className="muted tiny">安装一次主机管理服务，之后可直接接管系统服务。需要目标账号具备 sudo 权限，密码登录时默认使用本次 SSH 密码，仅在安装期间使用。</p>
+          {hostServices && !view.host_services_supported && <Notice tone="amber">请先升级发起节点以自动完成主机授权；关闭此选项仍可播种普通面板。</Notice>}
+          {hostServices && view.host_services_supported && view.package?.host_services !== 1 && <Notice tone="amber">当前部署包尚不包含主机服务管理，需要包含此能力的新版发布。关闭此选项仍可播种普通面板。</Notice>}
+          {hostServices && view.host_services_supported && <details><summary>使用不同的主机管理员密码</summary><label className="field-label">sudo 密码<input type="password" className="input" autoComplete="new-password" value={hostPassword} onChange={event => setHostPassword(event.target.value)} /></label></details>}
+        </div>}
+        <div><button className="btn btn-primary" type="button" disabled={busy || view.status !== 'choose' || !directory.writable || !!(view.platform?.startsWith('linux') && hostServices && (!view.host_services_supported || view.package?.host_services !== 1))}
+          onClick={() => { const options = view.platform?.startsWith('linux') ? { host_services: hostServices, host_password: hostPassword } : {}; setHostPassword(''); void send(job, 'install', { path: view.path, ...options }) }}>安装到此位置</button></div>
       </div>}
       {view?.error && <div className="error" role="alert">
         <p>{problems[view.error] || '播种操作尚未完成。'}{view.node_id && ` 节点 ID · ${view.node_id}`}</p>

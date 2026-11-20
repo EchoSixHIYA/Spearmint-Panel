@@ -49,6 +49,7 @@ class Management(BaseModel):
 
 
 class Takeover(Registration):
+    mode: Literal['observe', 'manage'] = 'manage'
     endpoint: str | None = Field(default=None, max_length=180)
     log_path: str | None = Field(default=None, max_length=420)
 
@@ -214,8 +215,13 @@ class ServiceSetup:
             if unit.get('ActiveState') != 'active' or int(unit.get('MainPID', 0)) <= 0:
                 raise PeerError('SERVICE_STOPPED', 'The service is no longer running')
             permissions = SystemUnitDriver.delegation_status(target, host_permissions=True)
-            if not (permissions.get('listed_logs') and all(permissions.get('listed_actions', {}).get(action) for action in ACTIONS)):
-                raise PeerError('HOST_PERMISSION', 'Require delegated start, stop, restart and journal access on the owning node')
+            from ..host_service_access import account_name, enable_command
+            account = account_name()
+            return {'ready': all(permissions.get('listed_actions', {}).get(action) for action in ACTIONS),
+                    'observe_ready': True, 'logs_ready': bool(permissions.get('listed_logs')),
+                    'control': permissions.get('listed_actions', {}), 'host_access': permissions.get('host_access', False),
+                    'reason': permissions.get('reason'), 'account': account,
+                    'enable_command': enable_command()}
         elif kind == 'windows':
             windows = WindowsServiceDriver(self.state)
             management = windows.management_status(target, host_permissions=True)
@@ -248,6 +254,8 @@ class ServiceSetup:
         kind, target = body.kind, body.target
         validate_endpoint(body.endpoint)
         checked = self.inspect_target(body, body.log_path)
+        if body.mode == 'manage' and checked.get('ready') is not True:
+            raise PeerError('HOST_SERVICE_ACCESS', '此节点尚未启用主机服务管理。请完成一次节点授权，或先以观察模式登记。')
         spec = {'endpoint': body.endpoint}
         driver = 'process'
         if kind == 'systemd':
@@ -261,12 +269,12 @@ class ServiceSetup:
             driver = 'docker'
             spec['stop_timeout'] = 8
         try:
-            service = register(self.state, driver, body.name, target, spec, managed=True, **acting_as(actor))
+            service = register(self.state, driver, body.name, target, spec, managed=body.mode == 'manage', **acting_as(actor))
         except TargetAlreadyRegistered as error:
             with self.state.connect() as db:
                 actor.require(db)
                 service = get_service(db, error.service_id)
-            if service is None or not service.managed or service.name != service_name(body.name) or service.spec != spec:
+            if service is None or service.managed != (body.mode == 'manage') or service.name != service_name(body.name) or service.spec != spec:
                 raise
         return {'service': registration_view(service)}
 

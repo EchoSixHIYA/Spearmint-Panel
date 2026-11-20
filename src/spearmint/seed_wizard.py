@@ -20,6 +20,8 @@ from .peer.grove_service_admin import require_admin_identity
 from .peer.pairing import configured
 from .peer.protocol import PeerError
 from .state import StateError, audit
+from . import host_service_access
+from .host import HostError
 
 
 METHOD = 'grove.seed.wizard.v2'
@@ -87,6 +89,8 @@ class Job:
     failure_detail: str | None = None
     failure_phase: str | None = None
     failure_exit: int | None = None
+    username: str = ''
+    host_password: str = field(default='', repr=False)
 
     @property
     def actor(self) -> str:
@@ -102,10 +106,11 @@ class Job:
                 'path': self.current, 'directory': self.directory,
                 'install': self.install, 'state': self.state, 'origin': self.origin, 'node_id': self.node,
                 'error': self.error, 'failed_stage': self.failed_stage, 'failure_detail': self.failure_detail,
-                'failure_phase': self.failure_phase, 'failure_exit': self.failure_exit}
+                'failure_phase': self.failure_phase, 'failure_exit': self.failure_exit, 'host_services_supported': True}
 
     def close(self):
         self.login = None
+        self.host_password = ''
         if self.connection:
             self.connection.close()
             self.connection = None
@@ -190,13 +195,17 @@ class SeedWizard:
                     job.status, job.error = 'reading', None
                     self.schedule(job, self.browse, path)
             elif action == 'install' and job.status == 'choose':
+                host_services = params.get('host_services', False)
+                host_password = params.get('host_password', '')
+                if type(host_services) is not bool or not isinstance(host_password, str) or len(host_password) > 1024:
+                    raise PeerError('INVALID_REQUEST', 'Invalid host service authorization options')
                 if not job.current or job.current != params.get('path') or not job.directory.get('writable'):
                     raise PeerError('INVALID_REQUEST', 'Choose a writable install directory')
                 if any(item is not job and item.host == job.host and item.port == job.port and
                        item.status in ('installing', 'admitting') for item in self.jobs.values()):
                     raise PeerError('BUSY', 'A job is already installing on this SSH host')
                 job.status, job.error = 'installing', None
-                self.schedule(job, self.install, job_id, anchor, loop, pair is not None)
+                self.schedule(job, self.install, job_id, anchor, loop, pair is not None, host_services, host_password)
             elif action not in {'status', 'start', 'verify', 'directory', 'install'}:
                 raise PeerError('INVALID_REQUEST', 'Unknown SSH seed action')
             job.expire = monotonic() + 900
@@ -229,7 +238,7 @@ class SeedWizard:
             except (PeerError, OSError, SSHException, SubprocessError, ValueError, StateError, TypeError, KeyError) as error:
                 with self.lock:
                     job.failed_stage = job.status
-                    job.failure_detail = error.detail if isinstance(error, seed_ssh.WindowsSeedFailure) else None
+                    job.failure_detail = error.detail if isinstance(error, seed_ssh.WindowsSeedFailure) else (job.failure_detail if isinstance(error, PeerError) and error.code == 'SEED_HOST_AUTHORIZATION' else None)
                     if isinstance(error, SubprocessError):
                         job.failure_phase, job.failure_exit, job.failure_detail = seed_transport.diagnostic(error)
                     if job.status == 'reading' and job.directory is not None:
@@ -254,8 +263,12 @@ class SeedWizard:
     def login(self, job, fingerprint, loop):
         login, job.login = job.login, None
         job.connection.login(fingerprint, login.username, login.secret, login.key)
+        job.username = login.username
+        job.host_password = login.secret if not login.key else ''
         del login
         platform, home = job.connection.system()
+        if platform.startswith('windows'):
+            job.host_password = ''
         with self.lock:
             job.platform, job.status = platform, 'package'
         future = asyncio.run_coroutine_threadsafe(self.remote.grove_updates.seed_package(platform), loop)
@@ -333,7 +346,7 @@ class SeedWizard:
                 return node, {}
         return dict(await asyncio.gather(*(request(node) for node in nodes)))
 
-    def install(self, job, job_id, anchor, loop, delegated):
+    def install(self, job, job_id, anchor, loop, delegated, host_services=False, host_password=''):
         def voters(params):
             future = asyncio.run_coroutine_threadsafe(self.voters(anchor['voters'], {**params, 'identity': job.identity}), loop)
             return future.result(timeout=25)
@@ -356,6 +369,20 @@ class SeedWizard:
         windows = job.platform == 'windows-amd64'
         path = seed_ssh.path_type(job.platform)(job.install)
         if not windows:
+            if host_services:
+                if job.package.metadata.get('host_services') != 1:
+                    raise PeerError('SEED_HOST_PACKAGE', '请使用已发布且支持主机服务管理的部署包，再启用此安装选项。')
+                try:
+                    host_service_access.ssh_enable(job.connection, job.username, host_password or job.host_password)
+                except (HostError, CalledProcessError, ValueError) as error:
+                    if isinstance(error, HostError):
+                        job.failure_detail = str(error)[:1500]
+                    raise PeerError('SEED_HOST_AUTHORIZATION', '未能启用节点的主机服务管理。请核对 SSH 账号的 sudo 权限和管理员密码。') from error
+                finally:
+                    job.host_password = ''
+                    host_password = ''
+            else:
+                job.host_password = ''
             job.connection.writable(job.platform, job.current)
             try:
                 job.connection.answer(join(['sh', '-c', LINUX_SERVICE]))
@@ -375,7 +402,7 @@ class SeedWizard:
                 receipt = seed_transport.install(job.package.path, Path(work), host=job.host, target=job.platform,
                                                  digest=job.package.metadata['sha256'], invitation_data=grove.encoded(realm),
                                                  origin=job.origin, port=8765, windows={}, quiet=True,
-                                                 runner=job.connection.run, linux_state=job.state)
+                                                 runner=job.connection.run, linux_state=job.state, linux_host_services=host_services)
             node = receipt.node_id if receipt else None
         if not isinstance(node, str) or not NODE_ID.fullmatch(node):
             raise PeerError('SEED_INSTALL', 'The installer did not report the new Node ID')

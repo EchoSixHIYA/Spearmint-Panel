@@ -12,6 +12,7 @@ from .catalog import ACTIONS, Service, register
 from .host import Capture, HostError, HostTimeout, capture, local_docker_command
 from .state import State, StateError
 from .systemd_compat import literal_arguments
+from . import host_service_access
 
 
 LOG_LIMIT = 256 * 1024
@@ -236,8 +237,6 @@ class SystemUnitDriver(ProcessDriver):
             cls.configured_unit(target, timeout=timeout, host_permissions=host_permissions)
         except HostError:
             return {"ready": False, "reason": "unit_unavailable"}
-        if cls.sudo_blocked():
-            return {"ready": False, "reason": "sudo_blocked"}
         return {"ready": True}
 
     @classmethod
@@ -254,9 +253,17 @@ class SystemUnitDriver(ProcessDriver):
         management = cls.management_status(target, host_permissions=host_permissions)
         if not management["ready"]:
             return management
-        deadline = time.monotonic() + 5
+        if host_service_access.available():
+            checked = host_service_access.request('check', target)
+            if checked.get('control'):
+                return {**management, 'listed_actions': dict.fromkeys(ACTIONS, True), 'listed_logs': bool(checked.get('logs')),
+                        'methods': dict.fromkeys(ACTIONS, 'host-service'), 'host_access': True, 'reason': None}
+        deadline = time.monotonic() + 8
+        blocked = cls.sudo_blocked()
 
         def listed(command: list[str]) -> bool:
+            if blocked:
+                return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
@@ -267,24 +274,72 @@ class SystemUnitDriver(ProcessDriver):
                 return False
             return result.code == 0 and not result.truncated
 
-        actions = {action: listed([*cls.ctl, action, target]) for action in ACTIONS}
+        def native(action):
+            if sys.platform != 'linux':
+                return False
+            if os.geteuid() == 0:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not Path('/usr/bin/pkcheck').is_file():
+                return False
+            try:
+                fields = Path('/proc/self/stat').read_text().rpartition(')')[2].split()
+                subject = f'{os.getpid()},{fields[19]},{os.getuid()}'
+                result = capture(['/usr/bin/pkcheck', '--action-id', 'org.freedesktop.systemd1.manage-units',
+                                  '--process', subject, '--detail', 'unit', target, '--detail', 'verb', action], timeout=remaining, limit=4096)
+                return result.code == 0 and not result.truncated
+            except (HostError, OSError, IndexError):
+                return False
+
+        methods = {action: 'systemd' if native(action) else 'sudo' if listed([*cls.ctl, action, target]) else None for action in ACTIONS}
+        actions = {action: method is not None for action, method in methods.items()}
         journal = cls.journal_arguments(target)
-        logs = listed(["/usr/bin/journalctl", *journal]) or listed(["/usr/bin/journalctl", "--system", *journal])
-        return {**management, "listed_actions": actions, "listed_logs": logs}
+        direct_logs = False
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                result = capture(['/usr/bin/journalctl', '--system', *journal], timeout=remaining, limit=LOG_LIMIT)
+                direct_logs = result.code == 0 and b'permission denied' not in result.stderr.lower()
+        except HostError:
+            pass
+        logs = direct_logs or listed(["/usr/bin/journalctl", *journal]) or listed(["/usr/bin/journalctl", "--system", *journal])
+        ready = all(actions.values())
+        return {**management, 'ready': ready, 'listed_actions': actions, 'listed_logs': logs, 'methods': methods,
+                'host_access': False, 'sudo_blocked': blocked, 'direct_logs': direct_logs,
+                'reason': None if ready else 'host_service_access_required'}
 
     def apply(self, service: Service, action: str, before: Observation) -> None:
         if action not in service.actions:
             raise HostError("The requested systemd action is not allowed for this service")
         self.unit(service)
-        self.require_sudo()
-        result = capture([*self.sudo, *self.ctl, action, service.target], timeout=45)
+        permissions = self.delegation_status(service.target, host_permissions=service.host_permissions)
+        method = permissions.get('methods', {}).get(action)
+        if method == 'host-service':
+            host_service_access.request(action, service.target, timeout=48)
+            return
+        if method not in {'systemd', 'sudo'}:
+            raise HostError('此节点尚未启用主机服务管理。请完成一次节点授权后再执行启停。')
+        prefix = self.sudo if method == 'sudo' else []
+        result = capture([*prefix, *self.ctl, action, service.target], timeout=45)
         if result.code:
             raise HostError("systemd could not complete the delegated service action")
 
     def logs(self, service: Service, tail: int) -> LogSnapshot:
         self.unit(service)
-        self.require_sudo()
         journal = self.journal_arguments(service.target)
+        if host_service_access.available():
+            answer = host_service_access.request('logs', service.target)
+            result = Capture(0, answer['text'].encode('utf-8'), b'', answer['truncated'])
+            return format_log_snapshot(result, tail, 'Cannot read the system service journal')
+        try:
+            direct = capture(['/usr/bin/journalctl', '--system', *journal], timeout=5, limit=LOG_LIMIT)
+            if direct.code == 0 and b'permission denied' not in direct.stderr.lower():
+                return format_log_snapshot(direct, tail, 'Cannot read the system service journal')
+        except HostError:
+            pass
+        if self.sudo_blocked():
+            raise HostError('此节点当前无法读取系统服务日志。启用一次主机服务管理后即可读取。')
+        self.require_sudo()
         command = [*self.sudo, "/usr/bin/journalctl"]
         deadline = time.monotonic() + 5
         result = capture([*command, *journal], timeout=5, limit=LOG_LIMIT)

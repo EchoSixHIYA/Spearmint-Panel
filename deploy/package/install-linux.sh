@@ -719,6 +719,20 @@ if [ ! -L "$current" ] && [ ! -e "$current" ]; then
     ln -s -- "releases/$commit" "$current"
 fi
 
+if [ "$mode" = install ] && [ "${SPEARMINT_SKIP_HOST_SERVICES:-0}" != 1 ]; then
+    if ! "$binary" host-services status | grep -q '"enabled": true'; then
+        if sudo -n -- "$binary" host-services enable --user "$(id -un)"; then
+            printf '%s\n' 'Node-wide system service management enabled.'
+        elif [ -t 0 ]; then
+            printf '%s\n' 'One host administrator authorization enables system service management for this node.'
+            sudo -- "$binary" host-services enable --user "$(id -un)" ||
+                printf '%s\n' 'System service management needs host authorization; process and Docker management remain available.' >&2
+        else
+            printf '%s\n' 'System service management needs one host authorization. Use SSH seeding or sudo ./spearmint host-services enable --user <panel-account>.' >&2
+        fi
+    fi
+fi
+
 if [ "$mode" = install ]; then
     check_loaded_unit
     if [ -n "$join_grove" ]; then

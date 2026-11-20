@@ -59,7 +59,7 @@
 准备浏览器可访问的 HTTPS 地址，将本地反向代理指向 `127.0.0.1:8765`。仓库提供 [Nginx 配置示例](deploy/nginx.conf.example)，包内也包含该示例。将命令中的域名替换为实际面板地址。
 
 - **Linux** 使用运行面板的普通用户执行 `sh deployment/install-linux.sh https://panel.example.net`。安装器需要 systemd 用户会话、`curl` 和 `ss`。如需退出登录后仍运行，可由系统管理员为该用户启用 linger。
-  若面板账号已有通过 `sudoers` 委派的系统服务管理权限，可在接管安装时加入 `--allow-delegated-systemd`，并在安装环境中保留原有的 `SPEARMINT_SYSTEMD_UNITS` 配置。后续升级会沿用该设置。
+  Linux 系统服务接管使用一次性的节点主机授权，详见下方「接管 Linux 系统服务」；无需为每个服务配置允许列表。
 - **Windows** 使用 PowerShell 执行 `.\deployment\install-windows.ps1 -Origin 'https://panel.example.net'`。安装器创建计划任务，首次配置入口由安装器打印。
 
 ### 添加节点并登记服务
@@ -68,6 +68,20 @@
 2. 安装还没有面板的设备时，用 Grove 管理员账号打开「节点播种」。选一台能通过 SSH 到达目标的有效成员。SSH 测试成功后，发起节点识别目标系统和架构，自动从缓存、GitHub Releases 或其他 Grove 成员获取并校验签名部署包。随后逐层选择安装目录并安装。
    Windows 目标需要启用 SSH 的 SFTP 子系统，且目标自带 `cmd.exe`、`certutil.exe` 和 `tar.exe`。部署账号需要能注册开机计划任务，面板任务以该账号的受限权限运行。
 3. 在「服务管理」选择本机或远程节点并登记服务。登记已有容器或系统服务时，可先选择观察模式核对状态及日志，再按需切换到管理模式。
+
+### 接管 Linux 系统服务
+
+SSH 播种时默认勾选「启用节点系统服务管理」。发起节点会使用这次 SSH 会话安装一次主机管理服务；sudo 需要密码时，默认使用 SSH 登录密码，也可填写单独的 sudo 密码。凭据只在安装期间使用。无需给每个业务服务写允许列表，面板继续以普通用户和 `NoNewPrivileges=true` 运行。
+
+已有节点先升级包含此能力的部署包，然后由主机管理员通过设备本机终端或独立 SSH 会话，在 Spearmint 安装目录执行一次：
+
+```sh
+sudo ./spearmint host-services enable --user "$(id -un)"
+```
+
+`host-services plan --user <面板用户>` 可先输出具体配置。启用命令会备份原有配置，在 `/usr/local/lib/spearmint/` 放置只由 root 写入的主机管理程序，并注册 `spearmint-host-<UID>.socket/.service`。仅该面板系统账号可请求对既有系统服务的启停、重启和日志读取，不提供任意命令执行接口。该服务使用主机已有的 `/usr/bin/python3`，不会自动安装系统软件。授权覆盖整个节点，业务服务不因授权操作而重启。
+
+未授权时可先以「观察状态与日志」登记；能直接读取的日志会照常显示。界面分别显示启动、停止、重启和日志的可用情况。授权完成后刷新，即可切换为托管。关闭播种中的系统服务管理选项，仍可安装用于自建程序及 Docker 的普通面板。
 
 ### 部署与更新服务
 

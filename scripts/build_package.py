@@ -141,7 +141,8 @@ def build_package(work: Path, env: dict[str, str]):
         raise RuntimeError("Build the frontend before packaging")
     manifest = {"version": installed_version, "commit": commit, "os": system, "architecture": arch,
                 "python": platform.python_version(), "schema": len(MIGRATIONS),
-                "format": "native-executable-with-runtime-and-web", "grove_update": 1, "web_files": web_files}
+                "format": "native-executable-with-runtime-and-web", "grove_update": 1, "web_files": web_files,
+                "host_services": 1 if system == 'linux' else 0, "service_deployment": 1}
     if system == 'linux' and arch == 'arm64':
         manifest['glibc_baseline'] = '2.35'
     manifest_path = work / "build-manifest.json"

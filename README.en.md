@@ -59,7 +59,7 @@ Keep the archive and its matching `.sha256` file in the same directory. On Linux
 Set up a browser-accessible HTTPS address and a local reverse proxy to `127.0.0.1:8765`. The [Nginx example](deploy/nginx.conf.example) is also bundled with the package. Replace the example hostname with your panel's actual address.
 
 - **Linux** Run `sh deployment/install-linux.sh https://panel.example.net` as the panel's regular user. The installer needs a systemd user session, `curl`, and `ss`. An administrator can enable linger to keep the user service running after logout.
-  If the panel account already manages system services through scoped `sudoers` rules, add `--allow-delegated-systemd` when adopting the existing installation and preserve its `SPEARMINT_SYSTEMD_UNITS` setting. Later upgrades preserve this option.
+  Linux system-service adoption uses one-time node-level host authorization, described below. No per-service allowlist is required.
 - **Windows** Run `.\deployment\install-windows.ps1 -Origin 'https://panel.example.net'` in PowerShell. The installer creates a scheduled task and prints the first-run setup path.
 
 ### Add nodes and register services
@@ -68,6 +68,20 @@ Set up a browser-accessible HTTPS address and a local reverse proxy to `127.0.0.
 2. To install Spearmint on a new device, open node seeding as a Grove administrator and pick an active member that can reach the target over SSH. After the connection test, the initiator detects the target OS and architecture, then automatically fetches and verifies the signed deployment package from its cache, GitHub Releases, or another Grove member. Browse to the installation directory to continue.
    Windows targets need the SSH SFTP subsystem and the built-in `cmd.exe`, `certutil.exe`, and `tar.exe`. The deployment account must be able to register a startup task. The panel task runs with that account's limited privileges.
 3. In service management, choose the local or remote node where the service runs and register it. For an existing container or system service, use observe mode to check its status and logs before switching to manage mode.
+
+### Adopt Linux system services
+
+SSH seeding enables node-wide system-service management by default. The initiator uses the existing SSH session for a one-time host installation. When sudo requires a password, it uses the SSH login password unless a separate sudo password is provided. Credentials are only used during installation. There is no per-service allowlist; the panel continues to run as its ordinary account with `NoNewPrivileges=true`.
+
+For existing nodes, upgrade to a package containing this capability, then have a host administrator run this once from the installation directory through a device-local terminal or an independent SSH session:
+
+```sh
+sudo ./spearmint host-services enable --user "$(id -un)"
+```
+
+`host-services plan --user <panel-account>` prints the exact configuration first. Installation backs up existing configuration, installs a root-owned helper under `/usr/local/lib/spearmint/`, and registers `spearmint-host-<UID>.socket/.service`. The panel's OS account can request lifecycle operations and journal reads for existing system services through this local socket. The helper uses the host's existing `/usr/bin/python3` and does not install system packages or offer an arbitrary-command interface. Authorization covers the node and does not restart business services.
+
+Before authorization, register a service in observation mode; directly readable logs remain available. The UI reports start, stop, restart, and log access separately. Once host access is enabled, refresh and switch the registration to managed mode. Seeding can also leave this option off to install a panel for foreground programs and Docker without system-service management.
 
 ### Deploy and update services
 
