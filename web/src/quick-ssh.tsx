@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { ApiError, api, type Session } from './api'
 import { useConsole } from './console-data'
 import { NetworkMap } from './network-map'
-import { bytes, Icon, Notice, PageHeading, Panel, Tabs } from './ui'
+import { bytes, Icon, Loading, Notice, PageHeading, Panel, Tabs } from './ui'
 import { allowNavigation, useUnsavedChanges } from './navigation-guard'
 import { returnRoute } from './workspace-api'
 import '@xterm/xterm/css/xterm.css'
@@ -41,7 +41,7 @@ function request<T>(connection: Connection, session: Session, action: string, bo
   })
 }
 
-export default function QuickSSH({ targetId }: { targetId?: string }) {
+export default function QuickSSH({ targetId, embedded = false }: { targetId?: string; embedded?: boolean }) {
   const { listedNodes, localName, session, onUnauthorized } = useConsole()
   const [target, setTarget] = useState(targetId)
   const [connection, setConnection] = useState<Connection>()
@@ -80,16 +80,17 @@ export default function QuickSSH({ targetId }: { targetId?: string }) {
   }
 
   return <>
-    <a className="back-link" href={returnRoute('#/nodes')}>返回来源</a>
-    <PageHeading eyebrow="NODES / TERMINAL" title="终端与文件" description="从拓扑图选择节点，通过 Mesh 在当前面板打开 xterm.js 交互终端。" />
-    {connection && <div className="workspace-context"><span>当前面板 <strong>{localName}</strong></span><span>目标节点</span><select className="input" aria-label="切换终端目标" value={connection.target} disabled={opening} onChange={event => {
+    {!embedded && <><a className="back-link" href={returnRoute('#/nodes')}>返回来源</a>
+    <PageHeading eyebrow="NODES / TERMINAL" title="终端与文件" description="从拓扑图选择节点，在当前面板打开交互终端。" /></>}
+    {connection && !embedded && <div className="workspace-context"><span>当前面板 <strong>{localName}</strong></span><span>目标节点</span><select className="input" aria-label="切换终端目标" value={connection.target} disabled={opening} onChange={event => {
       if (!allowNavigation()) return
       const node = listedNodes.find(item => item.id === event.target.value)
       if (node) { setTarget(node.id); setConnection(undefined); void connect(node) }
     }}>{listedNodes.map(node => <option key={node.id} value={node.id}>{node.name}</option>)}</select></div>}
     {error && <Notice tone="amber">{error}</Notice>}
-    {!connection ? <Panel title="选择目标节点">
-      <NetworkMap target={target} onPick={setTarget} />
+    {!connection ? <Panel title={embedded ? undefined : '选择目标节点'}>
+      {!embedded && <NetworkMap target={target} onPick={setTarget} />}
+      {embedded && opening && <Loading label="正在连接目标节点…" />}
       <div className="button-row quick-ssh-connect">
         {selected && <strong>{selected.name}</strong>}
         <button className="btn btn-primary" disabled={!selected || opening} onClick={() => void connect()}>

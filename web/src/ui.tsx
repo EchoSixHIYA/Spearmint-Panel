@@ -151,8 +151,8 @@ export function Tabs({ items, current, onChange, label }: {
     }} onClick={() => onChange(item.id)}>{item.icon && <Icon name={item.icon} size={15} />}{item.label}</button>)}</div>
 }
 
-export function Modal({ title, children, onClose, className = '' }: {
-  title: string; children: ReactNode; onClose: () => void; className?: string
+export function Modal({ title, children, onClose, className = '', dismissOnEscape = true }: {
+  title: string; children: ReactNode; onClose: () => void; className?: string; dismissOnEscape?: boolean
 }) {
   const ref = useRef<HTMLDialogElement>(null)
   const close = useRef(onClose); close.current = onClose
@@ -162,7 +162,7 @@ export function Modal({ title, children, onClose, className = '' }: {
     return () => dialog?.close()
   }, [])
   return <dialog ref={ref} className={`console-modal ${className}`} aria-label={title}
-    onCancel={() => close.current()} onClick={(event) => { if (event.target === event.currentTarget) close.current() }}>
+    onCancel={event => { event.preventDefault(); if (dismissOnEscape) close.current() }} onClick={(event) => { if (event.target === event.currentTarget) close.current() }}>
     <div className="modal-inner"><div className="modal-heading"><h2>{title}</h2>
       <button className="icon-button" onClick={onClose} aria-label="关闭对话框"><Icon name="x" /></button></div>{children}</div>
   </dialog>

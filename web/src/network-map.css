@@ -1,4 +1,9 @@
 .topology-panel { padding: 20px; margin-bottom: 20px; }
+.mesh-node-shell { position: relative; min-width: 0; }
+.mesh-node-shell > .mesh-node { width: 100%; }
+.mesh-node-shell .mesh-node-header { padding-right: 20px; }
+.mesh-node-menu-button { position: absolute; z-index: 4; top: 7px; right: 4px; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #46765b; cursor: pointer; }
+.mesh-node-menu-button:hover, .mesh-node-menu-button:focus-visible { background: #dceee0; }
 .topology-panel .panel-head { margin-bottom: 16px; }
 .topology-tools { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 20px; }
 .topology-tools .field-label { margin-bottom: 16px; }

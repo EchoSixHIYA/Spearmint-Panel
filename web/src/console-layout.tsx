@@ -14,7 +14,7 @@ export const navigation = [
 ]
 export const adminPages = new Set([...navigation.flatMap((group) => group.items).filter((item) => 'admin' in item && item.admin).map((item) => item.id), 'topology', 'ssh', 'seeds', 'deployments', 'exposures', 'audit'])
 const area: Record<string, string> = { topology: 'nodes', ssh: 'nodes', seeds: 'nodes', alerts: 'operations', audit: 'identity', access: 'identity', deployments: 'maintenance', exposures: 'services' }
-export function pageName(page: string) { return ({ ssh: '终端与文件', seeds: '添加节点', sessions: '我的会话', settings: '显示偏好', account: '我的账户', audit: '安全审计', topology: '网络拓扑', deployments: '平台维护', exposures: '公网映射' } as Record<string, string>)[page] || navigation.flatMap((group) => group.items).find((item) => item.id === page)?.title || '服务' }
+export function pageName(page: string) { return ({ ssh: '节点', seeds: '节点', sessions: '我的会话', settings: '显示偏好', account: '我的账户', audit: '安全审计', topology: '节点', deployments: '平台维护', exposures: '公网映射' } as Record<string, string>)[page] || navigation.flatMap((group) => group.items).find((item) => item.id === page)?.title || '服务' }
 export function useRoute() {
   function read() { return location.hash.split('?')[0].replace(/^#\/?/, '').split('/').map((part) => { try { return decodeURIComponent(part) } catch { return part } }) }
   const [path, setPath] = useState(read)

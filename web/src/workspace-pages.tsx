@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import { timestamp, usePoll } from './api'
 import { useConsole, type Metrics, type Preferences, refreshConsole } from './console-data'
-import { NetworkMap } from './network-map'
-import { NodeNote, SettingsPage } from './console-pages'
+import { NodeNote, SettingsPage, TopologyPaths } from './console-pages'
 import { GroveCard } from './grove-auth'
 import { Sessions } from './sessions'
 import { GrovePasswordDialog } from './security-pages'
@@ -18,7 +17,6 @@ type Host = { node_id: string; platform: { os: string; architecture: string }; m
 
 export function SectionNavigation({ page }: { page: string }) {
   const groups = [
-    [{ id: 'nodes', label: '节点列表' }, { id: 'topology', label: '网络拓扑' }, { id: 'ssh', label: '终端与文件' }, { id: 'seeds', label: '添加节点' }],
     [{ id: 'operations', label: '操作记录' }, { id: 'alerts', label: '告警' }],
     [{ id: 'identity', label: '身份与成员' }, { id: 'audit', label: '安全审计' }],
   ]
@@ -44,31 +42,23 @@ function NodeSample({ target, full = false }: { target: string; full?: boolean }
   </div>
 }
 
-export function NodesWorkspace({ nodeId, onSave }: { nodeId?: string; onSave: (preferences: Preferences) => void }) {
-  const { listedNodes, localName, nodeNotes, directoryCurrent } = useConsole()
-  const [query, setQuery] = useState('')
+export function NodeInspector({ nodeId, onSave, embedded = false, initialTab }: { nodeId: string; onSave: (preferences: Preferences) => void; embedded?: boolean; initialTab?: string }) {
+  const { listedNodes, localName } = useConsole()
   const selected = listedNodes.find(node => node.id === nodeId)
   const params = new URLSearchParams(location.hash.split('?')[1])
-  const [tab, setTab] = useState(nodeResourcesTarget(location.hash.split('?')[0]) ? 'resources' : params.get('tab') || 'overview')
-  if (nodeId) {
-    if (!selected) return <Panel><EmptyState title="正在等待节点目录" /></Panel>
-    const online = selected.status === 'online', peer = selected.peer
-    return <><a className="back-link" href={returnRoute('#/nodes')}>返回来源</a><PageHeading eyebrow="INFRASTRUCTURE / NODE" title={selected.name} description="在当前面板查看目标节点和管理服务。">
-      <a className="btn btn-secondary" href={withReturn(`#/ssh/${selected.id}`)}>终端与文件</a><a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(selected.id))}>登记服务</a>
-    </PageHeading><div className="workspace-context"><span>当前面板 <strong>{localName}</strong></span><Icon name="arrow-right" size={15} /><span>目标节点 <strong>{selected.name}</strong></span><NodeConnectionBadge node={selected} /></div>
-      <Tabs label="节点工作区" current={tab} onChange={setTab} items={[{ id: 'overview', label: '概况' }, { id: 'services', label: '服务' }, { id: 'network', label: '网络' }, { id: 'resources', label: '资源' }, { id: 'version', label: '版本' }]} />
-      {tab === 'overview' && <div className="columns-2"><Panel title="节点信息"><dl className="facts"><div><dt>节点标识</dt><dd><CopyValue value={selected.id} short /></dd></div><div><dt>面板地址</dt><dd>{publicPanelLabel(selected.memberOrigin || (selected.local ? location.origin : undefined))}</dd></div><div><dt>连接</dt><dd>{selected.activePath?.length ? `${selected.activePath.length - 1} 跳` : selected.local ? '当前面板' : '暂无活动路径'}</dd></div></dl></Panel><Panel title="节点备注"><NodeNote nodeId={selected.id} onSave={onSave} /></Panel></div>}
-      {tab === 'services' && <ServiceList key={selected.id} initialNode={selected.id} embedded />}
-      {tab === 'network' && <><Panel title="网络路径"><NetworkMap target={selected.id} /><dl className="facts"><div><dt>活动路径</dt><dd>{selected.local ? localName : selected.activePath?.map(id => nodeNotes[id] || listedNodes.find(node => node.id === id)?.name || id).join(' → ') || '暂无活动路径'}</dd></div><div><dt>心跳 RTT</dt><dd>{online && peer?.rtt_ms != null ? `${peer.rtt_ms.toFixed(1)} ms` : '暂无有效观测'}</dd></div><div><dt>直连对端 IP</dt><dd>{online && peer?.connected_ip || '暂无观测'}</dd></div></dl><a className="btn btn-secondary" href={`#/topology/${selected.id}`}>查看路径诊断</a></Panel></>}
-      {tab === 'resources' && (online ? <NodeSample target={selected.local ? 'local' : selected.id} full /> : <Notice tone="amber">目标节点当前不可达，等待连接恢复后读取真实采样。</Notice>)}
-      {tab === 'version' && <Panel title="版本与资源核对"><p>通过 Mesh 在当前面板核对目标节点版本。</p><a className="btn btn-primary" href={`#/maintenance/${selected.id}`}>核对节点版本</a></Panel>}
-    </>
-  }
-  const visible = listedNodes.filter(node => `${node.name} ${node.id}`.toLowerCase().includes(query.toLowerCase()))
-  return <><PageHeading eyebrow="INFRASTRUCTURE / NODES" title="节点" description="查看 Grove 节点，管理服务并连接终端。"><a className="btn btn-primary" href={withReturn('#/seeds')}>添加节点</a></PageHeading>
-    <div className="workspace-summary"><strong>{listedNodes.length} 个节点</strong><span>{listedNodes.filter(node => node.status === 'online').length} 个当前可达</span><span>{directoryCurrent ? '成员目录已同步' : '正在同步成员目录'}</span></div>
-    <Panel title="节点列表"><label className="search-box"><Icon name="search" size={16} /><input aria-label="搜索节点" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索节点名称或标识…" /></label><div className="table-wrap"><table className="data-table workspace-service-table"><thead><tr><th>节点</th><th>连接</th><th>CPU / 内存</th><th>操作</th></tr></thead><tbody>{visible.map(node => <tr key={node.id}><td><a className="text-link" href={withReturn(`#/nodes/${node.id}`)}><strong>{node.name}</strong></a><small className="table-secondary">{node.local ? '当前面板' : publicPanelLabel(node.memberOrigin)}</small></td><td><NodeConnectionBadge node={node} /><small className="table-secondary">{node.activePath ? `${node.activePath.length - 1} 跳` : node.local ? '本机' : '暂无活动路径'}</small></td><td>{node.status === 'online' ? <NodeSample target={node.local ? 'local' : node.id} /> : '暂无当前采样'}</td><td><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${node.id}`)}>终端</a> <a className="btn btn-secondary btn-small" href={withReturn(`#/nodes/${node.id}`)}>详情</a></td></tr>)}</tbody></table></div>
-    </Panel><div className="workspace-plan-links"><a href="#/pollen" className="btn btn-secondary">移动节点 <Badge tone="amber">未完成</Badge></a><a href="#/federation" className="btn btn-secondary">跨 Grove 连接 <Badge tone="amber">未完成</Badge></a></div></>
+  const [tab, setTab] = useState(initialTab || (nodeResourcesTarget(location.hash.split('?')[0]) ? 'resources' : params.get('tab') || 'overview'))
+  if (!selected) return <Panel><EmptyState title="正在等待节点目录" /></Panel>
+  const online = selected.status === 'online'
+  return <>{!embedded && <><a className="back-link" href={returnRoute('#/nodes')}>返回来源</a><PageHeading eyebrow="INFRASTRUCTURE / NODE" title={selected.name} description="在当前面板查看目标节点和管理服务。">
+    <a className="btn btn-secondary" href={withReturn(`#/ssh/${selected.id}`)}>终端与文件</a><a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(selected.id))}>登记服务</a>
+  </PageHeading></>}<div className="workspace-context"><span>当前面板 <strong>{localName}</strong></span><Icon name="arrow-right" size={15} /><span>目标节点 <strong>{selected.name}</strong></span><NodeConnectionBadge node={selected} /></div>
+    <Tabs label="节点工作区" current={tab} onChange={setTab} items={[{ id: 'overview', label: '概况' }, { id: 'services', label: '服务' }, { id: 'network', label: '网络' }, { id: 'resources', label: '资源' }, { id: 'version', label: '版本' }]} />
+    {tab === 'overview' && <div className="columns-2"><Panel title="节点信息"><dl className="facts"><div><dt>节点标识</dt><dd><CopyValue value={selected.id} short /></dd></div><div><dt>面板地址</dt><dd>{publicPanelLabel(selected.memberOrigin || (selected.local ? location.origin : undefined))}</dd></div><div><dt>连接</dt><dd>{selected.activePath?.length ? `${selected.activePath.length - 1} 跳` : selected.local ? '当前面板' : '暂无活动路径'}</dd></div></dl></Panel><Panel title="节点备注"><NodeNote nodeId={selected.id} onSave={onSave} /></Panel></div>}
+    {tab === 'services' && <ServiceList key={selected.id} initialNode={selected.id} embedded />}
+    {tab === 'network' && <Panel title="网络路径">{selected.local ? <p className="muted">这是当前节点，可在拓扑中选择其他节点查看连接路径。</p> : <TopologyPaths key={selected.id} node={selected} />}</Panel>}
+    {tab === 'resources' && (online ? <NodeSample target={selected.local ? 'local' : selected.id} full /> : <Notice tone="amber">目标节点当前不可达，等待连接恢复后读取真实采样。</Notice>)}
+    {tab === 'version' && <Panel title="版本与资源核对"><p>通过 Mesh 在当前面板核对目标节点版本。</p><a className="btn btn-primary" href={`#/maintenance/${selected.id}`}>核对节点版本</a></Panel>}
+  </>
 }
 
 export function IdentityWorkspace() {

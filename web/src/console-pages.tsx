@@ -324,7 +324,7 @@ export function NodesPage({ nodeId, resources = false, onSave }: { nodeId?: stri
     <div className="bottom-note"><Icon name="shield-check" size={17} />节点连接、服务导出与操作授权分别管理，加入网络不会自动获得写权限。</div>{help && <NodeHelp onClose={() => setHelp(false)} />}</>
 }
 
-function TopologyPaths({ node }: { node: NodeView }) {
+export function TopologyPaths({ node }: { node: NodeView }) {
   const { listedNodes, directoryCurrent, meshCurrent, local, onUnauthorized } = useConsole()
   const [route, setRoute] = useState<{ path: string[]; business_session_selected?: boolean; connection_error?: { code: string; detail: string } }>()
   const [error, setError] = useState('')
@@ -472,18 +472,18 @@ export function SettingsPage({ onSave }: { onSave: (preferences: Preferences) =>
     <Panel title="备份与维护"><p className="muted">备份、恢复与节点信任配置在节点终端完成。更新或恢复之前，先保存当前状态并核对节点身份。</p><a href="#/access" className="text-link">查看账户与安全<Icon name="arrow-right" size={15} /></a></Panel></>
 }
 
-export function SeedsPage({ progressOrigin, progressNodeId }: { progressOrigin?: string; progressNodeId?: string }) {
+export function SeedsPage({ progressOrigin, progressNodeId, sourceId, embedded = false }: { progressOrigin?: string; progressNodeId?: string; sourceId?: string; embedded?: boolean }) {
   if (progressOrigin) return <>
-    <a href="#/seeds" className="back-link"><Icon name="arrow-left" size={15} />返回节点播种</a>
-    <PageHeading eyebrow="GROVE / SEEDS" title="Mesh 接入状态" description="查看新节点的成员身份、活动路径和服务目录。" />
+    {!embedded && <><a href="#/seeds" className="back-link"><Icon name="arrow-left" size={15} />返回节点播种</a>
+    <PageHeading eyebrow="GROVE / SEEDS" title="Mesh 接入状态" description="查看新节点的成员身份、活动路径和服务目录。" /></>}
     <Panel title="目标节点">
       {progressNodeId && <div>Node ID <CopyValue value={progressNodeId} short /></div>}
       <SeedConnectionProgress origin={progressOrigin} nodeId={progressNodeId} syncOnJoin />
     </Panel>
   </>
   return <>
-    <PageHeading eyebrow="GROVE / SEEDS" title="节点播种" description="选择发起节点，通过 SSH 安装 Spearmint 并加入当前 Grove。" />
-    <SeedWizard follow={(origin, nodeId) => {
+    {!embedded && <PageHeading eyebrow="GROVE / SEEDS" title="节点播种" description="选择发起节点，通过 SSH 安装 Spearmint 并加入当前 Grove。" />}
+    <SeedWizard sourceId={sourceId} follow={(origin, nodeId) => {
       location.hash = seedProgressHref(origin, nodeId)
       refreshConsole()
     }} />

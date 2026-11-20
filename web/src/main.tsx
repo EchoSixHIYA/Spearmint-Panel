@@ -1,13 +1,13 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ApiError, api, type Session } from './api'
 import { ConsoleData, useConsole, usePreferences } from './console-data'
 import { adminPages, ConsoleLayout, useRoute } from './console-layout'
-import { AlertsPage, AuditPage, FuturePage, OverviewPage, SeedsPage, TopologyPage } from './console-pages'
+import { AlertsPage, AuditPage, FuturePage, OverviewPage } from './console-pages'
 import { DeploymentsPage } from './deployments'
 import { Services } from './services'
 import { ServiceWorkspace } from './service-workspace'
-import { SectionNavigation, NodesWorkspace, IdentityWorkspace, AccountWorkspace, OperationCenter } from './workspace-pages'
+import { SectionNavigation, IdentityWorkspace, AccountWorkspace, OperationCenter } from './workspace-pages'
 import { ExposuresPage } from './frp-mappings'
 import { AccessPage, OperationsPage } from './security-pages'
 import { Sessions } from './sessions'
@@ -15,14 +15,14 @@ import { SignIn } from './sign-in'
 import { FirstFactor, Setup, takeSetupEntry } from './onboarding'
 import { GroveAuthorize, GroveReturn, takeGroveDestination, takeGroveReturn } from './grove-auth'
 import { rememberQuorumInvitation } from './grove-invitation'
-import { deploymentTarget, seedProgressTarget } from './grove-navigation'
+import { deploymentTarget } from './grove-navigation'
 import { Brand, EmptyState, Loading, Notice, PageHeading, Panel } from './ui'
 import './grove.css'
 import './style.css'
 import './workspace.css'
 import './overview.css'
 
-const QuickSSH = lazy(() => import('./quick-ssh'))
+import { NodesWorkspace } from './nodes-workspace'
 
 function webAssetId(url: string, extension: 'js' | 'css') {
   const path = new URL(url).pathname
@@ -41,9 +41,7 @@ function ConsolePage({ route, onFactors, onSave }: { route: ReturnType<typeof us
   if (!admin && adminPages.has(page)) return <Panel><EmptyState title="此页面仅对节点管理员开放" action={<a className="btn btn-primary" href="#/operations">查看我获准访问的服务</a>}>你可以提交已授权的远程操作，并管理自己的登录会话。</EmptyState></Panel>
   switch (page) {
     case 'overview': return <OverviewPage />
-    case 'nodes': return <><SectionNavigation page="nodes" /><NodesWorkspace key={id || 'nodes'} nodeId={id} onSave={onSave} /></>
-    case 'topology': return <><SectionNavigation page="topology" /><TopologyPage target={id} /></>
-    case 'ssh': return <><SectionNavigation page="ssh" /><Suspense fallback={<Loading label="正在打开终端…" />}><QuickSSH key={id ?? 'picker'} targetId={id} /></Suspense></>
+    case 'nodes': case 'topology': case 'ssh': case 'seeds': return <NodesWorkspace page={page} nodeId={id} onSave={onSave} />
     case 'services': return <ServiceWorkspace section={id} segments={segments} />
     case 'exposures': return <ExposuresPage />
     case 'operations': return <><SectionNavigation page="operations" /><OperationCenter /></>
@@ -54,10 +52,6 @@ function ConsolePage({ route, onFactors, onSave }: { route: ReturnType<typeof us
     case 'account': return <AccountWorkspace section={id} onFactors={onFactors} onSave={onSave} />
     case 'settings': return <AccountWorkspace section="settings" onFactors={onFactors} onSave={onSave} />
     case 'maintenance': case 'deployments': return <DeploymentsPage targetId={id || deploymentTarget(location.hash)} />
-    case 'seeds': {
-      const target = seedProgressTarget(location.hash)
-      return <><SectionNavigation page="seeds" /><SeedsPage progressOrigin={target?.origin} progressNodeId={target?.nodeId} /></>
-    }
     default: return <FuturePage page={page} />
   }
 }

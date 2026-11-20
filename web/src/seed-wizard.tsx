@@ -49,17 +49,19 @@ const failurePhases: Record<string, string> = {
   timeout: '等待安装回执超时', receipt: '启动回执检查', ssh: 'SSH 执行',
 }
 
-function savedJob(): Job | undefined {
+function savedJob(sourceId?: string): Job | undefined {
   try {
     const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null')
-    if (/^spm1-[a-f0-9]{64}$/.test(saved?.source) && /^[a-f0-9]{32}$/.test(saved?.id)) return saved
+    if (/^spm1-[a-f0-9]{64}$/.test(saved?.source) && /^[a-f0-9]{32}$/.test(saved?.id) && (!sourceId || saved.source === sourceId)) return saved
   } catch { /* Persistence is optional in restricted browsers. */ }
 }
 
-export function SeedWizard({ follow }: { follow: (origin: string, nodeId?: string) => void }) {
+export function savedSeedSource() { return savedJob()?.source }
+
+export function SeedWizard({ follow, sourceId }: { follow: (origin: string, nodeId?: string) => void; sourceId?: string }) {
   const { session, onUnauthorized, listedNodes, grove } = useConsole()
-  const [job, setJob] = useState(savedJob)
-  const [source, setSource] = useState(job?.source)
+  const [job, setJob] = useState(() => savedJob(sourceId))
+  const [source, setSource] = useState(job?.source ?? sourceId)
   const [view, setView] = useState<SeedView>()
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -128,7 +130,7 @@ export function SeedWizard({ follow }: { follow: (origin: string, nodeId?: strin
 
   return <Panel title="SSH 播种" className="seed-wizard">
     <div className="stack">
-      {!job && <><h3>选择发起节点</h3><NetworkMap target={source} onPick={setSource} /></>}
+      {!job && !sourceId && <><h3>选择发起节点</h3><NetworkMap target={source} onPick={setSource} /></>}
       {source && <p className="muted">发起节点 · {sourceName || source}</p>}
       {!job && source && <form className="stack" onSubmit={start}>
         <div className="form-grid">
@@ -183,7 +185,7 @@ export function SeedWizard({ follow }: { follow: (origin: string, nodeId?: strin
         {view.origin && <button className="btn btn-secondary" onClick={() => follow(view.origin!, view.node_id)}>查看 Mesh 接入状态</button>}
       </Notice>}
       {job && !busy && (!view || !['installing', 'admitting'].includes(view.status)) &&
-        <div><button className="btn btn-secondary" onClick={() => { remember(); setError(''); setView(undefined) }}>开始新播种</button></div>}
+        <div><button className="btn btn-secondary" onClick={() => { remember(); setSource(sourceId ?? source); setError(''); setView(undefined) }}>开始新播种</button></div>}
     </div>
   </Panel>
 }

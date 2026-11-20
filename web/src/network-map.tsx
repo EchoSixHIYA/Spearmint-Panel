@@ -7,6 +7,8 @@ import { NodeResourceStats, useNodeResources, type NodeResourceSample } from './
 import './network-map.css'
 
 type Link = { id: string; from: string; to: string; kind: 'active' | 'selected' | 'alternative'; shared?: boolean; pending?: boolean }
+export type NodeMenuAnchor = { x: number; y: number; trigger: HTMLElement }
+export type NodeMenuHandler = (node: NodeView, anchor: NodeMenuAnchor) => void
 
 function reportedLinks(nodes: NodeView[], current: NodeView, paths: Map<string, string[]>, rememberedDepths: Map<string, number>, rememberedEdges: RememberedEdge[], target?: string, alternative?: readonly string[]) {
   const positions = new Map<string, number>()
@@ -180,9 +182,10 @@ function NetworkPreview({ current, levels, byId, links, paths }: {
   </div>
 }
 
-function MapNode({ node, sample, plotted = false, selected = false, selectTarget = false, onPick }: {
+function MapNode({ node, sample, plotted = false, selected = false, selectTarget = false, onPick, onNodeMenu }: {
   node: NodeView; sample?: NodeResourceSample; plotted?: boolean; selected?: boolean; selectTarget?: boolean
   onPick?: (id: string) => void
+  onNodeMenu?: NodeMenuHandler
 }) {
   const online = node.status === 'online'
   const latency = online ? node.peer?.rtt_ms : null
@@ -197,11 +200,27 @@ function MapNode({ node, sample, plotted = false, selected = false, selectTarget
     </span>
     <NodeResourceStats sample={sample} online={online} />
   </>
-  if (onPick) return <button {...props} type="button" aria-pressed={selected}
+  const item = onPick ? <button {...props} type="button" aria-pressed={selected}
     disabled={node.local ? !online : !node.peer?.enabled || ['disabled', 'quarantined'].includes(node.status)}
     onClick={() => onPick(node.id)}>{card}</button>
-  return <a {...props} href={`#/${selectTarget && !node.local ? 'topology' : 'nodes'}/${node.id}`}
+    : <a {...props} href={`#/${selectTarget && !node.local ? 'topology' : 'nodes'}/${node.id}`}
     aria-current={selectTarget && selected ? 'location' : undefined}>{card}</a>
+  if (!onNodeMenu) return item
+  return <div className="mesh-node-shell" onContextMenu={event => {
+    event.preventDefault(); event.stopPropagation()
+    onNodeMenu(node, { x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector<HTMLElement>('a,button')! })
+  }} onKeyDown={event => {
+    if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+    event.preventDefault(); event.stopPropagation()
+    const rect = event.currentTarget.getBoundingClientRect()
+    onNodeMenu(node, { x: rect.left + 20, y: rect.top + 30, trigger: event.target as HTMLElement })
+  }}>{item}<button className="mesh-node-menu-button" type="button" data-mesh-menu
+    aria-label={`${node.name}的操作菜单`} aria-haspopup="menu" title="节点操作"
+    onPointerDown={event => event.stopPropagation()} onClick={event => {
+      event.stopPropagation()
+      const rect = event.currentTarget.getBoundingClientRect()
+      onNodeMenu(node, { x: rect.right, y: rect.bottom, trigger: event.currentTarget })
+    }}><Icon name="more" size={16} /></button></div>
 }
 
 function MapRelay({ id, alternative }: { id: string; alternative: boolean }) {
@@ -212,8 +231,9 @@ function MapRelay({ id, alternative }: { id: string; alternative: boolean }) {
   </div>
 }
 
-export function NetworkMap({ mini = false, compact = false, target, alternative, onPick }: {
+export function NetworkMap({ mini = false, compact = false, target, alternative, onPick, onNodeMenu }: {
   mini?: boolean; compact?: boolean; target?: string; alternative?: readonly string[]; onPick?: (id: string) => void
+  onNodeMenu?: NodeMenuHandler
 }) {
   const { nodes, current, paths, depths: rememberedDepths, edges } = useNetworkMemory()
   const resources = useNodeResources(nodes, !mini)
@@ -240,7 +260,7 @@ export function NetworkMap({ mini = false, compact = false, target, alternative,
             <div className="mesh-level-nodes">{members.map((id) => {
               const node = byId.get(id)
               return node ? <MapNode key={id} node={node} sample={resources.get(id)} plotted selected={id === target}
-                selectTarget={!compact} onPick={onPick} />
+                selectTarget={!compact} onPick={onPick} onNodeMenu={onNodeMenu} />
                 : <MapRelay key={id} id={id} alternative={alternativeOnly.has(id)} />
             })}</div>
           </section>)}

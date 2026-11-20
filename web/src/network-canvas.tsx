@@ -167,7 +167,7 @@ export function NetworkCanvas({ children, mini, compact, current, label }: {
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={endPointer} onPointerCancel={endPointer}
       onLostPointerCapture={(event) => { if (pointers.current.has(event.pointerId)) endPointer(event) }}
       onDragStart={(event) => event.preventDefault()}
-      onClickCapture={(event) => { if (suppressClick.current && event.detail > 0) { event.preventDefault(); event.stopPropagation() } }}>
+      onClickCapture={(event) => { if ((event.target as HTMLElement).closest('[data-mesh-menu]')) return; if (suppressClick.current && event.detail > 0) { event.preventDefault(); event.stopPropagation() } }}>
       <div ref={stage} className="mesh-canvas-stage" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}>{children}</div>
       {overflow && controls && <span className="mesh-canvas-hint">拖动画布 · Ctrl + 滚轮缩放</span>}
     </div>
