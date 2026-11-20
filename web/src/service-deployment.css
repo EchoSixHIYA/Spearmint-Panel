@@ -1,0 +1,6 @@
+.service-deployment label { display: grid; gap: 7px; font-size: 12px; }
+.service-deployment input[type=file] { width: 100%; padding: 10px; border: 1px dashed var(--edge); border-radius: 8px; }
+.service-deployment .deploy-command { font-family: ui-monospace, Consolas, monospace; resize: vertical; min-height: 110px; }
+.service-deployment progress { width: 100%; height: 9px; accent-color: var(--green); }
+.service-deployment .deployment-output { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.deployment-history { border-top: 1px solid var(--edge); padding-top: 12px; }

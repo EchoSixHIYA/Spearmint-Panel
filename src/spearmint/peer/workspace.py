@@ -96,6 +96,7 @@ class Workspace:
         foreground = service.driver == 'process' and not service.existing_system_service
         stopped = described['observation']['status'] in {'stopped', 'failed'} and not described['observation']['stale']
         return {**described, 'node_id': self.node_id, 'operations': operations, 'command': service.spec.get('command'),
+                'deployment': service.spec.get('deployment'), 'can_deploy': service.managed and not service.existing_system_service,
                 'resources': self.controller.service_metrics.snapshot(service, observation),
                 'can_edit_details': True, 'can_unregister': not protected and not mapped and (not foreground or stopped),
                 'unregister_reason': '请先撤销此服务的公网映射，再取消登记。' if mapped else '请先停止此程序，再取消登记。' if foreground and not stopped else None,

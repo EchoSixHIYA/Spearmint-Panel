@@ -48,6 +48,11 @@ class RegisteredProcessDriver:
     def logs(self, service: Service, tail: int) -> LogSnapshot:
         return self.backend(service).logs(service, tail)
 
+    def prepare_change(self, service: Service) -> None:
+        backend = self.backend(service)
+        if isinstance(backend, NativeProcessDriver):
+            backend.prepare_change(service)
+
 
 def process_driver(state: State) -> Driver:
     workload = ProcessDriver() if systemd_available() else NativeProcessDriver(state)
@@ -152,6 +157,23 @@ class NativeProcessDriver:
                 return
             time.sleep(0.05)
         raise HostTimeout("Native supervisor did not confirm workload termination")
+
+    def prepare_change(self, service: Service) -> None:
+        """Discard a completed supervisor record before installing a different specification."""
+        with self.state.lock(f"workload-action-{service.id}.lock", exclusive_now=True):
+            directory = self.directory(service)
+            status = self.read_status(service, directory / 'status.json')
+            if status is None:
+                return
+            if self.observe(service, directory).status not in {'stopped', 'failed'}:
+                raise HostError('Stop the workload before changing its startup configuration')
+            deadline = time.monotonic() + 3
+            while alive(status['guardian_pid'], status['guardian_start']):
+                if time.monotonic() >= deadline:
+                    raise HostTimeout('Previous supervisor has not exited')
+                time.sleep(.05)
+            (directory / 'status.json').unlink(missing_ok=True)
+            (directory / 'stop.json').unlink(missing_ok=True)
 
     def start(self, service: Service) -> None:
         directory = self.directory(service)

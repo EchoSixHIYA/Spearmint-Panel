@@ -35,6 +35,7 @@ from .service_mode import ModeChangeError, change_mode
 from .service_removal import unregister
 from .terminal_service import TerminalService
 from .peer.workspace import Workspace
+from .service_deployment import ServiceDeployments
 from .seeding import SeedDeployments
 from .state import State, StateError
 from .platforms import capabilities
@@ -374,6 +375,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     remote.terminals = terminals
     workspace = Workspace(store, node_id, controller, metrics, config.docker_socket)
     remote.workspace = workspace
+    deployments = ServiceDeployments(store, node_id, controller, config.docker_socket)
+    remote.service_deployments = deployments
     remote.mesh_enrollment_policy = enrollment_policy
     remote.manager.use_system_egress = bool(enrollment_policy and enrollment_policy.bind_ip)
     host = deployment_host(capabilities(), schema)
@@ -390,6 +393,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             try:
                 await run_in_threadpool(wizard.reap_idle)
                 await run_in_threadpool(terminals.reap)
+                await run_in_threadpool(deployments.reap)
                 pending_seed = await run_in_threadpool(seed_admission.pending, store)
                 if pending_seed is not None:
                     await seed_admission.finish(store, config, remote, pending_seed)
@@ -405,6 +409,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         with controller.running(), metrics.running():
+            await run_in_threadpool(deployments.recover)
             async with remote.running():
                 task = asyncio.create_task(synchronize_enrollment())
                 rollout = asyncio.create_task(updates.run())
@@ -415,6 +420,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                     rollout.cancel()
                     await asyncio.gather(task, rollout, return_exceptions=True)
                     wizard.shutdown()
+                    await run_in_threadpool(deployments.shutdown)
                     await run_in_threadpool(terminals.shutdown)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -477,6 +483,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             "HOST_PERMISSION": 409, "SERVICE_STOPPED": 409, "SERVICE_LOG": 409, "SERVICE_COMMAND": 400,
             "DOCKER_MISSING": 409, "DOCKER_UNAVAILABLE": 409, "DOCKER_PERMISSION": 409,
             "SERVICE_DISCOVERY": 409,
+            "DEPLOY_FAILED": 409,
             "TERMINAL_CLOSED": 409, "TERMINAL_IO": 503, "FILE_UNAVAILABLE": 409,
             "REAUTHENTICATION_REQUIRED": 403, "APPROVAL_VERSION_REQUIRED": 409, "POLICY_CONFLICT": 409,
             "GROVE_INVITATION_EXPIRED": 410,
@@ -691,6 +698,15 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             if error.code in {'OFFLINE', 'NO_ROUTE', 'ROUTE_LOST', 'TIMEOUT'}:
                 raise PeerError('SEED_SOURCE_OFFLINE', 'The selected executor is not reachable over Mesh') from error
             raise
+
+    @app.post('/api/v1/peers/{target}/service-deployment/{action}')
+    async def service_deployment_request(target: str, action: Literal['capabilities', 'begin', 'write', 'launch', 'status', 'cancel', 'history'],
+                                         body: dict = Depends(grove_body), actor: auth.Actor = Depends(require_admin_write)):
+        if target in ('local', node_id):
+            return await remote.work(deployments.request, service_setup.LocalAdmin(actor), action, body)
+        pair = remote.pair_for(target)
+        identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+        return await remote.call(target, deployments.method, {'identity': identity, 'action': action, 'body': body}, diagnostic=True)
 
     @app.post('/api/v1/peers/{target}/workspace/{action}')
     async def workspace_request(target: str, action: Literal['host', 'detail', 'edit', 'remove', 'mode'],

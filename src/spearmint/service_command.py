@@ -3,6 +3,7 @@ import os
 from hashlib import sha256
 from pathlib import Path
 import shutil
+import shlex
 
 from .catalog import process_spec
 from .onboarding import write_private
@@ -10,7 +11,7 @@ from .platforms import WINDOWS, secure_private
 from .state import State, StateError, private_path
 
 
-def command_spec(command: str, cwd: str | None, stop_timeout: int, endpoint: str | None, *, state: State) -> dict:
+def command_spec(command: str, cwd: str | None, stop_timeout: int, endpoint: str | None, *, state: State, environment: dict | None = None) -> dict:
     if not command.strip() or '\0' in command or len(command.encode()) > 8192:
         raise StateError('Provide a startup command of at most 8 KiB')
     if WINDOWS:
@@ -21,9 +22,13 @@ def command_spec(command: str, cwd: str | None, stop_timeout: int, endpoint: str
         argv = [shell, '-c', command]
     directory = Path(cwd).expanduser() if cwd else Path.home()
     spec = process_spec(argv, str(directory), stop_timeout, endpoint)
-    path = write_command_script(state, command)
+    source = command
+    if environment:
+        prefix = '\n'.join(f'set "{key}={value}"' if WINDOWS else f'export {key}={shlex.quote(value)}' for key, value in environment.items())
+        source = prefix + '\n' + command
+    path = write_command_script(state, source)
     argv = [shell, '/d', '/s', '/c', str(path)] if WINDOWS else [shell, str(path)]
-    return {**spec, 'argv': argv, 'command': command, 'command_script': str(path)}
+    return {**spec, 'argv': argv, 'command': command, 'command_script': str(path), **({'script_source': source} if environment else {})}
 
 
 def command_script_path(state: State, command: str) -> Path:
@@ -51,8 +56,9 @@ def write_command_script(state: State, command: str) -> Path:
 def ensure_command_script(state: State, spec: dict) -> None:
     if not spec.get('command_script'):
         return
-    path = command_script_path(state, spec['command'])
+    source = spec.get('script_source', spec['command'])
+    path = command_script_path(state, source)
     if str(path) != spec['command_script']:
         raise StateError('The startup script belongs to a different state directory')
     if not path.exists():
-        write_command_script(state, spec['command'])
+        write_command_script(state, source)

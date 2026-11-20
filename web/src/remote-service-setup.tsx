@@ -4,7 +4,8 @@ import { refreshConsole, useConsole } from './console-data'
 import { groveServiceRegistrationHref, localServiceHref, remoteServiceSyncHref } from './grove-navigation'
 import { Icon, Loading, Notice, PageHeading, Panel, Tabs } from './ui'
 import { returnRoute, withReturn } from './workspace-api'
-import { useUnsavedChanges } from './navigation-guard'
+import { allowNavigation, useUnsavedChanges } from './navigation-guard'
+import { ServiceDeployment } from './service-deployment'
 
 const kinds = { systemd: 'systemd 系统服务', windows: 'Windows 系统服务', docker: 'Docker 容器' }
 type Kind = keyof typeof kinds
@@ -14,7 +15,7 @@ type Candidates = { candidates: Candidate[]; registered: Registered[]; truncated
 type Capabilities = { kinds: Kind[]; workflow?: number; checks?: boolean; commands?: boolean; scripts?: boolean }
 type Readiness = { ready: boolean; log_path?: string | null }
 type SetupProps = { session: Session; onUnauthorized: () => void }
-type Action = 'kinds' | 'running' | 'inspect' | 'take-over' | 'create' | 'manage'
+type Action = 'kinds' | 'running' | 'inspect' | 'take-over' | 'manage'
 type Mode = 'take-over' | 'create'
 
 function request<T>(session: Session, nodeId: string, action: Action, body: object, signal: AbortSignal) {
@@ -78,7 +79,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
   const [reads, setReads] = useState(0)
   const [busy, setBusy] = useState(false)
   const [step, setStep] = useState(1)
-  const [review, setReview] = useState<{ action: 'take-over' | 'create'; body: object; name: string; command?: string }>()
+  const [review, setReview] = useState<{ action: 'take-over'; body: object; name: string }>()
   const [dirty, setDirty] = useState(false)
   useUnsavedChanges(dirty && !result)
   const mutation = useRef<AbortController | null>(null)
@@ -124,7 +125,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
     setReads(value => value + 1)
   }
 
-  async function mutate(action: 'take-over' | 'create' | 'manage', body: object) {
+  async function mutate(action: 'take-over' | 'manage', body: object) {
     if (mutation.current) return
     const controller = new AbortController()
     mutation.current = controller
@@ -152,19 +153,19 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
       const log_path = String(values.get('log_path') ?? '').trim() || null
       const chosenName = name || Array.from(candidate.name).slice(0, 80).join('')
       setReview({ action: 'take-over', name: chosenName, body: { kind, target: candidate.target, name: chosenName, log_path } }); setStep(3)
-    } else if (mode === 'create') {
-      const command = String(values.get('command') ?? '').trim()
-      setReview({ action: 'create', name, command, body: { name, command } }); setStep(3)
     }
   }
 
-  return <Panel title="登记方式" action={<button className="btn btn-secondary" type="button" onClick={refresh} disabled={busy}>刷新</button>}>
+  return <Panel title="接入方式" action={<button className="btn btn-secondary" type="button" onClick={refresh} disabled={busy}>刷新</button>}>
+    <Tabs label="接入方式" current={mode} items={[{ id: 'take-over', label: '接管现有服务' }, { id: 'create', label: '部署新服务' }]}
+      onChange={value => { if (!busy && value !== mode && allowNavigation()) { setMode(value as Mode); setStep(1); selectCandidate(''); setChoices(undefined); setDirty(false) } }} />
+    {mode === 'create' ? <ServiceDeployment target={nodeId} /> :
     <div className="stack">
       {error && <Notice tone="amber">{error}</Notice>}
       {!supported ? !error && <Loading label="正在读取目标节点的登记能力…" />
         : supported.workflow !== 2 ? <Notice tone="amber">目标节点需要升级后才能接管运行中的服务或新建服务。</Notice>
         : result ? <>
-          <Notice title={`已托管 ${result.name}`}>{mode === 'create' ? '服务已登记。打开服务详情即可启动并查看日志。' : '服务已纳入托管，可以管理启停并查看应用日志。'}</Notice>
+          <Notice title={`已托管 ${result.name}`}>服务已纳入托管，可以管理启停并查看应用日志。</Notice>
           {result.command && <pre className="command-block">{result.command}</pre>}
           <div className="button-row">
             <a className="btn btn-primary" href={serviceHref(result.id)}>打开服务</a>
@@ -172,9 +173,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
           </div>
         </> : <>
           <ol className="registration-steps">{['选择节点与方式', '填写登记信息', '核对并登记'].map((label, index) => <li key={label} className={step === index + 1 ? 'current' : ''}>{index + 1} · {label}</li>)}</ol>
-          {step === 1 && <><Tabs label="登记方式" current={mode} items={[{ id: 'take-over', label: '接管现有服务' }, { id: 'create', label: '新建服务' }]}
-            onChange={value => { if (!busy && value !== mode) { setMode(value as Mode); selectCandidate(''); setChoices(undefined) } }} />
-            <p className="muted">{mode === 'create' ? '登记完整启动命令。完成后保持停止，由你主动启动。' : '读取目标节点正在运行的服务，选择后检查是否可以接管。'}</p><div><button className="btn btn-primary" onClick={() => setStep(2)}>下一步</button></div></>}
+          {step === 1 && <><p className="muted">读取目标节点正在运行的服务，选择后检查是否可以接管。</p><div><button className="btn btn-primary" onClick={() => setStep(2)}>下一步</button></div></>}
           <div hidden={step !== 2}>
           {mode === 'take-over' && (!supported.checks ? <Notice tone="amber">目标节点仍在使用允许列表过滤服务。请通过 Grove 群组更新升级目标节点，再读取运行中的服务。</Notice> : <>
             <p className="muted">列表显示正在运行的服务。选择后检查目标机的管理和日志权限。</p>
@@ -203,23 +202,18 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
               </ul></details>}
             </>}
           </>)}
-          {mode === 'create' && !supported.scripts && <Notice tone="amber">请通过 Grove 群组更新升级目标节点，以保存并执行多行启动脚本。</Notice>}
           {mode === 'take-over' && candidate && supported.checks && !checked && !error && <Loading label="正在检查此服务能否接管…" />}
-          {(mode === 'create' && supported.scripts || canTakeOver) && <form className="stack" onSubmit={submit} onChange={() => setDirty(true)} key={mode === 'create' ? mode : candidate?.target}>
-            <label className="field-label">服务名称<input className="input" name="name" maxLength={80} required={mode === 'create'} placeholder={candidate?.name} disabled={busy} /></label>
-            {mode === 'create' ? <>
-              <label className="field-label">启动命令<textarea className="input" name="command" required rows={3} maxLength={8192} disabled={busy}
-                placeholder={supported.kinds.includes('windows') ? 'cd /d "D:\\Apps\\abcd"\npython edgf.py --port 8080' : 'cd /srv/abcd\npython edgf.py --port 8080'} /></label>
-              <p className="muted">支持多行命令。切换目录、环境变量和端口参数可以一起填写，命令会保存到 Spearmint 数据目录并按顺序执行，输出写入服务日志。</p>
-            </> : kind === 'windows' && (checked?.log_path ? <p className="muted">已识别应用日志 <code>{checked.log_path}</code></p>
+          {canTakeOver && <form className="stack" onSubmit={submit} onChange={() => setDirty(true)} key={candidate?.target}>
+            <label className="field-label">服务名称<input className="input" name="name" maxLength={80} placeholder={candidate?.name} disabled={busy} /></label>
+            {kind === 'windows' && (checked?.log_path ? <p className="muted">已识别应用日志 <code>{checked.log_path}</code></p>
               : <label className="field-label">目标 Windows 应用日志的绝对路径
               <input className="input" name="log_path" maxLength={420} required disabled={busy} placeholder={'C:\\Apps\\MyApp\\logs\\app.log'} />
             </label>)}
             <div className="button-row"><button type="button" className="btn btn-secondary" onClick={() => setStep(1)}>上一步</button><button className="btn btn-primary" disabled={busy}>核对登记信息</button></div>
           </form>}
           </div>
-          {step === 3 && review && <><dl className="facts"><div><dt>服务名称</dt><dd>{review.name}</dd></div><div><dt>登记方式</dt><dd>{review.action === 'create' ? '新建脚本服务 · 登记后保持停止' : '接管现有服务 · 保留运行状态'}</dd></div></dl>{review.command && <pre className="command-block">{review.command}</pre>}<div className="button-row"><button className="btn btn-secondary" disabled={busy} onClick={() => setStep(2)}>上一步</button><button className="btn btn-primary" disabled={busy} onClick={() => void mutate(review.action, review.body)}>{busy ? '正在登记…' : '确认登记'}</button></div></>}
+          {step === 3 && review && <><dl className="facts"><div><dt>服务名称</dt><dd>{review.name}</dd></div><div><dt>登记方式</dt><dd>接管现有服务 · 保留运行状态</dd></div></dl><div className="button-row"><button className="btn btn-secondary" disabled={busy} onClick={() => setStep(2)}>上一步</button><button className="btn btn-primary" disabled={busy} onClick={() => void mutate(review.action, review.body)}>{busy ? '正在登记…' : '确认登记'}</button></div></>}
         </>}
-    </div>
+    </div>}
   </Panel>
 }

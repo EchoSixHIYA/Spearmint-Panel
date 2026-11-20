@@ -19,7 +19,7 @@ The console has six areas: overview, services, nodes, operations, identity, and 
 
 | Feature | What it does |
 | --- | --- |
-| Service management | Register foreground programs, system services, and containers locally or remotely. View status and logs and run supported start, stop, and restart operations. |
+| Service management | Adopt system services and containers, or deploy an archive or Docker command remotely. Manage lifecycle, logs, resources, code updates, and rollback. |
 | Grove and Mesh | Add members by invitation, synchronize the member directory, and see direct connections, relays, and active paths in the topology view. |
 | Node seeding | Choose an initiator in the topology, test SSH, browse one directory at a time, and let the initiator install, start, and enroll the target. |
 | Quick SSH | Select a node in the topology to open an xterm.js terminal over the existing Mesh, browse and transfer files, and edit text. Commands run as the target panel's OS account. |
@@ -68,6 +68,16 @@ Set up a browser-accessible HTTPS address and a local reverse proxy to `127.0.0.
 2. To install Spearmint on a new device, open node seeding as a Grove administrator and pick an active member that can reach the target over SSH. After the connection test, the initiator detects the target OS and architecture, then automatically fetches and verifies the signed deployment package from its cache, GitHub Releases, or another Grove member. Browse to the installation directory to continue.
    Windows targets need the SSH SFTP subsystem and the built-in `cmd.exe`, `certutil.exe`, and `tar.exe`. The deployment account must be able to register a startup task. The panel task runs with that account's limited privileges.
 3. In service management, choose the local or remote node where the service runs and register it. For an existing container or system service, use observe mode to check its status and logs before switching to manage mode.
+
+### Deploy and update services
+
+Under Services → Register service, select a node and choose Deploy new service. Upload a ZIP/TAR archive with a multiline startup command, or supply one `docker run …` command. Commands without an archive can launch programs already installed on the target. The target owns the deployment job; upload, extraction or image pull, startup confirmation, and registration results appear in the panel. Closing the browser after launch does not cancel the job.
+
+Archive applications start in the extracted directory, automatically entering a single enclosing folder. Files live under `service-apps/` in the target's Spearmint state directory. Commands run as CMD scripts on Windows and `/bin/sh` scripts on Linux. Prepare dependencies in the command and ensure they work without an interactive shell. `SPMT_APP_DIR` points to code and `SPMT_DATA_DIR` to persistent data (`%SPMT_DATA_DIR%` on Windows, `$SPMT_DATA_DIR` on Linux). Uploads are limited to 1 GiB, with a 4 GiB expanded limit.
+
+Use Code and updates in service details to replace an archive, edit the startup command, or change a Docker image/configuration. Files or images are prepared before stopping the current service. Failed startup restores the previous version. Registration stays intact, one rollback version is retained, and temporary uploads are removed. Docker uses the node's configured local engine, tracks full container IDs, and removes detach/automatic-removal flags. Compose and compound shell commands are not supported. Mounted volumes are preserved; no global Docker prune runs. Adopted Windows/systemd services remain the responsibility of their original installer.
+
+Startup confirmation checks that the process remains running and waits for Docker HEALTHCHECK when present. It is not an application-level acceptance test. Rollback restores code, configuration, or the old container; it does not undo application data changes. Back up application data before upgrading.
 
 ### Update Grove nodes
 

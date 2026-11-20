@@ -28,6 +28,7 @@ BOUNDED_REPLIES = {
     "grove.login.roles.get": CATALOG,
     "security.evidence.list": CATALOG, "security.evidence.part": CATALOG,
     "grove.update.v1": 132 * 1024,
+    "grove.deploy.v1": 128 * 1024,
     "grove.seed.catalog": CATALOG, "grove.seed.catalog.v2": CATALOG, "grove.seed.catalog.v3": CATALOG,
 }
 RELAY_QUEUE_CIRCUITS = 16
