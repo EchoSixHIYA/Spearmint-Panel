@@ -31,7 +31,7 @@ BOUNDED_REPLIES = {
     "grove.deploy.v1": 128 * 1024,
     "grove.seed.catalog": CATALOG, "grove.seed.catalog.v2": CATALOG, "grove.seed.catalog.v3": CATALOG,
 }
-RELAY_QUEUE_CIRCUITS = 16
+RELAY_QUEUE_CIRCUITS = 128
 RELAY_QUEUE_FRAMES = 8
 RPC_RTT_ALLOWANCE = 2.0
 TRANSFER_WINDOW_BYTES = 64 * 1024
@@ -45,6 +45,12 @@ async def close_stream(writer: asyncio.StreamWriter) -> None:
             await asyncio.wait_for(writer.wait_closed(), 1.5)
     finally:
         writer.transport.abort()
+
+
+def session_busy(session) -> bool:
+    """Include replies still being handled or written when retiring a session."""
+    return bool(getattr(session, 'pending', None) or getattr(session, 'handling', None)
+                or getattr(session, 'write_bytes', 0))
 
 
 class Session:
@@ -132,7 +138,7 @@ class Session:
                 raise PeerError("BUSY", "Peer control queue is full")
             self.priority.append((deadline, wire))
         elif kind in RELAY_CONTROL:
-            if len(self.relay_notices) >= 32:
+            if len(self.relay_notices) >= 2 * RELAY_QUEUE_CIRCUITS:
                 raise PeerError("BUSY", "Relay notice queue is full")
             self.relay_notices.append((deadline, wire))
         elif kind in RELAY_STREAM:

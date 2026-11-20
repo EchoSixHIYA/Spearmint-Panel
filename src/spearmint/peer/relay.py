@@ -14,15 +14,18 @@ from .manager import Neighbor, PeerManager
 from .pairing import Pair
 from .protocol import DEADLINE, RELAY_CAPABILITY, PeerError, ProtocolError, matches, parse_b64, wire_b64
 from .routing import HOPS, TIME_SKEW, Route, Routing
-from .session import Session
+from .session import RELAY_QUEUE_CIRCUITS, Session, session_busy
 from .signed import SignedRecord
 from .tunnel import CHUNK, TunnelTLS
 
 
 logger = logging.getLogger(__name__)
 WINDOW = 4
-CIRCUITS = 16
-PER_ORIGIN = 4
+CIRCUITS = RELAY_QUEUE_CIRCUITS
+PER_ORIGIN = CIRCUITS
+# Background sampling must leave room for primary/failover connections.
+PRIMARY_RESERVE = 4
+OPEN_ATTEMPTS = 4
 REPLAY_LIMIT = 512
 REPLAY_TTL = 30
 IDLE = 60
@@ -137,6 +140,8 @@ class Relay:
     def status(self) -> dict:
         return {"active_circuits": len(self.circuits), "tasks": len(self.workers), "buffered_chunks": sum(
             leg.queue.qsize() for circuit in self.circuits.values() for leg in circuit.legs),
+            'circuit_limit': CIRCUITS, 'per_origin_limit': PER_ORIGIN, 'primary_reserve': PRIMARY_RESERVE,
+            'local_origin_circuits': sum(circuit.path[0] == self.local for circuit in self.circuits.values()),
             'roles': dict(Counter(circuit.role for circuit in self.circuits.values())), **self.counts}
 
     def live(self, circuit: Circuit) -> bool:
@@ -176,7 +181,7 @@ class Relay:
             return session
         task = self.attempts.get(pair.node_id)
         if task is None:
-            if len(self.attempts) >= PER_ORIGIN:
+            if len(self.attempts) >= OPEN_ATTEMPTS:
                 raise PeerError("BUSY", "Too many Mesh circuits are being opened")
             task = asyncio.create_task(self.open_outbound(pair))
             self.attempts[pair.node_id] = task
@@ -196,7 +201,8 @@ class Relay:
     def register(self, circuit: Circuit) -> None:
         self.reap_retired()
         if (len(self.circuits) >= CIRCUITS or len(self.retired) + len(self.circuits) >= REPLAY_LIMIT
-                or sum(item.path[0] == circuit.path[0] for item in self.circuits.values()) >= PER_ORIGIN):
+                or sum(item.path[0] == circuit.path[0] for item in self.circuits.values()) >= PER_ORIGIN
+                or circuit.role == 'trial' and len(self.circuits) >= CIRCUITS - PRIMARY_RESERVE):
             self.counts["limited"] += 1
             raise PeerError("BUSY", "Relay capacity reached")
         self.circuits[circuit.identity] = circuit
@@ -477,22 +483,28 @@ class Relay:
             if any(leg.link is link for leg in circuit.legs):
                 self.drop(circuit, "ROUTE_LOST", skip=link)
 
+    def reap_idle(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        for circuit in list(self.circuits.values()):
+            peers = (self.manager.pairs.get(node) for node in circuit.path if node != self.local)
+            if len(circuit.legs) == 2 and not self.manager.forwarding_enabled:
+                self.drop(circuit, 'ROUTE_LOST')
+            elif (any(pair is None or not pair.enabled for pair in peers)
+                    or (circuit.valid_until is not None and time.time() >= circuit.valid_until)
+                    or (circuit.member and self.manager.pairs.get(circuit.member.node_id) != circuit.member)):
+                self.drop(circuit, 'DENIED')
+            elif not circuit.ready.is_set() and now - circuit.created >= DEADLINE:
+                self.drop(circuit, 'ROUTE_LOST')
+            elif (now - circuit.last_wire > IDLE + 15
+                  or (circuit.session and not session_busy(circuit.session)
+                      and (circuit.session.closed or now - circuit.session.last_business > IDLE))):
+                self.drop(circuit, 'CLOSED')
+                self.counts['idle_reclaimed'] += 1
+
     async def sweep(self) -> None:
         try:
             while True:
-                now = time.monotonic()
-                for circuit in list(self.circuits.values()):
-                    peers = (self.manager.pairs.get(node) for node in circuit.path if node != self.local)
-                    if len(circuit.legs) == 2 and not self.manager.forwarding_enabled:
-                        self.drop(circuit, "ROUTE_LOST")
-                    elif (any(pair is None or not pair.enabled for pair in peers)
-                            or (circuit.valid_until is not None and time.time() >= circuit.valid_until)
-                            or (circuit.member and self.manager.pairs.get(circuit.member.node_id) != circuit.member)):
-                        self.drop(circuit, "DENIED")
-                    elif not circuit.ready.is_set() and now - circuit.created >= DEADLINE:
-                        self.drop(circuit, "ROUTE_LOST")
-                    elif now - circuit.last_wire > IDLE + 15 or (circuit.session and now - circuit.session.last_business > IDLE):
-                        self.drop(circuit, "CLOSED")
+                self.reap_idle()
                 self.reap_retired()
                 await asyncio.sleep(0.5)
         finally:

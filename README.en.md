@@ -15,6 +15,8 @@ Manage services on Linux, Windows, and NAS devices from a single Grove.
 
 Each device runs its own panel. Once devices join the same Grove, a Grove administrator can sign in to any available panel and manage services across member nodes. Mesh traffic can travel directly or through other online members, so devices without a public IP can still be managed.
 
+Each node supports up to 128 relay sessions, including sessions from a single origin, replacing the previous four-session origin cap. Verified standbys no longer occupy measurement slots; background sampling reserves capacity for primary and failover connections. Selection uses measured end-to-end latency. Existing bidirectional sessions are reused, and idle or duplicate sessions are retired after outstanding requests and replies drain. Intermediate nodes on older versions retain their earlier capacity limits.
+
 The console has six areas: overview, services, nodes, operations, identity, and maintenance. Local and remote services share one workspace for control, logs, metadata editing, and unregistration. Nodes include topology, resources, enrollment, and the xterm.js terminal/file workspace. Personal sessions and display preferences live in the account menu. Planned mobile-node and Grove-federation pages remain visible and marked unfinished.
 
 | Feature | What it does |

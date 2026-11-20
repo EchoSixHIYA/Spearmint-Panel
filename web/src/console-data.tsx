@@ -33,6 +33,8 @@ type RouteSession = {
   handshake_ms?: number | null
 }
 export type RouteDiagnostics = {
+  circuit_usage?: number; circuit_limit?: number; sampling_sessions?: number; sampling_limit?: number;
+  standby_sessions?: number; standby_limit?: number;
   selected_path: string[] | null; switch_reason: string | null; switches: number
   backup_sessions: number; candidate_sessions: RouteSession[]
   comparison?: { path: string[]; completed: number; required: number; dwell_remaining_seconds: number; remaining_seconds?: number } | null

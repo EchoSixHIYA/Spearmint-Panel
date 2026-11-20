@@ -11,13 +11,14 @@ from .manager import PeerManager
 from .pairing import Pair
 from .path_selection import Candidate, MIN_DWELL, MIN_SAMPLES, REQUIRED_COMPARISONS, Selector, required_saving_ms
 from .protocol import PeerError
-from .relay import CIRCUITS, PER_ORIGIN, Circuit, Relay
+from .relay import CIRCUITS, PER_ORIGIN, PRIMARY_RESERVE, Circuit, Relay
 from .routing import Route, Routing
-from .session import Session
+from .session import Session, session_busy
 
 
 logger = logging.getLogger(__name__)
 MAX_TRIALS = 2
+MAX_STANDBYS = 32
 SAMPLE_TIMEOUT = 15
 TRIAL_AGE = 35
 IDLE = 60
@@ -26,6 +27,7 @@ STATUS_WATCH_TTL = 12
 REFRESH = 15
 STANDBY_ROTATION = 30
 COOLDOWN = 5
+MAX_RETRY = 30
 # Existing tunnel RPCs can wait up to fourteen/fifteen seconds during a bulk
 # reply. Their own timers still end each call; a path switch must not cut that
 # wait short. Draining keeps occupying the same bounded circuit budget.
@@ -103,6 +105,7 @@ class AdaptiveRoutes:
         self.trialled_paths: dict[tuple[tuple[str, ...], str], float] = {}
         self.last_trial: dict[str, float] = {}
         self.failed: dict[tuple, float] = {}
+        self.retry_delays: dict[tuple, float] = {}
         self.reasons: dict[str, str] = {}
         self.path_errors: dict[str, str] = {}
         self.counts: Counter[str] = Counter()
@@ -114,8 +117,33 @@ class AdaptiveRoutes:
     def failure_key(self, binding: Binding):
         return binding.key if binding.incoming else self.route_key(binding.route)
 
-    def trial_order(self, route: Route) -> tuple[float, int, tuple[str, ...]]:
-        return self.trialled_paths.get(self.route_key(route), float('-inf')), len(route.path), route.path
+    def route_hint(self, route: Route) -> float:
+        latency = getattr(getattr(route.first, 'session', None), 'latency', None)
+        value = latency.cost(1, self.clock()) if latency is not None else None
+        return value if value is not None else float('inf')
+
+    def trial_order(self, route: Route) -> tuple:
+        # First-hop RTT only schedules measurements; the final choice still
+        # requires the authenticated end-to-end samples in Selector.
+        return self.trialled_paths.get(self.route_key(route), float('-inf')), self.route_hint(route), len(route.path), route.path
+
+    def sampling_count(self) -> int:
+        return len(self.opening) + sum(binding.session.latency.samples < MIN_SAMPLES
+                                      for binding in self.trials.values())
+
+    def reusable(self, active: Binding, bindings: list[Binding], now: float) -> Binding | None:
+        if active.circuit is None or active.candidate().measured_cost(now) is None:
+            return None
+        matching = [binding for binding in bindings if binding.circuit is not None
+                    and binding.route.path == active.route.path and binding.candidate().measured_cost(now) is not None]
+        if len(matching) < 2:
+            return None
+        canonical = min(matching, key=lambda binding: binding.circuit.identity)
+        current_cost = active.candidate().measured_cost(now)
+        if (canonical.session is not active.session and canonical.candidate().measured_cost(now)
+                <= current_cost + required_saving_ms(current_cost)):
+            return canonical
+        return None
 
     def admitted(self, pair: Pair) -> bool:
         return self.manager.pairs.get(pair.node_id) == pair and pair.enabled and pair.routed and not pair.legacy
@@ -174,7 +202,7 @@ class AdaptiveRoutes:
             self.trials.pop(node)
             self.cancel_keeper(node)
         if binding.circuit and not binding.incoming and self.relay.circuits.get(binding.circuit.identity) is binding.circuit:
-            if binding.session.pending:
+            if session_busy(binding.session):
                 binding.circuit.role = 'draining'
                 self.draining[binding.circuit.identity] = binding, self.clock() + DRAIN_TIMEOUT
             else:
@@ -201,8 +229,9 @@ class AdaptiveRoutes:
                     self.cancel_keeper(node)
                 self.counts['failures_' + code.lower()] += 1
 
-    def relay_capacity_full(self, queued: int = 0) -> bool:
-        return (len(self.relay.circuits) + queued >= CIRCUITS or
+    def relay_capacity_full(self, queued: int = 0, *, background: bool = False) -> bool:
+        limit = CIRCUITS - PRIMARY_RESERVE if background else CIRCUITS
+        return (len(self.relay.circuits) + queued >= limit or
                 sum(circuit.path[0] == self.manager.local_id for circuit in self.relay.circuits.values()) + queued >= PER_ORIGIN)
 
     def make_space(self, node: str, *, business: bool) -> None:
@@ -221,10 +250,11 @@ class AdaptiveRoutes:
             keeper = self.keepers.get(other)
             probe_only = (self.trials.get(other) is binding and keeper is not None
                           and not keeper.done() and not keeper.cancelling()
+                          and not getattr(binding.session, 'handling', None) and not getattr(binding.session, 'write_bytes', 0)
                           and bool(binding.session.pending) and all(
                               isinstance(item, tuple) and item and item[0] in {'peer.ping', 'catalog.sync', CATALOG_HEALTH_METHOD}
                               for item in binding.session.pending.values()))
-            if binding.circuit and not binding.incoming and (not binding.session.pending or probe_only):
+            if binding.circuit and not binding.incoming and (not session_busy(binding.session) or probe_only):
                 if probe_only:
                     # The owned standby read can be cancelled without dropping an operation or its receipt.
                     self.cancel_keeper(other)
@@ -268,6 +298,8 @@ class AdaptiveRoutes:
             if previous:
                 self.retire(node, previous)
             self.counts['promotions'] += 1
+            if reason == 'session_reuse':
+                self.counts['sessions_reused'] += 1
             if binding.incoming:
                 self.counts['incoming_promotions'] += 1
 
@@ -307,9 +339,19 @@ class AdaptiveRoutes:
             deferred = True
             raise SwitchDeferred
 
+        def check_reuse() -> None:
+            nonlocal deferred
+            current = self.reusable(primary, self.bindings(node), self.clock())
+            if (self.active.get(node) is not primary or current is None
+                    or current.session is not selected.session):
+                deferred = True
+                self.deferred_switches[node] = primary, 'candidate_unavailable', self.clock()
+                raise SwitchDeferred
+
         try:
             async with asyncio.timeout(15):
-                await self.promote(pair, selected, reason, check=check_cost if reason == 'lower_cost' else None)
+                check = check_cost if reason == 'lower_cost' else check_reuse if reason == 'session_reuse' else None
+                await self.promote(pair, selected, reason, check=check)
         except (SwitchDeferred, PeerError, TimeoutError) as error:
             if deferred or isinstance(error, SwitchDeferred):
                 # Reconfirming the original directory can consume the rest of the switch deadline.
@@ -402,7 +444,7 @@ class AdaptiveRoutes:
                                 failure_phase, last_error = phase, error
                     routes = [route for route in self.routing.routes(node)
                               if self.route_key(route) not in visited and self.failed.get(self.route_key(route), 0) <= self.clock()]
-                    routes.sort(key=lambda route: (len(route.path), self.trial_order(route)))
+                    routes.sort(key=lambda route: (route.ticket is not None, self.route_hint(route), len(route.path), self.trial_order(route)))
                     for route in routes:
                         visited.add(self.route_key(route))
                         binding = None
@@ -457,7 +499,10 @@ class AdaptiveRoutes:
 
     async def open_trial(self, pair: Pair, route: Route) -> None:
         node = pair.node_id
-        if self.relay_capacity_full():
+        if any(binding.route.path == route.path for binding in self.bindings(node)):
+            self.counts['trial_sessions_reused'] += 1
+            return
+        if self.relay_capacity_full(background=True):
             self.path_errors[node] = 'trial_busy'
             return
         self.last_trial[node] = self.trialled_paths[self.route_key(route)] = self.clock()
@@ -473,11 +518,15 @@ class AdaptiveRoutes:
                 self.relay.drop(circuit, 'CLOSED')
                 return
             self.trials[node] = binding
+            self.retry_delays.pop(self.route_key(route), None)
             if self.path_errors.get(node, '').startswith('trial_'):
                 self.path_errors.pop(node, None)
             self.counts['trials_opened'] += 1
         except PeerError as error:
-            self.failed[self.route_key(route)] = self.clock() + COOLDOWN
+            key = self.route_key(route)
+            delay = min(MAX_RETRY, 2 * self.retry_delays.get(key, COOLDOWN / 2))
+            self.retry_delays[key] = delay
+            self.failed[key] = self.clock() + delay
             if error.code != 'BUSY':
                 self.routing.invalidate(route)
             self.path_errors[node] = 'trial_' + error.code.lower()
@@ -514,14 +563,14 @@ class AdaptiveRoutes:
         return self.last_trial.get(node, float('-inf')), node
 
     def can_reassign_trial(self, node: str, other: str, binding: Binding, demand: set[str], now: float,
-                           *, shorter: bool = False) -> bool:
-        if other in self.switching or binding.session.pending or self.connection_for(other) is None:
+                           *, priority_probe: bool = False) -> bool:
+        if other in self.switching or session_busy(binding.session) or self.connection_for(other) is None:
             return False
         priority = self.trial_priority(node, demand)
         incumbent = self.trial_priority(other, demand)
         if priority != incumbent:
             return priority < incumbent
-        if (not shorter and (now - binding.session.created_at < STANDBY_ROTATION
+        if (not priority_probe and (now - binding.session.created_at < STANDBY_ROTATION
                 or self.trial_age_order(node) >= self.trial_age_order(other))):
             return False
         primary = self.active[other].candidate().measured_cost(now)
@@ -550,7 +599,7 @@ class AdaptiveRoutes:
         else:
             self.watch_recoveries.clear()
         for identity, (binding, deadline) in list(self.draining.items()):
-            if not binding.session.pending or now >= deadline or not self.relay.live(binding.circuit):
+            if not session_busy(binding.session) or now >= deadline or not self.relay.live(binding.circuit):
                 self.relay.drop(binding.circuit, 'CLOSED')
                 self.draining.pop(identity)
         for node, binding in list(self.active.items()):
@@ -570,8 +619,8 @@ class AdaptiveRoutes:
             age = now - binding.created_at
             # Heartbeats cannot start until tunnel TLS and HELLO have finished.
             # Only unqualified trials use the absolute setup/sample lifetime.
-            # A qualified standby leases one of the existing slots while its
-            # target is demanded; it must survive a primary's failure detector.
+            # Qualified standbys use retention capacity rather than a sampling
+            # slot, and survive a primary's failure detector while demanded.
             qualified = binding.session.latency.samples >= MIN_SAMPLES
             sample_timeout = (now - binding.session.created_at >= SAMPLE_TIMEOUT
                               and binding.session.latency.samples < MIN_SAMPLES)
@@ -579,24 +628,39 @@ class AdaptiveRoutes:
                 self.failed[self.route_key(binding.route)] = now + COOLDOWN
                 self.counts['trial_sample_timeouts'] += 1
             unused = node not in watched
+            primary = self.active.get(node)
+            same_path = primary is not None and primary.route.path == binding.route.path
+            redundant = (primary is not None and primary.circuit is not None
+                         and same_path
+                         and primary.circuit.identity < binding.circuit.identity)
+            expired_idle = (primary is not None and not same_path and node not in demand
+                            and now - binding.created_at >= IDLE
+                            and primary.candidate().measured_cost(now) is not None)
             if not self.live(binding) or (not qualified and age >= TRIAL_AGE) or sample_timeout or unused:
                 self.retire(node, binding)
                 self.refreshed[node] = now
+            elif (redundant or expired_idle) and not session_busy(binding.session):
+                self.retire(node, binding)
+                if not redundant:
+                    self.failed[self.route_key(binding.route)] = now + STANDBY_ROTATION
+                self.counts['standbys_reclaimed'] += 1
         options = {node: self.routing.routes(node) for node in watched if node in self.active}
 
-        def shorter_option(route: Route, active: Binding) -> bool:
+        def priority_option(route: Route, active: Binding) -> bool:
             key = self.route_key(route)
-            return (route.ticket is not None and len(route.path) < len(active.route.path) and self.failed.get(key, 0) <= now
+            cost = active.candidate().measured_cost(now)
+            promising = cost is not None and self.route_hint(route) < cost - required_saving_ms(cost)
+            return (route.ticket is not None and (len(route.path) < len(active.route.path) or promising) and self.failed.get(key, 0) <= now
                     and now - self.trialled_paths.get(key, float('-inf')) >= STANDBY_ROTATION)
 
-        shorter = {node for node, routes in options.items()
-                   if any(shorter_option(route, self.active[node]) for route in routes)}
+        priority_nodes = {node for node, routes in options.items()
+                          if any(priority_option(route, self.active[node]) for route in routes)}
 
         def scheduling_order(node: str):
             priority = self.trial_priority(node, demand)
             if node not in self.active:
                 return (*priority, 0, -self.used.get(node, 0), 0, node)
-            return (*priority, 1, node not in shorter, previously_waiting.get(node, now), *self.trial_age_order(node))
+            return (*priority, 1, node not in priority_nodes, previously_waiting.get(node, now), *self.trial_age_order(node))
 
         queued_trials = 0
         for node in sorted(watched, key=scheduling_order):
@@ -616,6 +680,12 @@ class AdaptiveRoutes:
             bindings = self.bindings(node)
             stable = False
             if len(self.switching) < MAX_TRIALS:
+                shared = self.reusable(active, bindings, now)
+                if shared is not None:
+                    task = asyncio.create_task(self.switch_route(pair, active, shared, 'session_reuse'))
+                    self.switching[node] = task
+                    task.add_done_callback(lambda done, target=node: self.finished(self.switching, target, done))
+                    continue
                 selector = self.selectors.setdefault(node, Selector())
                 checkpoint = selector.active, selector.selected_at, selector.switches
                 decision = selector.select([binding.candidate() for binding in bindings], now)
@@ -661,30 +731,32 @@ class AdaptiveRoutes:
                       and route.path not in existing and self.failed.get(self.route_key(route), 0) <= now]
             if not routes:
                 continue
-            routes.sort(key=lambda route: (not shorter_option(route, active), self.trial_order(route)))
+            routes.sort(key=lambda route: (not priority_option(route, active), self.trial_order(route)))
             candidate = routes[0]
-            prefer_shorter = shorter_option(candidate, active)
+            priority_probe = priority_option(candidate, active)
             trial = self.trials.get(node)
             if trial is not None:
                 # Keep a verified standby during comparison or failure. Once
                 # the primary is stable, give older candidates a sampling turn.
-                if (not stable or trial.session.pending
+                if (not stable or session_busy(trial.session)
                         or trial.session.latency.samples < MIN_SAMPLES or not trial.session.latency.fresh(now)
                         or now - trial.session.created_at < STANDBY_ROTATION
-                        or (not prefer_shorter and self.trial_order(candidate)[0]
+                        or (not priority_probe and self.trial_order(candidate)[0]
                             >= self.trialled_paths.get(self.route_key(trial.route), trial.created_at))):
                     continue
                 self.retire(node, trial)
             # Tasks queued during this pass have not registered their circuits yet.
-            if len(self.trials) + len(self.opening) >= MAX_TRIALS or self.relay_capacity_full(queued_trials):
+            if (self.sampling_count() >= MAX_TRIALS or len(self.trials) + len(self.opening) >= MAX_STANDBYS
+                    or self.relay_capacity_full(queued_trials, background=True)):
                 victims = [(other, binding) for other, binding in self.trials.items()
-                           if self.can_reassign_trial(node, other, binding, demand, now, shorter=prefer_shorter)]
+                           if self.can_reassign_trial(node, other, binding, demand, now, priority_probe=priority_probe)]
                 if victims:
                     other, victim = min(victims, key=lambda item: (item[0] in self.pending_targets,
                                         item[0] in demand, *self.trial_age_order(item[0])))
                     self.retire(other, victim)
                     self.counts['standby_reassigned'] += 1
-                if len(self.trials) + len(self.opening) >= MAX_TRIALS or self.relay_capacity_full(queued_trials):
+                if (self.sampling_count() >= MAX_TRIALS or len(self.trials) + len(self.opening) >= MAX_STANDBYS
+                        or self.relay_capacity_full(queued_trials, background=True)):
                     self.waiting_for_trial[node] = previously_waiting.get(node, now)
                     continue
             task = asyncio.create_task(self.open_trial(pair, candidate))
@@ -697,6 +769,8 @@ class AdaptiveRoutes:
         for node, (primary, _, recorded_at) in list(self.deferred_switches.items()):
             if node not in self.manager.pairs or self.active.get(node) is not primary or now - recorded_at >= REFRESH:
                 self.deferred_switches.pop(node)
+        self.retry_delays = {key: delay for key, delay in self.retry_delays.items()
+                             if key in self.failed or key in self.trialled_paths}
         for node in self.standby_attempted.keys() - watched:
             self.standby_attempted.pop(node)
             self.cancel_keeper(node)
@@ -775,6 +849,9 @@ class AdaptiveRoutes:
                              **readiness, 'circuit_age_seconds': round(max(0, now - binding.created_at), 3),
                              'cost_ms': binding.candidate().measured_cost(now), **binding.session.link_metrics()})
         return {'selected_path': list(active.route.path) if active else None,
+                'circuit_usage': len(self.relay.circuits), 'circuit_limit': CIRCUITS,
+                'sampling_sessions': self.sampling_count(), 'sampling_limit': MAX_TRIALS,
+                'standby_sessions': len(self.trials), 'standby_limit': MAX_STANDBYS,
                 'last_idle_path': recent,
                 'switch_reason': self.reasons.get(node), 'switches': selector.switches if selector else 0,
                 'comparison': comparison, 'opening_trial': node in self.opening,

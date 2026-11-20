@@ -79,6 +79,7 @@ export function RouteDetails({ diagnostics, neighbor, names, showSelection = tru
 }) {
   const reasons: Record<string, string> = {
     initial: '首次连接', resumed: '恢复会话', idle: '按需连接', failure: '原路径失效，已接替', lower_cost: '新路径成本持续更低',
+    session_reuse: '已复用双方验证的会话',
     route_lost: '路径已断开', offline: '会话已关闭', timeout: '通信超时', busy: '通道容量不足',
   }
   const failureStages: Record<string, string> = {
@@ -99,6 +100,9 @@ export function RouteDetails({ diagnostics, neighbor, names, showSelection = tru
     <summary>连接详情 · {diagnostics.backup_sessions} 条备选会话
       {standbys.length > 0 && directoryCountsKnown && ` · ${readyDirectories} 条已预同步目录`}</summary>
     <p>{reasons[diagnostics.switch_reason || ''] || '正在确认可用路径'} · 已换路 {diagnostics.switches} 次</p>
+    {diagnostics.circuit_limit !== undefined && <p>本机中继会话 {diagnostics.circuit_usage} / {diagnostics.circuit_limit}
+      {diagnostics.sampling_limit !== undefined && <> · 正在采样 {diagnostics.sampling_sessions} / {diagnostics.sampling_limit}</>}
+      {diagnostics.standby_sessions !== undefined && <> · 已保留备路 {diagnostics.standby_sessions}</>}</p>}
     {showSelection && (diagnostics.selected_path || diagnostics.opening_trial || diagnostics.preparing_switch) &&
       <RouteSelectionStatus diagnostics={diagnostics} />}
     {pathError && <p>{failureStages[errorStage] || '连接失败'} · {meshPathError(pathError)}</p>}
