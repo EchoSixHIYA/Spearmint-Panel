@@ -482,6 +482,7 @@ run_panel_command() {
     shift
     # Ubuntu 22.04 ships systemd 249, before --expand-environment=no existed.
     # Preserve literal dollar characters using systemd's ExecStart escaping.
+    case "$1" in *'$'*) set -- /usr/bin/env -- "$@" ;; esac
     for argument do
         escaped=$(printf '%s_' "$argument" | sed 's/\$/$$/g')
         set -- "$@" "${escaped%_}"
