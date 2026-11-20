@@ -46,6 +46,8 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(result['command'], 'echo fixture')
         self.assertTrue(result['can_unregister'])
         self.assertFalse(result['can_change_mode'])
+        self.assertIsNone(result['resources']['cpu_percent'])
+        self.assertIsNone(result['resources']['gpu']['utilization_percent'])
         sample = self.workspace.request(self.actor, 'host', {'trend': True})
         self.assertEqual(sample['metrics']['cpu_percent'], 17)
         self.assertIn('trend', sample)

@@ -91,11 +91,12 @@ class Workspace:
                 (service_id, operation_actor))]
             protected = db.execute('SELECT 1 FROM service_protection WHERE service_id=?', (service_id,)).fetchone() is not None
             mapped = db.execute("SELECT 1 FROM frp_exposure WHERE service_id=? AND status IN ('starting','running','revoking')", (service_id,)).fetchone() is not None
-        self.controller.observe(service)
+        observation = self.controller.observe(service)
         described = self.controller.describe(service)
         foreground = service.driver == 'process' and not service.existing_system_service
         stopped = described['observation']['status'] in {'stopped', 'failed'} and not described['observation']['stale']
         return {**described, 'node_id': self.node_id, 'operations': operations, 'command': service.spec.get('command'),
+                'resources': self.controller.service_metrics.snapshot(service, observation),
                 'can_edit_details': True, 'can_unregister': not protected and not mapped and (not foreground or stopped),
                 'unregister_reason': '请先撤销此服务的公网映射，再取消登记。' if mapped else '请先停止此程序，再取消登记。' if foreground and not stopped else None,
                 'can_change_mode': not foreground, 'managed': service.managed, 'approval_required': False}

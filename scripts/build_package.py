@@ -146,7 +146,7 @@ def build_package(work: Path, env: dict[str, str]):
             "--collect-all", "uvicorn", "--collect-all", "fido2", "--recursive-copy-metadata", "spearmint-panel"]
     if os.name == "nt":
         args.extend(["--collect-all", "winpty"])
-        for name in ("win32api", "win32security", "win32job", "win32process", "win32pipe", "win32file", "win32con", "win32event", "win32service"):
+        for name in ("win32api", "win32security", "win32job", "win32process", "win32pipe", "win32file", "win32con", "win32event", "win32service", "win32pdh"):
             args.extend(["--hidden-import", name])
     subprocess.run([*args, str(ROOT / "deploy/frozen-entry.py")], check=True, cwd=ROOT, env=env)
     bundle = work / "dist/spearmint"

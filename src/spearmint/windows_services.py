@@ -133,7 +133,8 @@ class WindowsServiceDriver:
                 instance = f"{pid}:{process_start(pid)}"
             except OSError:
                 pass
-        return Observation(phase, instance=instance, pid=pid)
+        return Observation(phase, instance=instance, pid=pid,
+                           shared_process=bool(status['ServiceType'] & scm.SERVICE_WIN32_SHARE_PROCESS))
 
     def register(self, name: str, service: str, *, actor: str = "admin", source: str = "local") -> Service:
         target = service.lower()

@@ -14,6 +14,7 @@ from .peer.policy import dispatch_authorized
 from .peer.grove_service_admin import OPERATION_KEY, operation_origin
 from .peer.operation_policy import audit_execution, operation_result_reason
 from .state import State, audit
+from .service_metrics import ServiceMetrics
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class Controller:
         self.stop_event = Event()
         self.threads: list[Thread] = []
         self.log_slots = {driver: BoundedSemaphore(2) for driver in drivers}
+        self.service_metrics = ServiceMetrics(drivers)
 
     @contextmanager
     def running(self):
@@ -56,7 +58,8 @@ class Controller:
                 thread.start()
                 self.threads.append(thread)
         try:
-            yield
+            with self.service_metrics.running():
+                yield
         finally:
             self.stop_event.set()
             for thread in self.threads:
@@ -258,6 +261,7 @@ class Controller:
         stale = checked is None or time.time() - checked > OBSERVATION_TTL
         data = asdict(observation)
         data.pop("instance")
+        data.pop("shared_process")
         if stale:
             data.update(status="unknown", message="Waiting for a fresh host observation", health=None, pid=0)
         return {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { timestamp } from './api'
 import { useConsole, refreshConsole } from './console-data'
 import { useRemoteCatalog } from './remote-catalog'
@@ -8,10 +8,54 @@ import { GroveServiceSetup } from './remote-service-setup'
 import { type Service, actions as actionNames, serviceDriver } from './services'
 import { groveServiceRegistrationHref, localServiceHref, remoteServiceHref } from './grove-navigation'
 import { useServiceOperation, useWorkspace, workspace, workspaceError, returnRoute, withReturn } from './workspace-api'
-import { Badge, CopyValue, EmptyState, Icon, Loading, Modal, Notice, PageHeading, Panel, StateBadge, Tabs } from './ui'
+import { Badge, bytes, CopyValue, duration, EmptyState, Icon, Loading, Modal, Notice, PageHeading, Panel, StateBadge, Tabs } from './ui'
 
+type ServiceResources = { pid: number | null; sampled_at: number | null; valid_until: number | null; scope: string | null;
+  cpu_percent: number | null; memory_bytes: number | null; uptime_seconds: number | null;
+  gpu: { utilization_percent: number | null; memory_used_bytes: number | null; valid_until?: number | null } }
+type Receipt = { id?: string; action: string; status: string; updated_at?: number; message?: string | null; reason?: string }
 type Detail = Service & { command?: string; managed: boolean; can_edit_details: boolean; can_unregister: boolean;
-  unregister_reason?: string; can_change_mode: boolean; operations: Array<{ id: string; action: string; status: string; updated_at: number; message: string | null }> }
+  unregister_reason?: string; can_change_mode: boolean; resources?: ServiceResources; operations: Array<Receipt & { id: string; updated_at: number }> }
+
+function ServiceUsage({ service, unavailable }: { service: Detail; unavailable: boolean }) {
+  const data = service.resources
+  const [revision, refresh] = useState(0)
+  useEffect(() => {
+    const future = [data?.valid_until, data?.gpu?.valid_until].filter((value): value is number => value != null && value * 1000 > Date.now())
+    if (!future.length) return
+    const timer = setTimeout(() => refresh(value => value + 1), Math.max(0, Math.min(...future) * 1000 - Date.now()) + 1)
+    return () => clearTimeout(timer)
+  }, [data, service.observation.pid, revision])
+  const current = !unavailable && service.observation.status === 'running' && data?.pid === service.observation.pid
+    && data?.valid_until != null && data.valid_until * 1000 > Date.now()
+  const gpuCurrent = current && (data?.gpu?.valid_until === undefined || (data.gpu.valid_until != null && data.gpu.valid_until * 1000 > Date.now()))
+  const shared = data?.scope === 'shared-process'
+  const percent = (value?: number | null) => typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)}%` : '—'
+  return <Panel className="service-runtime-panel"><div className="service-runtime-state">
+    <StateBadge state={service.observation.status} stale={unavailable} />
+    <span>PID <strong>{!unavailable && service.observation.pid > 0 ? service.observation.pid : '—'}</strong></span>
+    {shared && <span className="muted tiny">共享进程占用</span>}
+    <span className="muted tiny service-runtime-time">最近检查 {timestamp(service.observation.checked_at)}</span>
+  </div><dl className="service-usage">
+    <div title="服务进程组占节点全部 CPU 的比例"><dt>CPU</dt><dd>{percent(current ? data?.cpu_percent : undefined)}</dd></div>
+    <div title={shared ? '此服务与其他服务共享宿主进程，显示共享进程的占用' : '服务及其子进程的内存占用'}><dt>内存</dt><dd>{current && data?.memory_bytes != null ? bytes(data.memory_bytes) : '—'}</dd></div>
+    <div><dt>运行时长</dt><dd>{current && data?.uptime_seconds != null ? duration(data.uptime_seconds) : '—'}</dd></div>
+    <div title="服务进程组的 GPU 占用"><dt>GPU</dt><dd>{percent(gpuCurrent ? data?.gpu?.utilization_percent : undefined)}</dd>
+      {gpuCurrent && data?.gpu?.memory_used_bytes != null && <small>显存 {bytes(data.gpu.memory_used_bytes)}</small>}</div>
+  </dl></Panel>
+}
+
+function receiptReason(receipt?: Receipt) {
+  if (receipt?.reason === 'RESTART_BEFORE_DISPATCH') return '面板重启前，这笔操作尚未派发。'
+  if (receipt?.reason === 'PANEL_RESTARTED') return '面板重启，执行结果待确认。'
+  if (receipt?.reason === 'POLICY_CHANGED') return '执行前，所属节点的管理授权已变更。'
+  if (receipt?.reason === 'HOST_ERROR') return '所属节点执行出错。'
+  if (receipt?.reason === 'HOST_TIMEOUT') return '所属节点执行命令超时。'
+  if (receipt?.reason === 'RUNTIME_NOT_READY') return '执行时，服务尚未就绪。'
+  if (receipt?.reason === 'STATE_NOT_REACHED') return '服务未进入请求的运行状态。'
+  if (receipt?.reason === 'OUTCOME_UNCONFIRMED') return '所属节点未能确认执行结果。'
+  return receipt?.reason
+}
 
 export function ServiceWorkspace({ section, segments }: { section?: string; segments: string[] }) {
   const { session, onUnauthorized, local } = useConsole()
@@ -92,7 +136,11 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
   const path = local ? `/services/${id}` : `/peers/${target}/services/${id}`
   const flow = useServiceOperation(path, session, detail.data?.version || 1, () => { detail.reload(); refreshConsole() })
   const current = detail.data, unavailable = !!detail.error || !current || current.observation.stale
-  const blocked = busy || unavailable || flow.tracking
+  const blocked = busy || unavailable || flow.tracking || ['unknown', 'missing', 'starting', 'stopping'].includes(current?.observation.status || 'unknown')
+  const receipt: Receipt | undefined = flow.intent ? { ...flow.intent.operation, action: flow.intent.action,
+    status: flow.intent.operation?.status || 'queued', id: flow.intent.request_id || flow.intent.operation?.id || flow.intent.key } : current?.operations[0]
+  const reasons = [...new Set([flow.intent?.error, receipt?.message, receiptReason(receipt), current?.observation.message].filter(Boolean))]
+  const hasReceipt = !!receipt || reasons.length > 0
   async function mutate(action: string, body: object) {
     if (!current || busy) return
     setBusy(true); setError('')
@@ -114,21 +162,31 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
       {current?.actions.includes('restart') && <button className="btn btn-secondary" disabled={blocked} onClick={() => command('restart')}>重启</button>}
       <button className="btn btn-secondary" onClick={detail.reload}>核对状态</button>
     </PageHeading>
-    <div className="workspace-context"><span>当前面板 <strong>{localName}</strong></span><Icon name="arrow-right" size={15} /><span>目标节点 <strong>{nodeName}</strong></span>{current && <StateBadge state={current.observation.status} stale={unavailable} />}</div>
     {detail.error && <Notice tone="amber">{detail.error}</Notice>}{error && <Notice tone="amber">{error}</Notice>}
     <Tabs label="服务工作区" current={tab} onChange={setTab} items={[{ id: 'overview', label: '概览' }, { id: 'logs', label: '日志' }, { id: 'history', label: '操作记录' }, { id: 'settings', label: '管理设置' }]} />
     {!current && !detail.error && <Loading />}
-    {flow.intent && <Panel title="本次操作"><div className="button-row"><strong>{actionNames[flow.intent.action as keyof typeof actionNames]}</strong><StateBadge state={flow.intent.operation?.status || 'queued'} /><CopyValue value={flow.intent.request_id || flow.intent.key} short /></div>
-      <p className="muted">{flow.intent.error || flow.intent.operation?.message || '请求已受理，正在等待目标节点执行结果。'}</p>
-      {flow.tracking && <div className="button-row"><button className="btn btn-secondary" onClick={() => void flow.query()}>查询原请求</button><button className="btn btn-ghost" onClick={() => { if (confirm('结束结果跟踪？已发出的操作仍可能在目标节点执行。')) flow.clear() }}>结束跟踪</button></div>}
-    </Panel>}
-    {current && tab === 'overview' && <div className="columns-2"><Panel title="状态与结果"><StateBadge state={current.observation.status} stale={unavailable} /><p className="muted">最近检查 {timestamp(current.observation.checked_at)}</p>{current.observation.message && <p>{current.observation.message}</p>}
-      <a className="btn btn-secondary" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={16} />终端与文件</a>
-      <button className="btn btn-ghost" onClick={() => setTab('mapping')}>公网映射</button></Panel><Panel title="服务信息"><dl className="facts"><div><dt>运行方式</dt><dd>{serviceDriver(current)}</dd></div><div><dt>所属节点</dt><dd>{nodeName}</dd></div><div><dt>服务版本</dt><dd>{current.version}</dd></div><div><dt>服务标识</dt><dd><CopyValue value={id} short /></dd></div></dl>
-      {current.command && <details><summary>查看已登记的启动命令</summary><pre className="command-block">{current.command}</pre></details>}</Panel></div>}
+    {current && tab === 'overview' && <div className="stack service-overview">
+      <ServiceUsage service={current} unavailable={unavailable} />
+      <div className={`service-overview-content${hasReceipt ? ' has-receipt' : ''}`}>
+        <ServiceLogs path={path} serviceId={id} onUnauthorized={onUnauthorized} remote={!local}
+          active={!unavailable && current.logs_available !== false} preview
+          fullLogsHref={withReturn(local ? localServiceHref(id, 'logs') : remoteServiceHref(target, id, true))} />
+        {hasReceipt && <Panel title="回执与原因" className="service-receipt">
+          {receipt && <><div className="button-row"><strong>{actionNames[receipt.action as keyof typeof actionNames] || receipt.action}</strong><StateBadge state={receipt.status} /></div>
+            {receipt.updated_at != null && <p className="muted tiny">{timestamp(receipt.updated_at)}</p>}
+            {receipt.id && <CopyValue value={receipt.id} short />}</>}
+          {reasons.map(reason => <p key={reason}>{reason}</p>)}
+          {flow.tracking && <div className="button-row"><button className="btn btn-secondary btn-small" onClick={() => void flow.query()}>查询原请求</button>
+            <button className="btn btn-ghost btn-small" onClick={() => { if (confirm('结束结果跟踪？已发出的操作仍可能在目标节点执行。')) flow.clear() }}>结束跟踪</button></div>}
+        </Panel>}
+      </div>
+    </div>}
     {current && tab === 'logs' && <ServiceLogs path={path} serviceId={id} onUnauthorized={onUnauthorized} remote={!local} active={!unavailable && current.logs_available !== false} />}
     {current && tab === 'history' && <Panel title="目标节点最近的操作">{current.operations.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>动作</th><th>结果</th><th>时间</th><th>说明</th></tr></thead><tbody>{current.operations.map(item => <tr key={item.id}><td>{actionNames[item.action as keyof typeof actionNames]}</td><td><StateBadge state={item.status} /></td><td>{timestamp(item.updated_at)}</td><td>{item.message}</td></tr>)}</tbody></table></div> : <EmptyState title="暂无操作记录" />}</Panel>}
     {current && tab === 'settings' && <div className="stack"><Panel title="登记信息" action={<button className="btn btn-secondary" disabled={blocked || !current.can_edit_details} onClick={() => setEditing(true)}>编辑服务信息</button>}><p>{current.name}</p><p className="muted">所属节点：{nodeName}。修改在当前面板提交，由目标节点执行。</p></Panel>
+      <Panel title="运行配置"><dl className="facts"><div><dt>服务标识</dt><dd><CopyValue value={id} short /></dd></div><div><dt>配置修订</dt><dd>{current.version}</dd></div></dl>
+        {current.command && <details><summary>查看已登记的启动命令</summary><pre className="command-block">{current.command}</pre></details>}
+        <div className="button-row"><a className="btn btn-secondary" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={16} />终端与文件</a><button className="btn btn-ghost" onClick={() => setTab('mapping')}>公网映射</button></div></Panel>
       <Panel title="管理方式"><Badge>{current.actions.length ? '托管启停' : '观察模式'}</Badge>{current.can_change_mode && <button className="btn btn-secondary" disabled={blocked} onClick={() => void mutate('mode', { mode: current.actions.length ? 'observe' : 'manage' })}>{current.actions.length ? '改为观察模式' : '启用托管'}</button>}</Panel>
       <Panel title="取消登记"><p className="muted">移除 Spearmint 中的登记，不删除目标机上的程序和数据。</p>{current.unregister_reason && <p>{current.unregister_reason}</p>}<button className="btn btn-danger" disabled={blocked || !current.can_unregister} onClick={() => setConfirmation('remove')}>取消登记</button></Panel>
     </div>}

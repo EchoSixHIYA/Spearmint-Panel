@@ -28,6 +28,7 @@ class Observation:
     health: str | None = None
     instance: str | None = None
     pid: int = 0
+    shared_process: bool = False
 
 
 @dataclass(frozen=True)

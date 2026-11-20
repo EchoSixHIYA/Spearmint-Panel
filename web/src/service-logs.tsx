@@ -5,20 +5,21 @@ import { directoryQuery, directoryScope } from './remote-directory'
 import { Icon, Notice, Panel } from './ui'
 
 type LogSnapshot = { text: string; truncated: boolean; source: string; checked_at: number }
-const lineCounts = [50, 200, 500] as const
+const lineCounts = [10, 50, 200, 500] as const
 type LineCount = typeof lineCounts[number]
 
 export function ServiceLogs({ path, serviceId, onUnauthorized, active = true, remote = false, paused = false, connectionId,
-  directoryGeneration, onRouteLost }: {
+  directoryGeneration, onRouteLost, preview = false, fullLogsHref }: {
   path: string; serviceId: string; onUnauthorized: () => void; active?: boolean; remote?: boolean; connectionId?: string
   paused?: boolean; directoryGeneration?: number
+  preview?: boolean; fullLogsHref?: string
   onRouteLost?: (scope: string) => void
 }) {
   const scope = directoryScope(connectionId, directoryGeneration)
   const [sample, setSample] = useState<{ logs: LogSnapshot; scope?: string; path: string; tail: LineCount }>()
   const [busy, setBusy] = useState(false)
-  const [auto, setAuto] = useState(false)
-  const [tail, setTail] = useState<LineCount>(200)
+  const [auto, setAuto] = useState(preview)
+  const [tail, setTail] = useState<LineCount>(preview ? 10 : 200)
   const [query, setQuery] = useState('')
   const [error, setError] = useState('')
   const request = useRef<AbortController>(null)
@@ -79,9 +80,9 @@ export function ServiceLogs({ path, serviceId, onUnauthorized, active = true, re
 
   useEffect(() => {
     if (!canRead || !auto) return
-    const timer = setInterval(() => { if (!document.hidden) void read() }, remote ? 10000 : 5000)
+    const timer = setInterval(() => { if (!document.hidden) void read() }, preview ? (remote ? 5000 : 2000) : remote ? 10000 : 5000)
     return () => clearInterval(timer)
-  }, [canRead, auto, read, remote])
+  }, [canRead, auto, read, remote, preview])
 
   function download() {
     if (!logs) return
@@ -94,8 +95,9 @@ export function ServiceLogs({ path, serviceId, onUnauthorized, active = true, re
   }
 
   const match = query.toLowerCase()
+  const latest = logs && (preview ? logs.text.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n').slice(-10).join('\n') : logs.text)
   const text = logs && (match ? logs.text.split('\n').filter((line) => line.toLowerCase().includes(match)).join('\n')
-    || '没有匹配的日志。' : logs.text || '当前还没有日志。')
+    || '没有匹配的日志。' : latest || '当前还没有日志。')
   function jumpToLatest() {
     followLatest.current = true
     const element = terminal.current
@@ -105,20 +107,21 @@ export function ServiceLogs({ path, serviceId, onUnauthorized, active = true, re
     if (logs && followLatest.current) jumpToLatest()
   }, [logs, text])
 
-  if (remote && !active) return null
+  if (remote && !active && !preview) return null
 
-  return <div hidden={!active}><Panel className={remote ? 'logs-panel remote-logs-panel' : 'logs-panel'}
-    title={remote ? '远程服务日志' : '运行日志'} action={
+  return <div hidden={!active && !preview}><Panel className={`${remote ? 'logs-panel remote-logs-panel' : 'logs-panel'}${preview ? ' service-log-preview' : ''}`}
+    title={preview ? '最近 10 条日志' : remote ? '远程服务日志' : '运行日志'} action={
     <div className="button-row">
       <label className="inline-checkbox"><input type="checkbox" checked={auto} onChange={(event) => setAuto(event.target.checked)} />自动刷新</label>
       <button className="btn btn-secondary btn-small" disabled={!canRead || busy} onClick={() => void read()}>
         <Icon name="refresh" size={14} />{busy ? '读取中…' : '刷新'}
       </button>
-      <button className="btn btn-secondary btn-small" disabled={!logs} onClick={download}>
+      {!preview && <button className="btn btn-secondary btn-small" disabled={!logs} onClick={download}>
         <Icon name="download" size={14} />下载
-      </button>
+      </button>}
+      {preview && fullLogsHref && <a className="panel-link" href={fullLogsHref}>完整日志<Icon name="arrow-up-right" size={14} /></a>}
     </div>}>
-    <div className="log-filters">
+    {!preview && <div className="log-filters">
       <label className="search-box log-search"><Icon name="search" size={16} />
         <input placeholder="在日志中筛选关键词…" aria-label="筛选日志" value={query} onChange={(event) => setQuery(event.target.value)} />
       </label>
@@ -133,10 +136,10 @@ export function ServiceLogs({ path, serviceId, onUnauthorized, active = true, re
         {lineCounts.map((count) => <option key={count} value={count}>最近 {count} 行</option>)}
       </select>
       <button className="btn btn-secondary btn-small" disabled={!logs} onClick={jumpToLatest}>跳到最新</button>
-    </div>
+    </div>}
     {!paused && error && <Notice tone="amber">{error}</Notice>}
-    <div className="log-caption"><span>{logs?.truncated ? '部分日志已截断' : '日志快照'}</span>
-      <span>{logs ? timestamp(logs.checked_at) : '等待日志'}</span></div>
+    {!preview && <div className="log-caption"><span>{logs?.truncated ? '部分日志已截断' : '日志快照'}</span>
+      <span>{logs ? timestamp(logs.checked_at) : '等待日志'}</span></div>}
     <pre className="log-terminal" tabIndex={0} ref={terminal} onScroll={({ currentTarget }) => {
       if (logs) followLatest.current = currentTarget.scrollHeight - currentTarget.clientHeight - currentTarget.scrollTop <= 8
     }}>{text ?? (paused ? '等待服务目录同步。' : busy ? '正在读取日志…' : '日志暂不可用。')}</pre>
