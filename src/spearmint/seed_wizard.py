@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import json
 import logging
+import sqlite3
 from pathlib import Path
 from shlex import join
 from subprocess import CalledProcessError, SubprocessError
@@ -238,7 +239,9 @@ class SeedWizard:
             except (PeerError, OSError, SSHException, SubprocessError, ValueError, StateError, TypeError, KeyError) as error:
                 with self.lock:
                     job.failed_stage = job.status
-                    job.failure_detail = error.detail if isinstance(error, seed_ssh.WindowsSeedFailure) else (job.failure_detail if isinstance(error, PeerError) and error.code == 'SEED_HOST_AUTHORIZATION' else None)
+                    job.failure_detail = error.detail if isinstance(error, (seed_ssh.WindowsSeedFailure, seed_ssh.SystemSeedFailure)) else (job.failure_detail if isinstance(error, PeerError) and error.code == 'SEED_HOST_AUTHORIZATION' else None)
+                    if isinstance(error, seed_ssh.SystemSeedFailure):
+                        job.failure_phase = 'account' if error.code == 'SEED_LINUX_ACCOUNT' else 'system'
                     if isinstance(error, SubprocessError):
                         job.failure_phase, job.failure_exit, job.failure_detail = seed_transport.diagnostic(error)
                     if job.status == 'reading' and job.directory is not None:
@@ -249,6 +252,12 @@ class SeedWizard:
                     job.error = error.code if isinstance(error, PeerError) else ('SEED_INSTALL' if job.status in ('installing', 'admitting') else 'SEED_SSH')
                     job.status = 'uncertain' if job.node or isinstance(error, seed_transport.UnconfirmedInstall) else 'failed'
                     job.close()
+                    try:
+                        with self.state.connect(write=True) as db:
+                            audit(db, job.actor, job.owner[0], 'seed.wizard.failed', job.node or job.host,
+                                  reason=' | '.join(filter(None, [job.error, job.failed_stage, job.failure_detail]))[:2048])
+                    except (OSError, StateError, sqlite3.Error):
+                        logger.warning('Unable to store the SSH seed failure receipt')
         self.workers.submit(perform)
 
     def probe(self, job, loop):
@@ -369,6 +378,9 @@ class SeedWizard:
         windows = job.platform == 'windows-amd64'
         path = seed_ssh.path_type(job.platform)(job.install)
         if not windows:
+            job.connection.prepare_linux(job.install, job.realm)
+            if getattr(job.connection, 'linux_user', None):
+                job.username = job.connection.linux_user
             if host_services:
                 if job.package.metadata.get('host_services') != 1:
                     raise PeerError('SEED_HOST_PACKAGE', '请使用已发布且支持主机服务管理的部署包，再启用此安装选项。')
@@ -383,7 +395,7 @@ class SeedWizard:
                     host_password = ''
             else:
                 job.host_password = ''
-            job.connection.writable(job.platform, job.current)
+            job.connection.writable(job.platform, str(path.parent) if getattr(job.connection, 'linux_root', False) else job.current)
             try:
                 job.connection.answer(join(['sh', '-c', LINUX_SERVICE]))
             except CalledProcessError:

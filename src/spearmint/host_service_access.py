@@ -198,9 +198,14 @@ def ssh_enable(connection, username: str, password: str = ''):
     script = bootstrap_source(username)
     command = ['/usr/bin/python3', '-I', '-B', '-c', script]
     try:
-        output = connection.answer(join(['/usr/bin/env', 'LC_ALL=C', '/usr/bin/sudo', '-n', '--', *command]), timeout=65)
+        if getattr(connection, 'linux_root', False) and getattr(connection, 'linux_user', None):
+            output = connection.root_answer(join(command), timeout=65)
+        else:
+            output = connection.answer(join(['/usr/bin/env', 'LC_ALL=C', '/usr/bin/sudo', '-n', '--', *command]), timeout=65)
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or b'').decode('utf-8', 'replace').lower()
+        if getattr(connection, 'linux_root', False) and getattr(connection, 'linux_user', None):
+            raise HostError('主机管理服务未能安装：' + detail[-800:]) from error
         if password and 'password' not in detail and 'terminal is required' not in detail:
             raise HostError('主机管理服务未能安装：' + detail[-800:]) from error
         if not password or '\n' in password or '\r' in password:

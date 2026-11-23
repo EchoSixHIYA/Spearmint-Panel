@@ -131,6 +131,8 @@ def approve(state: State, actor: auth.Actor, subject: str, origin: str, *, befor
 
 
 def record_ballot(db, state, subject, origin, envelope, anchor, actor, source):
+    from . import grove_availability
+    grove_availability.require_current(db)
     eligible(db, subject, origin)
     prior = db.execute('SELECT node_id,origin,ballot FROM grove_member_admission_vote WHERE node_id=? OR origin=?',
                        (subject, origin)).fetchall()

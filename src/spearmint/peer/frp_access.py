@@ -34,7 +34,7 @@ def request_id(actor: Actor, key: str) -> str:
 
 def require_grove(db, local_id: str, pair: Pair) -> None:
     require_pair(db, pair)
-    trust = trusted_members(db, local_id)
+    trust = trusted_members(db, local_id, operational=True)
     if pair.legacy or trust is None or pair.node_id not in trust.origins:
         raise PeerError('DENIED', 'This peer is not an active Grove member')
 

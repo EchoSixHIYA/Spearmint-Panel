@@ -209,19 +209,23 @@ def apply_verifiers(state: State, envelope: dict, standby: dict | None = None, r
         return 'applied'
 
 
-def usable_replica(db, now: int):
+def usable_replica(db, now: int, *, operational: bool = False):
+    if operational:
+        from . import grove_availability
+        if not grove_availability.ordinary(db, now):
+            return None
     return db.execute('''SELECT coalesce(c.lease_until,max(replica.expires_at,replica.standby_lease_until)) AS expires_at
                          FROM grove_login_replica replica JOIN grove_realm realm
                          ON realm.sequence=replica.sequence AND realm.is_issuer=0 AND realm.frozen=''
                          LEFT JOIN grove_login_continuity c ON c.singleton=1
-                         WHERE realm.issuer_paused=0 AND coalesce(c.lease_until,max(replica.expires_at,replica.standby_lease_until))>? AND EXISTS (
+                         WHERE realm.issuer_paused=0 AND (? OR coalesce(c.lease_until,max(replica.expires_at,replica.standby_lease_until))>?) AND EXISTS (
                              SELECT 1 FROM grove_member m JOIN node n ON m.node_id=n.node_id WHERE m.enabled=1
-                         ) AND (c.singleton IS NULL OR c.sequence=replica.sequence)''', (now,)).fetchone()
+                         ) AND (c.singleton IS NULL OR c.sequence=replica.sequence)''', (operational, now)).fetchone()
 
 
 def available(state: State) -> bool:
     with state.connect(read_only=True) as db:
-        return usable_replica(db, int(time.time())) is not None
+        return usable_replica(db, int(time.time()), operational=True) is not None
 
 
 def password_verifier(state: State, user_id: str, sealed: bytes) -> str:
@@ -231,7 +235,7 @@ def password_verifier(state: State, user_id: str, sealed: bytes) -> str:
 
 def login(state: State, username: str, password: str, code: str | None, address: str) -> tuple[str, str] | None:
     def read_verifier(db):
-        if usable_replica(db, int(time.time())) is None:
+        if usable_replica(db, int(time.time()), operational=True) is None:
             raise PeerError('OFFLINE', 'This member has no current Grove login verifiers')
         return db.execute('''SELECT v.*, p.change_digest, p.document AS password_change, coalesce(r.role,v.role) AS effective_role
                              FROM grove_login_verifier v LEFT JOIN grove_login_password p ON p.user_id=v.user_id

@@ -92,12 +92,12 @@ class UpdateCoordinator:
 
     def members(self) -> list[str]:
         with self.state.connect() as db:
-            trust = trusted_members(db, self.local_id)
+            trust = trusted_members(db, self.local_id, operational=True)
             return sorted(trust.origins) if trust else []
 
     def identity(self, actor) -> list:
         with self.state.connect() as db:
-            trust = trusted_members(db, self.local_id)
+            trust = trusted_members(db, self.local_id, operational=True)
             if trust is None:
                 raise PeerError('UNAVAILABLE', 'The Grove member directory is not current')
             account = account_admin(db, actor)
@@ -121,7 +121,7 @@ class UpdateCoordinator:
                     require_pair(db, peer)
                     if peer.legacy or not credentials_current(peer) or quarantine.contains(db, peer.node_id):
                         raise PeerError('DENIED', 'The update origin requires a current Grove Mesh pairing')
-                trust = trusted_members(db, self.local_id)
+                trust = trusted_members(db, self.local_id, operational=True)
                 if trust is None:
                     raise PeerError('GROVE_DIRECTORY_PENDING', 'Waiting for a current Grove directory')
                 identity = parse_identity(offer.identity)

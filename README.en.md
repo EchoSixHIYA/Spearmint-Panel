@@ -27,6 +27,14 @@ The console has six areas: overview, services, nodes, operations, identity, and 
 | Quick SSH | Select a node in the topology to open an xterm.js terminal over the existing Mesh, browse and transfer files, and edit text. Commands run as the target panel's OS account. |
 | Maintenance | View host resources and operation history, and back up or restore node state with the CLI. |
 
+## Partitions and offline operation
+
+Existing Grove accounts can sign in and manage reachable nodes using their last confirmed permissions for up to 12 hours after the last valid identity confirmation. Sign-ins and ordinary operations do not extend this deadline; sessions retain their own idle and maximum lifetimes. The console shows the offline deadline. Account suspension, password and role changes, and member admission require a majority of the original voter roster, never a majority recalculated from nodes visible in one partition.
+
+After reconnecting, members synchronize accounts and permissions before returning to normal operation. Suspended accounts lose their sessions. Identity synchronization does not replay failed service requests. A majority of voters must run the new protocol before new identity changes can be committed.
+
+Linux seeding over root SSH prepares a dedicated ordinary runtime account, a systemd user manager and boot persistence, then installs and runs the panel as that account. Directory selection starts at /opt; private parent directories such as /root are not made accessible. Seeding with an existing ordinary account remains available.
+
 ## Downloads
 
 Choose a platform in [GitHub Releases](https://github.com/EchoSixHIYA/Spearmint-Panel/releases). Each native package includes the panel, Python runtime, and web UI.

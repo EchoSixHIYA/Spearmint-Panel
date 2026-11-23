@@ -248,6 +248,11 @@ def require_actor(request: Request) -> auth.Actor:
     actor = auth.actor_for(request.app.state.store, request.cookies.get(auth.COOKIE, ""), address_of(request))
     if actor is None:
         raise HTTPException(401, "Sign in required")
+    if actor.grove:
+        from . import grove_availability
+        with request.app.state.store.connect(read_only=True) as db:
+            if grove_availability.status(db)['mode'] == 'synchronizing':
+                raise PeerError('GROVE_SYNCHRONIZING', '正在同步恢复连接后的 Grove 权限，请稍后重试。')
     return actor
 
 
@@ -493,7 +498,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             "DEPLOY_FAILED": 409,
             "TERMINAL_CLOSED": 409, "TERMINAL_IO": 503, "FILE_UNAVAILABLE": 409,
             "REAUTHENTICATION_REQUIRED": 403, "APPROVAL_VERSION_REQUIRED": 409, "POLICY_CONFLICT": 409,
-            "GROVE_INVITATION_EXPIRED": 410,
+            "GROVE_INVITATION_EXPIRED": 410, 'GROVE_QUORUM_REQUIRED': 409, 'GROVE_SYNCHRONIZING': 503,
         }.get(error.code, 503)
         return JSONResponse({"detail": str(error), "code": error.code}, status_code=status)
 

@@ -41,6 +41,8 @@ def expected_role(profile: dict, generation: int) -> str:
 
 def approve(state: State, actor: auth.Actor, subject: str, role: str) -> tuple[dict, list[str]]:
     with state.connect(write=True) as db:
+        from . import grove_availability
+        grove_availability.require_current(db)
         now = int(time.time())
         session = auth.active_session(db, actor.token_hash, now)
         if (session is None or session['id'] != actor.account_id or not session['grove_replica'] or session['role'] != ADMIN):

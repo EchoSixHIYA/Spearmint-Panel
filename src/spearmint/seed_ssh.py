@@ -23,6 +23,16 @@ from .peer.protocol import PeerError
 FINGERPRINT = re.compile(r'SHA256:[A-Za-z0-9+/]{43}')
 WINDOWS_PROBE = 'echo %PROCESSOR_ARCHITECTURE% %PROCESSOR_ARCHITEW6432%'
 WINDOWS_RECEIPT = b'SPEARMINT_WINDOWS_SEED='
+LINUX_PROBE = r'''printf 'SPMT_OS=%s\n' "$(uname -s 2>/dev/null)";
+printf 'SPMT_ARCH=%s\n' "$(uname -m 2>/dev/null)";
+printf 'SPMT_HOME=%s\n' "$HOME";
+printf 'SPMT_UID=%s\n' "$(id -u 2>/dev/null)"'''
+
+
+class SystemSeedFailure(PeerError):
+    def __init__(self, code: str, detail: str):
+        super().__init__(code, 'The SSH system probe did not confirm a supported installation account')
+        self.detail = detail
 
 
 class WindowsSeedFailure(PeerError):
@@ -67,6 +77,8 @@ def authenticate(connection: paramiko.Transport, username: str, secret: str, key
 class Connection:
     def __init__(self, host: str, port: int):
         self.windows_stage: tuple[str, PureWindowsPath] | None = None
+        self.linux_root = False
+        self.linux_user = None
         self.socket = socket.create_connection((host, port), timeout=6)
         self.transport = paramiko.Transport(self.socket)
         self.transport.channel_timeout = 8
@@ -105,7 +117,10 @@ class Connection:
         self.transport.close()
         self.socket.close()
 
-    def run(self, command, source, output, timeout: float, *, limit: int = 128 * 1024):
+    def run(self, command, source, output, timeout: float, *, limit: int = 128 * 1024, privileged: bool = False):
+        if getattr(self, 'linux_user', None) and not privileged:
+            from .seed_linux import command as user_command
+            command = user_command(self.linux_user, self.linux_home, self.linux_uid, command)
         deadline = monotonic() + timeout
         with self.transport.open_session(timeout=min(timeout, 6)) as channel:
             channel.settimeout(timeout)
@@ -157,17 +172,49 @@ class Connection:
         self.run(command, BytesIO(input_data), output, timeout)
         return output.getvalue().strip()
 
+    def root_answer(self, command, input_data: bytes = b'', *, timeout: float = 65) -> bytes:
+        if not getattr(self, 'linux_root', False):
+            raise PeerError('DENIED', 'Root SSH preparation is unavailable')
+        output = BytesIO()
+        self.run(command, BytesIO(input_data), output, timeout, privileged=True)
+        return output.getvalue().strip()
+
+    def prepare_linux(self, program: str, realm: str):
+        if not getattr(self, 'linux_root', False):
+            return
+        from .seed_linux import PREPARE, account_for
+        account, home = account_for(realm)
+        try:
+            result = self.root_answer(join(['sh', '-c', PREPARE, 'seed', account, home,
+                                          str(PurePosixPath(program).parent)]))
+        except CalledProcessError as error:
+            detail = 'root SSH runtime preparation failed; exit=' + str(error.returncode)
+            from .seed_transport import diagnostic
+            detail += '; ' + diagnostic(error)[2][-1000:]
+            if error.returncode == 46:
+                detail += '; choose /opt or a directory accessible to the dedicated runtime account'
+            raise SystemSeedFailure('SEED_LINUX_ACCOUNT', detail) from error
+        lines = [line.removeprefix(b'SPMT_RUNNER_UID=') for line in result.splitlines() if line.startswith(b'SPMT_RUNNER_UID=')]
+        if len(lines) != 1 or not lines[0].isdigit() or int(lines[0]) == 0:
+            raise SystemSeedFailure('SEED_LINUX_ACCOUNT', 'The dedicated runtime account did not return a non-root UID')
+        self.linux_user, self.linux_home, self.linux_uid = account, home, int(lines[0])
+
     def system(self):
         try:
-            lines = self.answer('uname -s; uname -m; printf "%s\n" "$HOME"; id -u').decode().splitlines()
-        except (CalledProcessError, UnicodeError):
+            lines = self.answer(LINUX_PROBE).decode('utf-8', errors='replace').splitlines()
+        except CalledProcessError:
             lines = []
-        if len(lines) == 4 and lines[0] == 'Linux':
-            if lines[3] == '0':
-                raise PeerError('SEED_SYSTEM', 'Use the dedicated non-root account for the systemd user service')
-            target = {'x86_64': 'linux-amd64', 'aarch64': 'linux-arm64'}.get(lines[1])
+        fields = dict(line.split('=', 1) for line in lines if re.match(r'^SPMT_(OS|ARCH|HOME|UID)=', line))
+        if fields.get('SPMT_OS') == 'Linux':
+            machine, uid, home = fields.get('SPMT_ARCH', ''), fields.get('SPMT_UID', ''), fields.get('SPMT_HOME', '')
+            detail = f'system=Linux; architecture={machine[:40]}; uid={uid[:12]}'
+            if not uid.isdigit() or not PurePosixPath(home).is_absolute():
+                raise SystemSeedFailure('SEED_SYSTEM_PROBE', detail)
+            target = {'x86_64': 'linux-amd64', 'amd64': 'linux-amd64', 'aarch64': 'linux-arm64', 'arm64': 'linux-arm64'}.get(machine)
             if target:
-                return target, lines[2]
+                self.linux_root = uid == '0'
+                return target, '/opt' if self.linux_root else home
+            raise SystemSeedFailure('SEED_SYSTEM_ARCH', detail)
         else:
             try:
                 architectures = self.answer(cmd(WINDOWS_PROBE)).split()
@@ -175,7 +222,7 @@ class Connection:
                 architectures = []
             if b'AMD64' in architectures and b'ARM64' not in architectures:
                 return 'windows-amd64', ''
-        raise PeerError('SEED_SYSTEM', 'This SSH host does not have a supported Spearmint platform')
+        raise SystemSeedFailure('SEED_SYSTEM_PROBE', 'The SSH probe returned neither Linux system fields nor a Windows AMD64 platform')
 
     def prepare_windows(self, package):
         name = 'spearmint-seed-' + secrets.token_hex(16)

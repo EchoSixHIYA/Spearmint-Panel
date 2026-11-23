@@ -105,6 +105,7 @@ class PeerManager:
         self.adaptive = False
         self.scheduler: Neighbors | None = None
         self.neighbor_lost: Callable[[Neighbor], None] | None = None
+        self.neighbor_ready: Callable[[Neighbor], None] | None = None
         self.listener_error: str | None = None
         self.handshakes = 0
         self.peak_handshakes = 0
@@ -196,7 +197,7 @@ class PeerManager:
                     return pair
             if (self.grove_endpoints is not None and not pair.legacy and pair.source_ip is None
                     and not db.execute('SELECT 1 FROM peer_network WHERE node_id=?', (node_id,)).fetchone()):
-                trust = trusted_members(db, self.local_id)
+                trust = trusted_members(db, self.local_id, operational=True, transport=True)
                 origin = trust.origins.get(node_id) if trust else None
                 if grove_address is not None and origin is not None:
                     binding = self.grove_endpoints.connection_address(origin, pair)
@@ -219,7 +220,7 @@ class PeerManager:
                 allowed = member_set(db, profile["mesh_id"])
                 if allowed is not None:
                     pairs = {key: pair if key in allowed else replace(pair, enabled=False) for key, pair in pairs.items()}
-            trust = trusted_members(db, self.local_id) if self.grove_endpoints is not None else None
+            trust = trusted_members(db, self.local_id, operational=True, transport=True) if self.grove_endpoints is not None else None
             explicit_networks = {row['node_id'] for row in db.execute('SELECT DISTINCT node_id FROM peer_network')} if trust else set()
             automatic = {node for node, pair in pairs.items() if trust and node in trust.origins and pair.enabled
                          and not pair.legacy and pair.source_ip is None and node not in explicit_networks}
@@ -459,6 +460,8 @@ class PeerManager:
         if previous:
             previous.session.writer.transport.abort()
         logger.info("Peer %s online (%s)", node, generation)
+        if self.neighbor_ready is not None:
+            self.neighbor_ready(neighbor)
         try:
             await session.run()
         finally:

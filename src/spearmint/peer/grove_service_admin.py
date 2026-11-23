@@ -21,7 +21,7 @@ GROVE_REQUEST = "request_key GLOB 'grove-admin:*' AND substr(request_key,-32)=?"
 
 def require_member(db, local_id: str, pair: Pair):
     require_pair(db, pair)
-    members = trusted_members(db, local_id)
+    members = trusted_members(db, local_id, operational=True)
     if (pair.legacy or not credentials_current(pair) or quarantine.contains(db, pair.node_id)
             or members is None or pair.node_id not in members.origins):
         raise PeerError('DENIED', 'Service setup requires an active Grove Mesh peer')
@@ -52,7 +52,7 @@ def admin_revision(db, member_realm: str, user_id: str) -> list:
 def source_identity(state, local_id: str, pair: Pair | None, actor: auth.Actor) -> list:
     with state.connect() as db:
         db.execute('BEGIN')
-        members = require_member(db, local_id, pair) if pair else trusted_members(db, local_id)
+        members = require_member(db, local_id, pair) if pair else trusted_members(db, local_id, operational=True)
         if members is None:
             raise PeerError('OFFLINE', 'This panel is waiting for a current Grove directory')
         session = account_admin(db, actor)
@@ -74,7 +74,7 @@ def parse_identity(identity) -> list:
 
 def require_admin_identity(db, local_id: str, pair: Pair | None, identity) -> list:
     identity = parse_identity(identity)
-    members = require_member(db, local_id, pair) if pair else trusted_members(db, local_id)
+    members = require_member(db, local_id, pair) if pair else trusted_members(db, local_id, operational=True)
     if members is None:
         raise PeerError('OFFLINE', 'This panel is waiting for a current Grove directory')
     if identity != admin_revision(db, members.realm_id, identity[1]):

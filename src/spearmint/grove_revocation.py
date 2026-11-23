@@ -28,6 +28,8 @@ def current_context(db, requester: str | None = None) -> tuple[str, dict, list[d
 
 
 def validate_document(document: dict, digest: str, anchor: dict, users: list[dict]) -> str:
+    from .grove_identity_changes import envelope
+    document = envelope(document)
     try:
         raw = json.loads(parse_b64(document['record'], 1024))
         public = parse_b64(raw['public_key'], 32)
@@ -54,6 +56,8 @@ def store(db, document: dict, digest: str, subject: str, actor: str, source: str
 
 def issue(state: State, actor: auth.Actor, user_id: str) -> tuple[dict, list[str]]:
     with state.connect(write=True) as db:
+        from . import grove_availability
+        grove_availability.require_current(db)
         now = int(time.time())
         session = auth.active_session(db, actor.token_hash, now)
         if (session is None or session['id'] != actor.account_id or session['grove_user'] is None
@@ -72,7 +76,6 @@ def issue(state: State, actor: auth.Actor, user_id: str) -> tuple[dict, list[str
         document = grove.signed(KIND, {'anchor': digest, 'user_id': user_id,
                                      'public_key': wire_b64(key.public_key().public_bytes_raw())}, key)
         subject = validate_document(document, digest, anchor, users)
-        store(db, document, digest, subject, actor.operation_actor, actor.address)
         return document, anchor['voters']
 
 
@@ -83,5 +86,8 @@ def apply(state: State, documents: list[dict], source: str, authorize: Callable 
         if authorize is not None:
             authorize(db)
         digest, anchor, users = current_context(db, source)
+        from .grove_identity_changes import verify
+        for document in documents:
+            verify('revocation', document, digest, anchor, users)
         return sum(store(db, document, digest, validate_document(document, digest, anchor, users), 'peer', source)
                    for document in documents)

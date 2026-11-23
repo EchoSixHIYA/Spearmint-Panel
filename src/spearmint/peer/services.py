@@ -15,7 +15,7 @@ from cryptography.exceptions import InvalidSignature
 from pydantic import ValidationError
 
 from ..auth import Actor
-from .. import grove, grove_admission, grove_continuity, grove_login, grove_metadata, grove_password, grove_revocation, grove_roles, grove_web_join, seed_admission
+from .. import auth, grove, grove_admission, grove_availability, grove_continuity, grove_identity_changes, grove_login, grove_metadata, grove_password, grove_revocation, grove_roles, grove_web_join, seed_admission
 from ..build_info import (DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_HOST_METHOD, DEPLOYMENT_METHOD,
                           DEPLOYMENT_PACKAGE_METHOD, DEPLOYMENT_WEB_METHOD, DeploymentStatus)
 from ..catalog import Service, get_service
@@ -156,6 +156,7 @@ class PeerServices:
         self.manager.adaptive = route_mode == 'adaptive'
         self.manager.control_handler = self.mesh_control
         self.manager.neighbor_lost = self.relay.link_lost
+        self.manager.neighbor_ready = self.grove_neighbor_ready
         self.manager.routing_status = self.routing_status
         self.operations = PeerOperations(state, local_id, name, controller)
         self.outbound = OutboundOperations(state, local_id)
@@ -300,6 +301,17 @@ class PeerServices:
 
     def target_lock(self, node: str) -> asyncio.Lock:
         return self.target_locks.setdefault(node, asyncio.Lock())
+
+    def grove_neighbor_ready(self, neighbor: Neighbor) -> None:
+        self.grove_sync_requested.set()
+        try:
+            with self.state.connect(read_only=True) as db:
+                current = grove_continuity.read_anchor(db)
+                if (current and neighbor.pair.node_id in current[1]['voters']
+                        and grove_availability.status(db, check_sync=False)['mode'] == 'offline'):
+                    grove_availability.synchronize(self.state, 'reconnect', True)
+        except (PeerError, ValueError, OSError, sqlite3.Error):
+            logger.debug('Grove reconnect synchronization is pending')
 
     def mark_directory_ready(self, node: str, connection: Session) -> None:
         if self.ready.get(node) is not connection:
@@ -446,6 +458,8 @@ class PeerServices:
             return await self.work(self.grove_operator_revocations, pair, params, rpc=True)
         if method == grove_password.APPLY:
             return await self.work(self.grove_password_change, pair, params, rpc=True)
+        if method == grove_identity_changes.METHOD:
+            return await self.work(self.grove_identity_approval, pair, params, rpc=True)
         if method in {grove_roles.BALLOT_METHOD, grove_roles.GET_METHOD, grove_roles.APPLY_METHOD}:
             return await self.work(self.grove_role_rpc, pair, method, params, rpc=True)
         if method in {grove_admission.BALLOT, grove_admission.GET, grove_admission.APPLY, grove_admission.JOIN}:
@@ -528,7 +542,7 @@ class PeerServices:
         with self.state.connect() as db:
             db.execute('BEGIN')
             require_pair(db, pair)
-            trust = trusted_members(db, self.local_id)
+            trust = trusted_members(db, self.local_id, operational=True, transport=True)
             if pair.legacy or trust is None or pair.node_id not in trust.origins:
                 raise PeerError('DENIED', 'This peer is not an active Grove Mesh member')
             return trust.realm_id
@@ -643,6 +657,8 @@ class PeerServices:
 
     async def revoke_grove_operator(self, actor: Actor, user_id: str) -> dict:
         document, voters = await self.work(grove_revocation.issue, self.state, actor, user_id)
+        document = await self.approve_identity_change('revocation', document, actor, voters)
+        await self.work(grove_revocation.apply, self.state, [document], self.local_id)
         replies = await asyncio.gather(*(self.call(node, grove_revocation.APPLY, {'revocation': document}, diagnostic=True)
                                        for node in voters if node != self.local_id), return_exceptions=True)
         confirmed = 1 + sum(isinstance(reply, dict) and reply.get('accepted') is True for reply in replies)
@@ -662,11 +678,36 @@ class PeerServices:
 
     async def change_grove_password(self, actor: Actor, current_password: str, new_password: str) -> dict:
         document, voters = await self.work(grove_password.issue, self.state, actor, current_password, new_password)
+        document = await self.approve_identity_change('password', document, actor, voters)
+        await self.work(grove_password.apply, self.state, [document], self.local_id)
         replies = await asyncio.gather(*(self.call(node, grove_password.APPLY, {'change': document}, diagnostic=True)
                                        for node in voters if node != self.local_id), return_exceptions=True)
         confirmed = 1 + sum(isinstance(reply, dict) and reply.get('accepted') is True for reply in replies)
         await self.request_grove_sync()
         return {'confirmed': confirmed, 'members': len(voters)}
+
+    def grove_identity_approval(self, pair: Pair, params: dict) -> dict:
+        if params.keys() != {'kind', 'document', 'actor'}:
+            raise PeerError('INVALID_REQUEST', 'Expected a Grove identity proposal')
+        with self.state.connect(read_only=True) as db:
+            require_pair(db, pair)
+            if pair.legacy or quarantine.contains(db, pair.node_id):
+                raise PeerError('DENIED', 'An active Grove voter is required')
+        return grove_identity_changes.ballot(self.state, params['kind'], params['document'], params['actor'], pair.node_id)
+
+    async def approve_identity_change(self, kind, document, actor, voters):
+        with self.state.connect(read_only=True) as db:
+            session = auth.active_session(db, actor.token_hash, int(time.time()))
+            if session is None or session['id'] != actor.account_id or not session['grove_user']:
+                raise PeerError('SESSION_REQUIRED', 'Sign in with the Grove account')
+            user = session['grove_user']
+        bare = grove_identity_changes.envelope(document)
+        own = await self.work(grove_identity_changes.ballot, self.state, kind, bare, user)
+        replies = await asyncio.gather(*(self.call(node, grove_identity_changes.METHOD,
+            {'kind': kind, 'document': bare, 'actor': user}, diagnostic=True)
+            for node in voters if node != self.local_id), return_exceptions=True)
+        approvals = [own, *(reply for reply in replies if isinstance(reply, dict) and reply.keys() == {'record', 'signature'})]
+        return await self.work(grove_identity_changes.certify, self.state, kind, bare, approvals)
 
     def grove_role_rpc(self, pair: Pair, method: str, params: dict) -> dict:
         def authorize(db):
@@ -689,8 +730,14 @@ class PeerServices:
 
     async def approve_grove_role(self, actor: Actor, user_id: str, role: str) -> dict:
         proposal, voters = await self.work(grove_roles.approve, self.state, actor, user_id, role)
+        with self.state.connect(read_only=True) as db:
+            current = auth.active_session(db, actor.token_hash, int(time.time()))
+            if current is None or not current['grove_user']:
+                raise PeerError('SESSION_REQUIRED', 'Sign in with the Grove account')
+            user = current['grove_user']
         members = [node for node in voters if node != self.local_id]
-        replies = await asyncio.gather(*(self.call(node, grove_roles.BALLOT_METHOD, {'user_id': user_id}, diagnostic=True)
+        replies = await asyncio.gather(*(self.call(node, grove_identity_changes.METHOD,
+                                       {'kind': 'role', 'document': proposal, 'actor': user}, diagnostic=True)
                                        for node in members), return_exceptions=True)
         result, certificate = await self.work(grove_roles.collect, self.state, proposal, [r for r in replies if isinstance(r, dict)])
         if certificate:
@@ -985,6 +1032,7 @@ class PeerServices:
                             continue
                         if reply.keys() != {'ballot'} | fields.keys():
                             raise PeerError('PROTOCOL', 'Invalid Grove continuity vote')
+                        grove_availability.synchronize(self.state, nonce, True)
                         if reply['revocations']:
                             await self.work(grove_revocation.apply, self.state, reply['revocations'], node_id)
                         if reply.get('passwords'):
@@ -1014,6 +1062,7 @@ class PeerServices:
             for task in requests:
                 task.cancel()
             await asyncio.gather(*requests, return_exceptions=True)
+            grove_availability.synchronize(self.state, nonce, False)
 
     def seed_catalog_reply(self, pair: Pair, params: dict, method: str = SEED_CATALOG) -> dict:
         if params:
@@ -1033,7 +1082,7 @@ class PeerServices:
         with self.state.connect(read_only=True) as db:
             db.execute('BEGIN')
             require_pair(db, pair)
-            trust = trusted_members(db, self.local_id)
+            trust = trusted_members(db, self.local_id, operational=True)
             if (pair.legacy or quarantine.contains(db, pair.node_id)
                     or trust is None or pair.node_id not in trust.origins):
                 raise PeerError('DENIED', 'Deployment status requires an active Grove Mesh member')
@@ -1254,6 +1303,8 @@ class PeerServices:
                 await self.refresh_grove()
             except (PeerError, ValueError, OSError, sqlite3.Error) as error:
                 logger.debug('Grove identity synchronization is waiting: %s', error)
+            finally:
+                grove_availability.synchronize(self.state, 'reconnect', False)
             try:
                 await asyncio.wait_for(self.grove_sync_requested.wait(), timeout=18 + randbelow(5))
             except TimeoutError:

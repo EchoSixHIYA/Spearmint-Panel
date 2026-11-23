@@ -29,7 +29,7 @@ class GroveMembers:
     origins: dict[str, str]
 
 
-def trusted_members(db, local_id: str) -> GroveMembers | None:
+def trusted_members(db, local_id: str, *, operational: bool = False, transport: bool = False) -> GroveMembers | None:
     realm = db.execute('SELECT * FROM grove_realm').fetchone()
     if not realm or realm['frozen'] or realm['issuer_paused']:
         return None
@@ -40,11 +40,19 @@ def trusted_members(db, local_id: str) -> GroveMembers | None:
             envelope = json.loads(realm['manifest'])
             continuity = db.execute('SELECT sequence,lease_until FROM grove_login_continuity').fetchone()
             if continuity is not None:
-                if continuity['sequence'] != realm['sequence'] or continuity['lease_until'] <= int(time.time()):
+                from .. import grove_availability
+                current = grove_availability.ordinary(db, check_sync=not transport) if operational else continuity['lease_until'] > int(time.time())
+                if continuity['sequence'] != realm['sequence'] or not current:
                     return None
                 members = grove.members_after_handoff(db, grove.verified('directory', envelope, realm['public_key'])['members'])
             else:
-                members = grove.directory_data(envelope, grove.realm_data(realm))['members']
+                if operational:
+                    from .. import grove_availability
+                    if not grove_availability.ordinary(db, check_sync=not transport):
+                        return None
+                    members = grove.verified('directory', envelope, realm['public_key'])['members']
+                else:
+                    members = grove.directory_data(envelope, grove.realm_data(realm))['members']
         except (ValueError, KeyError, TypeError, PeerError):
             return None
     else:

@@ -18,6 +18,8 @@ KIND = 'login-password'
 
 
 def verifier_for_session(db, actor: auth.Actor, now: int):
+    from . import grove_availability
+    grove_availability.require_current(db)
     session = auth.active_session(db, actor.token_hash, now)
     if session is None or not session['grove_replica'] or session['id'] != actor.account_id:
         raise PeerError('DENIED', 'Sign in directly with the Grove account to change its password')
@@ -44,6 +46,8 @@ def available(state: State, actor: auth.Actor) -> bool:
 
 
 def data_for(document: dict, digest: str, anchor: dict, users: list[dict]) -> dict:
+    from .grove_identity_changes import envelope
+    document = envelope(document)
     try:
         raw = json.loads(parse_b64(document['record'], 2048))
         public = parse_b64(raw['public_key'], 32)
@@ -110,7 +114,6 @@ def issue(state: State, actor: auth.Actor, current_password: str, new_password: 
         record = {'anchor': digest, 'user_id': verifier['user_id'], 'generation': (verifier['generation'] or 0) + 1,
                   'password_hash': replacement, 'public_key': wire_b64(key.public_key().public_bytes_raw())}
         document = grove.signed(KIND, record, key)
-        store(state, db, document, record, actor.operation_actor, actor.address)
         return document, anchor['voters']
 
 
@@ -121,5 +124,8 @@ def apply(state: State, documents: list[dict], source: str, authorize: Callable 
         if authorize is not None:
             authorize(db)
         digest, anchor, users = grove_revocation.current_context(db, source)
+        from .grove_identity_changes import verify
+        for document in documents:
+            verify('password', document, digest, anchor, users)
         return sum(store(state, db, document, data_for(document, digest, anchor, users), 'peer', source)
                    for document in documents)

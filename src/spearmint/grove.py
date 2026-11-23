@@ -196,6 +196,8 @@ def describe(state: State, *, private: bool = False) -> dict:
             return {'configured': False}
         result = {'configured': True, 'realm': realm_data(row), 'local_issuer': bool(row['is_issuer']),
                   'frozen': row['frozen'], 'issuer_paused': bool(row['issuer_paused'])}
+        from . import grove_availability
+        result['access'] = grove_availability.status(db)
         continuity = db.execute('SELECT sequence,lease_until,anchor,recovery_proof FROM grove_login_continuity').fetchone()
         if continuity and continuity['sequence'] == row['sequence']:
             result['issuer_retired'] = True

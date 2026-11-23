@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import MagicMock
 
 from spearmint import seed_ssh, seed_transport, seed_wizard
+from spearmint.state import State
 
 
 class SeedDiagnosticsTest(unittest.TestCase):
@@ -73,6 +74,12 @@ class SeedDiagnosticsTest(unittest.TestCase):
         wizard = object.__new__(seed_wizard.SeedWizard)
         wizard.lock = RLock()
         wizard.workers = ThreadPoolExecutor(max_workers=1)
+        temporary = Path.cwd() / 'work/tmp/seed-diagnostics-tests'
+        temporary.mkdir(parents=True, exist_ok=True)
+        fixture = TemporaryDirectory(dir=temporary)
+        self.addCleanup(fixture.cleanup)
+        wizard.state = State(Path(fixture.name) / 'state')
+        wizard.state.initialize(lambda: 'fixture')
         job = seed_wizard.Job(('source', 'actor'), ['realm', 'actor'], '192.0.2.1', 22, status='installing')
 
         def fail(job):
@@ -86,6 +93,32 @@ class SeedDiagnosticsTest(unittest.TestCase):
         self.assertEqual(view['failure_phase'], 'verify')
         self.assertEqual(view['failure_exit'], 42)
         self.assertIn('GLIBC_2.38', view['failure_detail'])
+        with wizard.state.connect(read_only=True) as db:
+            receipt = db.execute("SELECT target,reason FROM audit WHERE event='seed.wizard.failed'").fetchone()
+        self.assertEqual(receipt['target'], '192.0.2.1')
+        self.assertIn('GLIBC_2.38', receipt['reason'])
+
+    def test_linux_identification_ignores_login_banner_and_preserves_home_spaces(self):
+        connection = object.__new__(seed_ssh.Connection)
+        connection.answer = lambda *_: b'Welcome to Ubuntu\nSPMT_OS=Linux\nSPMT_ARCH=x86_64\nSPMT_HOME=/home/app user\nSPMT_UID=1000\n'
+        self.assertEqual(connection.system(), ('linux-amd64', '/home/app user'))
+
+    def test_linux_arm64_and_root_have_specific_results(self):
+        connection = object.__new__(seed_ssh.Connection)
+        connection.answer = lambda *_: b'SPMT_OS=Linux\nSPMT_ARCH=aarch64\nSPMT_HOME=/home/app\nSPMT_UID=1000\n'
+        self.assertEqual(connection.system(), ('linux-arm64', '/home/app'))
+        connection.answer = lambda *_: b'SPMT_OS=Linux\nSPMT_ARCH=x86_64\nSPMT_HOME=/root\nSPMT_UID=0\n'
+        self.assertEqual(connection.system(), ('linux-amd64', '/opt'))
+        self.assertTrue(connection.linux_root)
+
+    def test_root_connection_prepares_non_root_execution_identity(self):
+        connection = object.__new__(seed_ssh.Connection)
+        connection.linux_root = True
+        connection.root_answer = lambda *_: b'SPMT_RUNNER_UID=991\n'
+        connection.prepare_linux('/opt/Spearmint/programs', 'fixture-grove')
+        self.assertEqual(connection.linux_uid, 991)
+        self.assertTrue(connection.linux_user.startswith('spmt-'))
+        self.assertTrue(connection.linux_home.startswith('/var/lib/spearmint-runtimes/'))
 
 
 if __name__ == '__main__':

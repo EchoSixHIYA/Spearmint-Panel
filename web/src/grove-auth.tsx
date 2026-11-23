@@ -10,6 +10,8 @@ import './identity.css'
 
 export type GroveInfo = { configured: boolean; realm?: GroveRealm; local_issuer?: boolean; frozen?: string; issuer_paused?: boolean;
   local_login?: boolean;
+  access?: { mode: 'online' | 'offline' | 'synchronizing' | 'unavailable'; offline_seconds: number;
+    confirmed_at: number | null; offline_until: number | null; identity_changes: boolean };
   member_login?: boolean; issuer_retired?: boolean; continuity_configured?: boolean; operator_revocation?: 'available' | 'awaiting-quorum';
   recovery_admin?: string; role_votes?: string[];
   identity_voter?: boolean;
@@ -20,6 +22,14 @@ export type GroveInfo = { configured: boolean; realm?: GroveRealm; local_issuer?
 type DirectorySyncReport = {
   realm_id: string; previous_sequence: string | null; member_directory: MemberDirectoryVersion;
   source: 'issuer-mesh' | 'issuer-https' | 'member-https' | 'neighbor' | 'local-issuer' | 'member-quorum' | 'member-standby'
+}
+
+export function GroveAccessNotice({ info }: { info?: GroveInfo }) {
+  const access = info?.access
+  if (!access || !['offline', 'synchronizing'].includes(access.mode)) return null
+  return <Notice tone="amber">{access.mode === 'synchronizing' ? '正在同步恢复连接后的 Grove 权限，请稍后重试操作。'
+    : <>当前为离线运维模式，可按最后确认的权限管理可达节点。账号、权限和成员变更需等待多数成员连接恢复。
+      {access.offline_until && <> 离线登录有效至 {new Date(access.offline_until * 1000).toLocaleString()}。</>}</>}</Notice>
 }
 
 const directorySources = {
@@ -102,6 +112,7 @@ export function takeGroveReturn() {
 
 export function groveError(failure: unknown) {
   if (failure instanceof ApiError) {
+    if (failure.code === 'GROVE_QUORUM_REQUIRED' || failure.code === 'GROVE_SYNCHRONIZING') return failure.message
     if (failure.code === 'GROVE_PAIRING_REQUIRED') return '请先让此节点与 Grove 的投票成员完成 Mesh 配对。'
     if (failure.code === 'GROVE_ADMISSION_PENDING') return '在线配对成员暂未提供此节点的有效多数审批。请核对目标 Node ID 和面板地址，批准后重试。'
     if (failure.code === 'GROVE_NO_VERIFIER') return '邀请码中的成员暂时无法认证。请检查浏览器能否访问成员，稍后重试或重新复制邀请代码。'
@@ -126,6 +137,7 @@ export function GroveLoginButton({ onSession, authorizeRequest, onIssuer, onInfo
   const [destination, setDestination] = useState<string>()
   useEffect(() => {
     let active = true
+    let timer: ReturnType<typeof setTimeout> | undefined
     async function load() {
       try {
         const current = await api<GroveInfo>('/auth/grove/info')
@@ -141,10 +153,12 @@ export function GroveLoginButton({ onSession, authorizeRequest, onIssuer, onInfo
       } catch {
         if (active) onInfo?.(null)
         if (active && authorizeRequest) setError('这个面板当前无法验证该请求。请返回新节点，重新查找可用的 Grove 成员。')
+      } finally {
+        if (active && !authorizeRequest) timer = setTimeout(() => void load(), 5000)
       }
     }
     void load()
-    return () => { active = false }
+    return () => { active = false; clearTimeout(timer) }
   }, [authorizeRequest, onIssuer, onInfo])
   async function start() {
     setPending(true); setError('')
@@ -192,7 +206,9 @@ export function GroveLoginButton({ onSession, authorizeRequest, onIssuer, onInfo
     }}>
       <Icon name="shield-check" size={17} />{pending ? '正在前往身份节点…' : '使用 Grove 账号登录'}<Icon name="arrow-right" size={16} />
     </button>}
+    <GroveAccessNotice info={info} />
     {info.member_login ? <p>在当前成员验证你的 Grove 账号。</p>
+      : info.access?.mode === 'unavailable' && info.access.offline_until ? <p>离线登录有效期已结束，正在等待 Grove 多数成员恢复连接。</p>
       : !fallbackAvailable ? <p>正在同步 Grove 登录授权，请稍后重试。</p>
         : <p>Grove 登录需要浏览器能访问{issuer ? `身份节点 ${issuer.host}` : '身份节点'}。</p>}
     {error && <p className="error" role="alert">{error}</p>}
@@ -363,7 +379,7 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
       const result = await api<{ approved: number; required: number; applied: boolean }>(
         `/grove/users/${encodeURIComponent(roleChange.id)}/role`, { method: 'POST', headers, body: JSON.stringify({ role: roleChange.role }) })
       setRevocation(result.applied ? `${roleChange.name} 的角色已更新。`
-        : `本成员已批准。当前有 ${result.approved} / ${result.required} 票，请在其他成员面板继续批准。`)
+        : `暂未取得多数确认（${result.approved} / ${result.required}），请恢复成员连接后重试。`)
       setRoleChange(undefined)
     } catch (failure) {
       setMessage(failure instanceof ApiError && failure.code === 'REAUTHENTICATION_REQUIRED'
@@ -474,9 +490,9 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
         <button className="btn btn-primary" disabled={pending} onClick={() => void revokeOperator()}>{pending ? '正在同步…' : '确认停用'}</button>
       </Modal>}
       {roleChange && <Modal title={`调整 ${roleChange.name} 的角色`} onClose={() => { if (!pending) setRoleChange(undefined) }}>
-        <p>新角色为{roleChange.role === 'node_admin' ? '管理员' : '操作员'}。多数成员批准后生效，该账号需要重新登录。</p>
+        <p>新角色为{roleChange.role === 'node_admin' ? '管理员' : '操作员'}。Spearmint 会自动联系多数成员确认，生效后该账号需要重新登录。</p>
         {message && <p className="error" role="alert">{message}</p>}
-        <button className="btn btn-primary" disabled={pending} onClick={() => void approveRole()}>{pending ? '正在核对…' : '在此成员批准'}</button>
+        <button className="btn btn-primary" disabled={pending} onClick={() => void approveRole()}>{pending ? '正在核对…' : '确认修改角色'}</button>
       </Modal>}
       {revocation && <p role="status">{revocation}</p>}
       {message && !confirmRetirement && !operatorToRevoke && !roleChange && <p className="error" role="alert">{message}</p>}

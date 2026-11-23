@@ -109,7 +109,6 @@ def active_session(db: sqlite3.Connection, token_hash: bytes, now: int) -> sqlit
                       LEFT JOIN grove_login_role gr ON gr.user_id=lv.user_id
                       WHERE lr.sequence=r.sequence AND r.issuer_paused=0
                         AND (c.singleton IS NULL OR c.sequence=lr.sequence)
-                        AND coalesce(c.lease_until,max(lr.expires_at,lr.standby_lease_until))>?
                         AND lv.epoch=ga.identity_epoch AND coalesce(gr.role,lv.role)=a.role) AS replica_current,
                EXISTS(SELECT 1 FROM grove_member gm JOIN node n ON gm.node_id=n.node_id WHERE gm.enabled=1) AS member_active
         FROM session s JOIN panel_account a ON a.id=s.account_id AND a.auth_epoch=s.auth_epoch
@@ -118,7 +117,11 @@ def active_session(db: sqlite3.Connection, token_hash: bytes, now: int) -> sqlit
         WHERE s.token_hash=? AND s.last_seen>? AND s.created_at>?
           AND a.enabled=1
           AND (a.require_mfa=0 OR s.mfa_at IS NOT NULL)
-    """, (now, token_hash, now - IDLE_SECONDS, now - SESSION_SECONDS)).fetchone()
+    """, (token_hash, now - IDLE_SECONDS, now - SESSION_SECONDS)).fetchone()
+    if row is not None and row['grove_replica']:
+        from . import grove_availability
+        if not grove_availability.ordinary(db, now, check_sync=False):
+            return None
     if row is not None and row['grove_user'] is not None and (
         (not row['replica_current'] if row['grove_replica'] else row['valid_until'] <= now)
         or row['frozen'] != '' or not row['member_active'] or row['grove_revoked']
