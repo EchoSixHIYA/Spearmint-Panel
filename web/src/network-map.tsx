@@ -5,6 +5,7 @@ import { NetworkCanvas } from './network-canvas'
 import { useNetworkMemory, type RememberedEdge } from './network-memory'
 import { NodeResourceStats, useNodeResources, type NodeResourceSample } from './node-resources'
 import './network-map.css'
+import { graphLayers, linkGeometry } from './network-geometry'
 
 type Link = { id: string; from: string; to: string; kind: 'active' | 'selected' | 'alternative'; shared?: boolean; pending?: boolean }
 export type NodeMenuAnchor = { x: number; y: number; trigger: HTMLElement }
@@ -46,46 +47,12 @@ function reportedLinks(nodes: NodeView[], current: NodeView, paths: Map<string, 
     links.set(id, previous ? { ...previous, shared: true }
       : { id, from, to, kind: 'alternative' })
   }
-  return { depths, alternativeOnly, links: [...links.values()] }
-}
-
-function linkGeometry(from: DOMRect, to: DOMRect, bounds: DOMRect, vertical: boolean, radial: boolean, obstacles: DOMRect[], lane: number) {
-  const ax = from.left + from.width / 2, ay = from.top + from.height / 2
-  const bx = to.left + to.width / 2, by = to.top + to.height / 2
-  if (radial) {
-    const distance = Math.hypot(bx - ax, by - ay) || 1
-    const dx = (bx - ax) / distance, dy = (by - ay) / distance
-    const x1 = ax + dx * from.width / 2 - bounds.left, y1 = ay + dy * from.height / 2 - bounds.top
-    const x2 = bx - dx * to.width / 2 - bounds.left, y2 = by - dy * to.height / 2 - bounds.top
-    return { x1, x2, y1, y2, path: `M ${x1} ${y1} L ${x2} ${y2}` }
-  }
-  if (Math.abs(ax - bx) < 1 && obstacles.some(rect => rect.left < ax && rect.right > ax
-    && rect.top > Math.min(ay, by) && rect.bottom < Math.max(ay, by))) {
-    const x1 = from.right - bounds.left, x2 = to.right - bounds.left
-    const y1 = ay - bounds.top, y2 = by - bounds.top
-    const corridor = Math.max(x1, x2) + 10 + lane % 3 * 3
-    return { x1, x2, y1, y2, path: `M ${x1} ${y1} H ${corridor} V ${y2} H ${x2}` }
-  }
-  const across = vertical ? Math.abs(ay - by) < 1 : Math.abs(ax - bx) >= 1
-  const direction = (across ? bx - ax : by - ay) >= 0 ? 1 : -1
-  const x1 = (across ? ax + direction * from.width / 2 : ax) - bounds.left
-  const x2 = (across ? bx - direction * to.width / 2 : bx) - bounds.left
-  const y1 = (across ? ay : ay + direction * from.height / 2) - bounds.top
-  const y2 = (across ? by : by - direction * to.height / 2) - bounds.top
-  if (across && obstacles.some(rect => rect.left > Math.min(x1, x2) + bounds.left
-    && rect.right < Math.max(x1, x2) + bounds.left)) {
-    const corridor1 = x1 + direction * 14, corridor2 = x2 - direction * 14
-    const top = Math.max(6, Math.min(from.top, to.top, ...obstacles.map(rect => rect.top)) - bounds.top - 12 - lane % 4 * 4)
-    return { x1, x2, y1, y2, path: `M ${x1} ${y1} H ${corridor1} V ${top} H ${corridor2} V ${y2} H ${x2}` }
-  }
-  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
-  const controls = across ? `${mx} ${y1} ${mx} ${y2}` : `${x1} ${my} ${x2} ${my}`
-  return { x1, x2, y1, y2, path: `M ${x1} ${y1} C ${controls} ${x2} ${y2}` }
+  return { depths: graphLayers(current.id, depths.keys(), [...links.values()], rememberedDepths), alternativeOnly, links: [...links.values()] }
 }
 
 function Connections({ links, radial = false }: { links: Link[]; radial?: boolean }) {
   const overlay = useRef<SVGSVGElement>(null)
-  const [lines, setLines] = useState<Array<ReturnType<typeof linkGeometry> & Pick<Link, 'id' | 'kind' | 'shared' | 'from' | 'to' | 'pending'>>>([])
+  const [lines, setLines] = useState<Array<NonNullable<ReturnType<typeof linkGeometry>> & Pick<Link, 'id' | 'kind' | 'shared' | 'from' | 'to' | 'pending'>>>([])
   useLayoutEffect(() => {
     const graph = overlay.current?.parentElement
     if (!graph) return
@@ -102,10 +69,11 @@ function Connections({ links, radial = false }: { links: Link[]; radial?: boolea
         return [id, new DOMRect((rect.left - visibleBounds.left) / scaleX, (rect.top - visibleBounds.top) / scaleY,
           rect.width / scaleX, rect.height / scaleY)]
       }))
-      setLines(links.filter(({ from, to }) => rects.has(from) && rects.has(to)).map(({ id, from, to, kind, shared, pending }, lane) => ({
-        id, kind, shared, pending, from, to, ...linkGeometry(rects.get(from)!, rects.get(to)!, bounds, vertical, radial,
-          [...rects].filter(([node]) => node !== from && node !== to).map(([, rect]) => rect), lane),
-      })))
+      setLines(links.filter(({ from, to }) => rects.has(from) && rects.has(to)).flatMap(({ id, from, to, kind, shared, pending }, lane) => {
+        const geometry = linkGeometry(rects.get(from)!, rects.get(to)!, bounds, vertical, radial,
+          [...rects].filter(([node]) => node !== from && node !== to).map(([, rect]) => rect), lane)
+        return geometry ? [{ id, kind, shared, pending, from, to, ...geometry }] : []
+      }))
     }
     draw()
     const observer = new ResizeObserver(draw)
@@ -256,7 +224,7 @@ export function NetworkMap({ mini = false, compact = false, target, alternative,
           style={compact ? { '--mesh-level-count': levels.size } as CSSProperties : undefined}>
           <Connections links={links} />
           {[...levels].map(([depth, members]) => <section className="mesh-level" key={depth}>
-            <h4>{depth === 0 ? '当前节点' : `${depth} 跳`}</h4>
+            <h4 title="按连接关系排列；实际活动路径与跳数请查看节点的路径诊断">{depth === 0 ? '当前节点' : `第 ${depth} 层`}</h4>
             <div className="mesh-level-nodes">{members.map((id) => {
               const node = byId.get(id)
               return node ? <MapNode key={id} node={node} sample={resources.get(id)} plotted selected={id === target}
