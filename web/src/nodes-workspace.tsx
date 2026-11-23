@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { useConsole, refreshConsole, type NodeView, type Preferences } from './console-data'
 import { NetworkMap, type NodeMenuAnchor } from './network-map'
 import { NodeInspector } from './workspace-pages'
+import { GroveCard } from './grove-auth'
 import { SeedsPage } from './console-pages'
 import { savedSeedSource } from './seed-wizard'
 import { groveServiceRegistrationHref, nodeResourcesTarget, seedProgressTarget } from './grove-navigation'
@@ -70,7 +71,8 @@ function NodeMenu({ node, anchor, close }: Menu & { close: (restore?: boolean) =
 export function NodesWorkspace({ page, nodeId, onSave }: {
   page: string; nodeId?: string; onSave: (preferences: Preferences) => void
 }) {
-  const { listedNodes, local } = useConsole()
+  const { listedNodes, local, session, onUnauthorized, groveDetails, groveError, directoryCurrent } = useConsole()
+  const [nodeAccess, setNodeAccess] = useState(() => new URLSearchParams(location.hash.split('?')[1]).get('join') === '1')
   const [menu, setMenu] = useState<Menu>()
   const [query, setQuery] = useState('')
   const [searchError, setSearchError] = useState('')
@@ -106,6 +108,7 @@ export function NodesWorkspace({ page, nodeId, onSave }: {
         <div><div className="hero-kicker"><span className="pulse-dot" />GROVE / NODES</div><h1 id="page-title" tabIndex={-1}>节点</h1>
           <p>右键节点打开操作菜单 · 拖动画布 · Ctrl + 滚轮缩放</p></div>
         <div className="overview-network-actions"><button className="btn btn-ghost nodes-refresh" aria-label="刷新节点状态" onClick={refreshConsole}><Icon name="refresh" size={16} /></button>
+          <button className="btn btn-white" onClick={() => setNodeAccess(true)}><Icon name="link" size={15} />{groveDetails?.configured ? '邀请节点' : '设置 Grove'}</button>
           <a className="btn btn-white" href={withReturn(`#/seeds${local.data?.node_id ? `?source=${local.data.node_id}` : ''}`, '#/nodes')}><Icon name="plus" size={15} />添加节点</a></div>
       </header>
       <div className="nodes-network-tools"><span>{listedNodes.length ? `${listedNodes.length} 个节点 · ${listedNodes.filter(node => node.status === 'online').length} 个当前连通` : 'Grove 网络'}</span>
@@ -117,6 +120,9 @@ export function NodesWorkspace({ page, nodeId, onSave }: {
       <div className="overview-network-main nodes-network-canvas"><NetworkMap compact target={target} onNodeMenu={(node, anchor) => setMenu({ node, anchor })} /></div>
     </section>
     {menu && <NodeMenu {...menu} close={closeMenu} />}
+    {nodeAccess && <Modal title={groveDetails?.configured ? '邀请节点加入 Grove' : '创建或加入 Grove'} onClose={() => setNodeAccess(false)}>
+      <GroveCard data={groveDetails} error={groveError} session={session} onUnauthorized={onUnauthorized} directoryCurrent={directoryCurrent} mode="nodes" openJoin={!groveDetails?.configured} />
+    </Modal>}
     {mode && <Modal key={dialogKey} title={title} className={`nodes-workspace-dialog is-${mode}`} dismissOnEscape={mode !== 'terminal'} onClose={() => { location.hash = returnRoute('#/nodes') }}>
       {mode === 'terminal' && <Suspense fallback={<Loading label="正在打开终端…" />}><QuickSSH key={target} targetId={target} embedded /></Suspense>}
       {(mode === 'detail' || mode === 'network') && target && <NodeInspector nodeId={target} onSave={onSave} embedded initialTab={inspectorTab} />}

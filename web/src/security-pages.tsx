@@ -24,8 +24,7 @@ export function OperationsPage({ section }: { section?: string }) {
 }
 
 export function AccessPage({ onFactors, expectedJoinNode }: { onFactors: () => void; expectedJoinNode?: string }) {
-  const { session, admin, local, onUnauthorized, groveDetails, groveError, members, listedNodes, directoryCurrent,
-    directoryLoading, memberPanelOrigins } = useConsole()
+  const { session, admin, local, onUnauthorized, groveDetails, groveError, directoryCurrent } = useConsole()
   const { data, error } = usePoll<MeshService[]>('/mesh/services', onUnauthorized)
   const factor = usePoll<{ eligible: boolean; grove_totp?: boolean }>('/auth/first-factor', onUnauthorized)
   const password = usePoll<{ available: boolean }>(session.grove ? '/auth/grove/password' : null, onUnauthorized)
@@ -44,9 +43,8 @@ export function AccessPage({ onFactors, expectedJoinNode }: { onFactors: () => v
           : local.data ? '当前面板与播种回执中的 Node ID 不同。请回到播种页核对目标。' : '正在核对播种回执中的节点身份…'}
       </Notice>}
     {admin && (!expectedJoinNode || joinTargetMatches) && <GroveCard key={expectedJoinNode || 'access'} openJoin={!!expectedJoinNode}
-      session={session} data={groveDetails} error={groveError} members={members} names={new Map(listedNodes.map(node => [node.id, node.name]))}
-      icons={new Map(listedNodes.map(node => [node.id, nodeIcon(node)]))}
-      directoryCurrent={directoryCurrent} directoryLoading={directoryLoading} memberPanelOrigins={memberPanelOrigins}
+      session={session} data={groveDetails} error={groveError}
+      directoryCurrent={directoryCurrent}
       onUnauthorized={onUnauthorized} />}
     <Panel title="我获准操作的远程服务" action={<a href="#/operations/approvals" className="panel-link">进入独立签名审批<Icon name="arrow-up-right" size={14} /></a>}>
       <label className="search-box"><Icon name="search" size={16} /><input aria-label="搜索授权服务" placeholder="搜索服务或节点…" value={query} onChange={(e) => setQuery(e.target.value)} /></label>
@@ -90,4 +88,3 @@ export function GrovePasswordDialog({ session, onClose, onUnauthorized }: { sess
     </form>
   </Modal>
 }
-import { nodeIcon } from './node-types'

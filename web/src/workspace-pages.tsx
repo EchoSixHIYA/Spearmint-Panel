@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { timestamp, usePoll } from './api'
 import { useConsole, type Metrics, type Preferences, refreshConsole } from './console-data'
 import { NodeNote, SettingsPage, TopologyPaths } from './console-pages'
-import { nodeIcon, nodeTypes } from './node-types'
+import { nodeTypes } from './node-types'
 import { GroveCard } from './grove-auth'
 import { Sessions } from './sessions'
 import { GrovePasswordDialog } from './security-pages'
@@ -19,7 +19,7 @@ type Host = { node_id: string; platform: { os: string; architecture: string }; m
 export function SectionNavigation({ page }: { page: string }) {
   const groups = [
     [{ id: 'operations', label: '操作记录' }, { id: 'alerts', label: '告警' }],
-    [{ id: 'identity', label: '身份与成员' }, { id: 'audit', label: '安全审计' }],
+    [{ id: 'identity', label: '账号与登录' }, { id: 'audit', label: '安全审计' }],
   ]
   const group = groups.find(items => items.some(item => item.id === page))
   return group ? <div className="section-tabs"><Tabs label="区域导航" items={group} current={page} onChange={next => { location.hash = '#/' + next }} /></div> : null
@@ -62,11 +62,18 @@ export function NodeInspector({ nodeId, onSave, embedded = false, initialTab }: 
   </>
 }
 
-export function IdentityWorkspace() {
-  const { session, onUnauthorized, groveDetails, groveError, listedNodes, members, directoryCurrent, directoryLoading, memberPanelOrigins } = useConsole()
-  return <><PageHeading eyebrow="MANAGEMENT / IDENTITY" title="身份与成员" description="管理 Grove 成员、用户和邀请。登录 Grove 后在当前面板管理成员服务。" />
-    <GroveCard data={groveDetails} error={groveError} session={session} onUnauthorized={onUnauthorized} members={members} names={new Map(listedNodes.map(node => [node.id, node.name]))} icons={new Map(listedNodes.map(node => [node.id, nodeIcon(node)]))} directoryCurrent={directoryCurrent} directoryLoading={directoryLoading} memberPanelOrigins={memberPanelOrigins} />
-    <Panel title="成员服务管理"><p>当前账号：{session.display_name || session.username}。成员目录内共 {listedNodes.length} 个节点。</p><a href="#/services" className="btn btn-primary">管理 Grove 服务</a></Panel>
+export function IdentityWorkspace({ onFactors }: { onFactors: () => void }) {
+  const { session, onUnauthorized, groveDetails, groveError, directoryCurrent, admin } = useConsole()
+  return <><PageHeading eyebrow="MANAGEMENT / IDENTITY" title="身份与安全" description="管理 Grove 账号、角色和登录访问。" />
+    <div className="identity-workspace">
+      {groveDetails?.configured ? <GroveCard data={groveDetails} error={groveError} session={session} onUnauthorized={onUnauthorized} directoryCurrent={directoryCurrent} />
+        : <Panel title="Grove 账号">{groveError ? <Notice tone="amber">{groveError}</Notice> : !groveDetails ? <Loading label="正在读取账号信息…" />
+          : <div className="identity-local-state"><p className="muted">当前使用本机账号。创建或加入 Grove 后，可在这里管理 Grove 账号。</p><a className="btn btn-secondary" href="#/nodes?join=1">设置 Grove<Icon name="arrow-right" size={14} /></a></div>}</Panel>}
+      <Panel title="登录与会话" className="identity-login-panel"><div className="identity-signed-in"><span className="avatar-circle">{(session.display_name || session.username).slice(0, 1).toUpperCase()}</span><div><strong>{session.display_name || session.username}</strong><small>{session.grove ? 'Grove 账号' : '本机账号'} · {admin ? '管理员' : '操作员'}</small></div></div>
+        <div className="identity-login-actions"><button type="button" onClick={onFactors}><Icon name="key" size={16} /><span>管理登录验证器</span><Icon name="arrow-right" size={14} /></button>
+          <a href="#/account/sessions"><Icon name="monitor" size={16} /><span>查看登录会话</span><Icon name="arrow-right" size={14} /></a></div>
+      </Panel>
+    </div>
   </>
 }
 

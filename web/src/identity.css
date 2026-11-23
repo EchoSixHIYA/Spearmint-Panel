@@ -1,0 +1,31 @@
+.identity-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 290px; align-items: start; gap: 18px; }
+.identity-workspace > .panel { min-width: 0; }
+.identity-accounts-panel .panel-head { margin-bottom: 14px; }
+.identity-grove-name { display: inline-flex; align-items: center; gap: 9px; }
+.identity-grove-name > .icon { color: var(--green); }
+.identity-accounts-panel .identity-account-table th { text-align: center; padding: 10px 15px; }
+.identity-account-table th:first-child, .identity-account-table td:first-child { text-align: left; }
+.identity-account-table td:not(:first-child) { text-align: center; }
+.identity-accounts-panel .identity-account-table td { padding-top: 10px; padding-bottom: 10px; }
+.identity-account-table td:first-child { white-space: normal; overflow-wrap: anywhere; }
+.identity-current-account { display: inline-block; margin-left: 9px; color: var(--muted); font-size: 10px; }
+.identity-account-actions { display: flex; justify-content: center; align-items: center; gap: 7px; }
+.identity-metadata { margin-top: 16px; border-top: 1px solid var(--edge); padding-top: 12px; font-size: 11px; }
+.identity-metadata summary { cursor: pointer; color: var(--muted); }
+.identity-metadata .facts { margin: 8px 0; }
+.identity-metadata .facts > div { justify-content: flex-start; padding: 7px 0; }
+.identity-metadata dt { width: 72px; }
+.identity-metadata dd { text-align: left; max-width: none; }
+.identity-signed-in { display: flex; align-items: center; gap: 11px; padding-bottom: 16px; }
+.identity-signed-in .avatar-circle { width: 35px; height: 35px; font-size: 13px; }
+.identity-signed-in strong, .identity-signed-in small { display: block; overflow-wrap: anywhere; }
+.identity-signed-in strong { font-size: 13px; }
+.identity-signed-in small { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.identity-login-actions { display: grid; border-top: 1px solid var(--edge); }
+.identity-login-actions a, .identity-login-actions button { display: flex; align-items: center; gap: 9px; padding: 12px 0; font-size: 12px; color: var(--green); }
+.identity-login-actions button { background: none; border: 0; width: 100%; text-align: left; cursor: pointer; }
+.identity-login-actions > * + * { border-top: 1px solid var(--edge); }
+.identity-login-actions > * > span { flex: 1; }
+.identity-local-state p { margin: 0 0 15px; }
+.grove-node-access .grove-existing-join { margin-top: 16px; padding-top: 12px; }
+@media (max-width: 1050px) { .identity-workspace { grid-template-columns: minmax(0, 1fr); } }

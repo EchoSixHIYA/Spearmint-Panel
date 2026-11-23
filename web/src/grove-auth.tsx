@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { ApiError, api, type Session } from './api'
-import { Badge, CopyValue, EmptyState, Icon, Loading, Modal, Notice, Panel, AuthStory, shortId } from './ui'
+import { Badge, CopyValue, Icon, Loading, Modal, Notice, Panel, AuthStory } from './ui'
 import { groveReturnRoute, seedJoinTarget } from './grove-navigation'
-import { memberPanelOrigin, publicPanelLabel, type DirectoryMember, type MemberDirectoryVersion } from './grove-directory'
+import { memberPanelOrigin, type DirectoryMember, type MemberDirectoryVersion } from './grove-directory'
 import { isAutomaticQuorumInvitation, isQuorumInvitation, isSignedGroveInvitation, parseGroveInvitation, takeQuorumInvitation, type GroveRealm } from './grove-invitation'
 import { CopyGroveInvitation, GroveInvitationField } from './grove-invitation-fields'
 import { startBrowserJoin } from './grove-join'
+import './identity.css'
 
 export type GroveInfo = { configured: boolean; realm?: GroveRealm; local_issuer?: boolean; frozen?: string; issuer_paused?: boolean;
   member_login?: boolean; issuer_retired?: boolean; continuity_configured?: boolean; operator_revocation?: 'available' | 'awaiting-quorum';
@@ -246,11 +247,9 @@ export function GroveReturn({ request, onSession }: { request: string; onSession
   return <div className="auth-layout"><AuthStory /><div className="auth-form-wrap"><section className="auth-form-card"><span className="eyebrow">WELCOME TO YOUR GROVE</span><h1>{error ? '这次登录还没完成。' : '正在进入你的 Grove。'}</h1>{error ? <><p className="error" role="alert">{error}</p><button className="btn btn-primary btn-full" onClick={() => location.assign(location.origin + '/#/signin')}>返回节点入口</button></> : <Loading label="正在核对身份并建立本机会话…" />}</section></div></div>
 }
 
-export function GroveCard({ session, data, error, members, names, icons, directoryCurrent, directoryLoading, memberPanelOrigins, onUnauthorized, openJoin }: {
-  session: Session; data?: GroveInfo; error: string; members?: GroveInfo['members'];
-  names: ReadonlyMap<string, string>;
-  icons?: ReadonlyMap<string, string>;
-  directoryCurrent: boolean; directoryLoading: boolean; memberPanelOrigins: ReadonlyMap<string, string>; onUnauthorized: () => void; openJoin?: boolean
+export function GroveCard({ session, data, error, directoryCurrent, onUnauthorized, openJoin, mode = 'identity' }: {
+  session: Session; data?: GroveInfo; error: string; directoryCurrent: boolean;
+  onUnauthorized: () => void; openJoin?: boolean; mode?: 'identity' | 'nodes'
 }) {
   const [name, setName] = useState('我的 Grove'); const [pending, setPending] = useState(false); const [message, setMessage] = useState('')
   const [initialInvitation] = useState(takeQuorumInvitation)
@@ -371,7 +370,9 @@ export function GroveCard({ session, data, error, members, names, icons, directo
       window.dispatchEvent(new Event('spearmint:refresh'))
     }
   }
-  return <Panel title="Grove 身份与成员" action={data?.configured ? <Badge tone="green">统一登录</Badge> : <Badge tone="outline">本机模式</Badge>}>
+  return <Panel className={mode === 'identity' ? 'identity-accounts-panel' : 'grove-node-access'}
+    title={mode === 'nodes' ? '节点接入' : <span className="identity-grove-name"><Icon name="leaf" size={19} />{data?.realm?.name || 'Grove 账号'}</span>}
+    action={mode === 'identity' && data?.users ? <span className="muted tiny">{data.users.length} 个账号</span> : undefined}>
     {error && <Notice tone="amber">{error}</Notice>}
     {!data ? <Loading /> : !data.configured ? <>
       {openJoin && session.grove && <Notice tone="amber">请用这台节点的本机管理员账号登录后继续加入 Grove。</Notice>}
@@ -410,19 +411,11 @@ export function GroveCard({ session, data, error, members, names, icons, directo
       </details>}
       {message && <p className="error" role="alert">{message}</p>}
     </>
-      : <><div className="identity-profile"><span className="service-symbol"><Icon name="leaf" size={25} /></span><div><strong>{data.realm?.name}</strong>{!data.issuer_retired && <p>{data.local_issuer ? '当前节点提供 Grove 身份认证' : '使用已有 Grove 身份登录'}</p>}</div></div><dl className="facts"><div><dt>Grove 身份</dt><dd><CopyValue value={data.realm!.id} short /></dd></div>{!data.issuer_retired && <div><dt>身份入口</dt><dd><a className="text-link break-anywhere" href={data.realm!.issuer_origin}>{data.realm!.issuer_origin}<Icon name="external-link" size={14} /></a></dd></div>}<div><dt>同步版本</dt><dd>{data.sequence ?? '等待同步'}{Boolean(data.valid_until) && <span className="muted"> · {new Date(data.valid_until! * 1000).toLocaleTimeString()}</span>}</dd></div></dl>
+      : <>
       {(data.frozen || (data.issuer_paused && !data.issuer_retired)) && <Notice tone="amber">Grove 身份服务正在等待恢复确认；本机独立账号仍可按原有权限使用。</Notice>}
-      {members && !directoryCurrent && <Notice tone="amber">显示上次同步的 Grove 成员目录。</Notice>}
-      {members?.length ? <div className="grove-members">{members.map((member) => {
-        const origin = memberPanelOrigins.get(member.node_id)
-        const content = <><Icon name={icons?.get(member.node_id) ?? 'server'} size={19} /><span><strong>{names.get(member.node_id) || shortId(member.node_id)}</strong><small>{publicPanelLabel(member.origin)}</small></span>
-          <Badge tone={member.enabled ? 'green' : 'neutral'}>{member.enabled ? '已加入' : '已停用'}</Badge>{origin && <Icon name="arrow-up-right" size={15} />}</>
-        return origin ? <a className="grove-member" key={member.node_id} href={`${origin}/#/access`}>{content}</a>
-          : <div className="grove-member" key={member.node_id}>{content}</div>
-      })}</div> : directoryLoading ? <Loading label="正在读取成员目录…" /> : <EmptyState title="等待同步成员" />}
-      {!data.issuer_paused && !data.frozen && data.realm && <CopyGroveInvitation />}
-      {!data.local_issuer && <button className="btn btn-secondary" disabled={directorySync.checking || !!data.frozen || !!data.issuer_paused}
-          onClick={() => void directorySync.sync()}><Icon name="refresh" size={16} />{directorySync.checking ? '正在同步…' : '同步成员目录'}</button>}
+      {mode === 'nodes' && <>
+      <p className="muted">复制邀请代码，在目标节点验证 Grove 账号后加入网络。</p>
+      {!(data.issuer_paused && !data.issuer_retired) && !data.frozen && data.realm && <CopyGroveInvitation />}
       {session.grove && data.identity_voter && data.operator_revocation === 'available' && <details className="grove-existing-join">
         <summary>批准新成员</summary>
         <form className="auth-form" onSubmit={event => void memberAdmission(event, false)}>
@@ -431,6 +424,7 @@ export function GroveCard({ session, data, error, members, names, icons, directo
           <button className="btn btn-primary" disabled={pending}>在此成员批准</button>
         </form>
       </details>}
+      </>}
       {data.local_issuer && !data.frozen && !session.grove && !data.issuer_retired && !data.issuer_paused &&
         data.continuity_configured && !retirementDelivery &&
         <button className="btn btn-secondary" disabled={pending} onClick={() => setConfirmRetirement(true)}>退役原身份节点</button>}
@@ -444,11 +438,13 @@ export function GroveCard({ session, data, error, members, names, icons, directo
         {message && <p className="error" role="alert">{message}</p>}
         <button className="btn btn-primary" disabled={pending} onClick={() => void retire()}>{pending ? '正在核对成员…' : '确认退役并下载'}</button>
       </Modal>}
-      {data.operator_revocation && data.users && <details className="grove-existing-join">
-        <summary>Grove 账号</summary>
-        {data.users.map(user => <div className="grove-member" key={user.id}>
-          <span><strong>{user.name}</strong><small>{user.role === 'node_admin' ? '管理员' : '操作员'}</small></span>
-          <Badge tone={user.enabled ? 'green' : 'neutral'}>{user.enabled ? '有效' : '已停用'}</Badge>
+      {mode === 'identity' && <>
+      {data.users ? <div className="table-wrap"><table className="data-table identity-account-table"><thead><tr><th>账号</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody>
+        {data.users.map(user => <tr key={user.id}>
+          <td><strong>{user.name}</strong>{session.grove && [session.username, session.display_name].includes(user.name) && <span className="identity-current-account">当前账号</span>}</td>
+          <td>{user.role === 'node_admin' ? '管理员' : '操作员'}</td>
+          <td><Badge tone={user.enabled ? 'green' : 'neutral'}>{user.enabled ? '有效' : '已停用'}</Badge></td>
+          <td><div className="identity-account-actions">
           {session.grove && user.enabled && user.can_suspend && data.operator_revocation === 'available' &&
             <button className="btn btn-secondary btn-small" disabled={pending} onClick={() => { setMessage(''); setOperatorToRevoke(user) }}>停用</button>}
           {session.grove && user.enabled && data.recovery_admin && data.recovery_admin !== user.id &&
@@ -456,8 +452,18 @@ export function GroveCard({ session, data, error, members, names, icons, directo
             <button className="btn btn-secondary btn-small" disabled={pending} onClick={() => {
               setMessage(''); setRoleChange({ ...user, role: user.role === 'node_admin' ? 'remote_operator' : 'node_admin' })
             }}>{data.role_votes?.includes(user.id) ? '重新核对批准' : '调整角色'}</button>}
-        </div>)}
-      </details>}
+          {(!session.grove || !user.enabled || data.operator_revocation !== 'available' || !(user.can_suspend || data.recovery_admin && data.recovery_admin !== user.id && (user.role === 'node_admin' || user.require_mfa))) && <span className="muted">—</span>}
+          </div></td>
+        </tr>)}
+        {!data.users.length && <tr><td colSpan={4} className="muted">暂无 Grove 账号。</td></tr>}
+      </tbody></table></div> : <p className="muted">正在同步 Grove 账号…</p>}
+      <details className="identity-metadata"><summary>Grove 详情</summary><dl className="facts">
+        <div><dt>身份编号</dt><dd>{data.realm ? <CopyValue value={data.realm.id} short /> : '—'}</dd></div>
+        <div><dt>目录版本</dt><dd>{data.sequence ?? '—'}</dd></div>
+        <div><dt>同步状态</dt><dd>{directoryCurrent ? '已同步' : '等待同步'}</dd></div>
+      </dl><button className="btn btn-secondary btn-small" disabled={directorySync.checking || !!data.frozen || !!data.issuer_paused && !data.issuer_retired}
+        onClick={() => void directorySync.sync()}><Icon name="refresh" size={14} />{directorySync.checking ? '正在同步…' : '刷新账号目录'}</button></details>
+      </>}
       {operatorToRevoke && <Modal title={`停用 ${operatorToRevoke.name}`} onClose={() => { if (!pending) setOperatorToRevoke(undefined) }}>
         <p>成员收到停用记录后会注销该账号的会话。此操作无法撤销。</p>
         {message && <p className="error" role="alert">{message}</p>}
@@ -471,6 +477,6 @@ export function GroveCard({ session, data, error, members, names, icons, directo
       {revocation && <p role="status">{revocation}</p>}
       {message && !confirmRetirement && !operatorToRevoke && !roleChange && <p className="error" role="alert">{message}</p>}
       {directorySync.message && <p className={directorySync.message.error ? 'error' : 'muted'} role="status">{directorySync.message.text}</p>}
-      <p className="settings-note">成员身份经签名同步，新节点加入需管理员确认。</p></>}
+      </>}
   </Panel>
 }

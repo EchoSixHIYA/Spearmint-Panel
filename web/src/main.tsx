@@ -48,7 +48,7 @@ function ConsolePage({ route, onFactors, onSave }: { route: ReturnType<typeof us
     case 'alerts': return <><SectionNavigation page="alerts" /><AlertsPage /></>
     case 'audit': return <><SectionNavigation page="audit" /><AuditPage /></>
     case 'sessions': return <><PageHeading eyebrow="SECURITY / SESSIONS" title="我的会话" description="查看你的登录记录，及时关闭不再使用或无法确认的会话。" /><Sessions session={session} onUnauthorized={onUnauthorized} /></>
-    case 'identity': case 'access': return <><SectionNavigation page="identity" /><IdentityWorkspace /></>
+    case 'identity': case 'access': return <><SectionNavigation page="identity" /><IdentityWorkspace onFactors={onFactors} /></>
     case 'account': return <AccountWorkspace section={id} onFactors={onFactors} onSave={onSave} />
     case 'settings': return <AccountWorkspace section="settings" onFactors={onFactors} onSave={onSave} />
     case 'maintenance': case 'deployments': return <DeploymentsPage targetId={id || deploymentTarget(location.hash)} />
