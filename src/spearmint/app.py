@@ -561,6 +561,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     @app.get('/api/v1/auth/grove/info')
     def grove_info():
         info = grove.describe(store)
+        info['local_login'] = auth.local_login_available(store)
         if info['configured'] and not info['local_issuer']:
             info['member_login'] = grove_login.available(store)
         return info

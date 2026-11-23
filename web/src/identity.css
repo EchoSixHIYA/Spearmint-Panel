@@ -10,8 +10,9 @@
 .identity-account-table td:first-child { white-space: normal; overflow-wrap: anywhere; }
 .identity-current-account { display: inline-block; margin-left: 9px; color: var(--muted); font-size: 10px; }
 .identity-account-actions { display: flex; justify-content: center; align-items: center; gap: 7px; }
-.identity-metadata { margin-top: 16px; border-top: 1px solid var(--edge); padding-top: 12px; font-size: 11px; }
-.identity-metadata summary { cursor: pointer; color: var(--muted); }
+.identity-metadata { margin-top: 10px; font-size: 11px; }
+.identity-metadata summary { cursor: pointer; color: var(--muted); width: fit-content; margin-left: auto; }
+.identity-metadata[open] { border-top: 1px solid var(--edge); padding-top: 10px; }
 .identity-metadata .facts { margin: 8px 0; }
 .identity-metadata .facts > div { justify-content: flex-start; padding: 7px 0; }
 .identity-metadata dt { width: 72px; }

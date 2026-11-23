@@ -77,6 +77,19 @@ def bootstrap_account(db: sqlite3.Connection) -> sqlite3.Row | None:
     """).fetchone()
 
 
+def local_login_available(state: State) -> bool:
+    """Report independent accounts without exposing names or login material."""
+    from . import onboarding
+
+    record = onboarding.read_record(state)
+    initial = record['initial_hash'] if record else ''
+    with state.connect(read_only=True) as db:
+        return db.execute('''SELECT 1 FROM panel_account a WHERE a.enabled=1
+            AND a.password_hash LIKE '$argon2%' AND a.password_hash!=?
+            AND NOT EXISTS (SELECT 1 FROM grove_account g WHERE g.account_id=a.id)
+            LIMIT 1''', (initial,)).fetchone() is not None
+
+
 def account_for(db: sqlite3.Connection, username: str | None) -> sqlite3.Row | None:
     if username is None:
         return bootstrap_account(db)

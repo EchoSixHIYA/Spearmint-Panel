@@ -1,9 +1,9 @@
 import { type FormEvent, type MouseEvent, useEffect, useState } from 'react'
 import { ApiError, api, type Session } from './api'
 import { createPasskey, getPasskey, supportsPasskey } from './webauthn'
-import { AuthStory, Icon, Tabs } from './ui'
+import { AuthStory, Icon, Loading, Tabs } from './ui'
 import { AuthenticatorQR } from './onboarding'
-import { GroveLoginButton } from './grove-auth'
+import { GroveLoginButton, type GroveInfo } from './grove-auth'
 
 type Flow = { flow_id: string; method: 'totp' | 'recovery' | 'totp_rebind' | 'passkey_enroll'; expires_at: number }
 
@@ -33,6 +33,8 @@ export function SignIn({ onSession, initialError, enrollmentSession, onEnrollmen
   const [error, setError] = useState(initialError)
   const [pending, setPending] = useState(false)
   const [directIssuer, setDirectIssuer] = useState(false)
+  const [loginInfo, setLoginInfo] = useState<GroveInfo | null>()
+  const [localLogin, setLocalLogin] = useState(false)
   useEffect(() => { document.title = `${mode === 'recover' ? '恢复访问' : mode === 'enroll' || enrollmentSession ? '设置登录验证' : '登录'} · Spearmint` }, [mode, enrollmentSession])
 
   function reset() {
@@ -142,18 +144,24 @@ export function SignIn({ onSession, initialError, enrollmentSession, onEnrollmen
   if (authorizeRequest && !directIssuer) return <div className="auth-layout"><AuthStory /><div className="auth-form-wrap">
     <section className="auth-form-card">
       <h1>验证 Grove 身份</h1>
-      <GroveLoginButton onSession={onSession} authorizeRequest={authorizeRequest} onIssuer={setDirectIssuer} />
+      <GroveLoginButton onSession={onSession} authorizeRequest={authorizeRequest} onIssuer={setDirectIssuer} onInfo={setLoginInfo} />
       <button type="button" className="btn btn-ghost btn-full" onClick={() => history.back()}>返回上一页</button>
     </section>
   </div></div>
 
   const enrolling = useEnrollment || Boolean(enrollmentSession)
-  const title = recoveryCodes ? '保管好你的恢复码' : flow ? flow.method === 'totp_rebind' || flow.method === 'passkey_enroll' ? '登记验证器' : useRecovery ? '恢复账户访问' : '再确认一下，是你本人' : enrollmentSession ? '更换或添加验证器' : enrolling ? '使用本机登记令牌' : mode === 'enroll' ? '继续设置登录方式' : mode === 'recover' ? '恢复账户访问' : '登录 Spearmint'
+  const member = !!loginInfo?.configured && !loginInfo.local_issuer
+  const showLocal = !!flow || enrolling || mode !== 'signin' || directIssuer || localLogin || loginInfo !== undefined && !member
+  const title = recoveryCodes ? '保管好你的恢复码' : flow ? flow.method === 'totp_rebind' || flow.method === 'passkey_enroll' ? '登记验证器' : useRecovery ? '恢复账户访问' : '再确认一下，是你本人' : enrollmentSession ? '更换或添加验证器' : enrolling ? '使用本机登记令牌' : mode === 'enroll' ? '继续设置登录方式' : mode === 'recover' ? '恢复账户访问' : localLogin ? '本机恢复登录' : '登录 Spearmint'
   return <div className="auth-layout"><AuthStory /><div className="auth-form-wrap"><section className="auth-form-card" aria-labelledby="sign-in-heading">
     <span className="eyebrow">{enrolling ? 'FIRST TIME SETUP' : useRecovery || mode === 'recover' ? 'ACCOUNT RECOVERY' : 'SECURE ACCESS'}</span>
     <h1 id="sign-in-heading">{title}</h1>
     <p className="auth-subtitle">{recoveryCodes ? '每个恢复码只能使用一次，请保存在只有你能访问的安全位置。' : flow ? '完成验证后，继续进入你的 Grove。' : enrolling ? '核对本机授权，继续登记验证器。' : mode === 'enroll' ? '先用账号和密码登录，再在网页扫码设置验证器。首次登记无需控制台令牌。' : '欢迎回来，继续照看你的基础设施。'}</p>
-    {!flow && !enrolling && mode === 'signin' && <GroveLoginButton onSession={onSession} />}
+    {!flow && !enrolling && !localLogin && mode === 'signin' && <GroveLoginButton onSession={onSession} onInfo={setLoginInfo} />}
+    {!showLocal && loginInfo === undefined && <Loading label="正在读取登录方式…" />}
+    {member && !showLocal && loginInfo.local_login !== false && <div className="auth-local-entry"><button type="button" className="text-link" onClick={() => { setLocalLogin(true); setError('') }}>本机恢复登录</button></div>}
+    {member && localLogin && !flow && <button type="button" className="text-link auth-grove-return" onClick={() => { setLocalLogin(false); setError('') }}><Icon name="arrow-left" size={14} />返回 Grove 登录</button>}
+    {(showLocal || recoveryCodes) && <>
     {recoveryCodes ? <>
       <div className="auth-success"><Icon name="check-circle" size={23} /><div><strong>验证器已登记</strong><p>原登录会话已注销。保存恢复码后，请使用新验证器登录。</p></div></div>
       <ul className="recovery-codes">{recoveryCodes.map((code) => <li key={code}><code>{code}</code></li>)}</ul>
@@ -189,6 +197,7 @@ export function SignIn({ onSession, initialError, enrollmentSession, onEnrollmen
       {mode === 'enroll' && !flow && !enrollmentSession && <button className="text-link auth-alternative" disabled={pending} onClick={() => { setUseEnrollment(!useEnrollment); setError('') }}>{useEnrollment ? '返回网页首次设置' : '命名账户或恢复：使用本机登记令牌'}</button>}
       <p className="auth-footnote"><Icon name="shield-check" size={15} />本地认证 · 会话保护 · 分层授权</p>
       {!enrollmentSession && <div className="auth-links"><a href={enrolling ? '#/signin' : '#/auth-enroll'} className="text-link">{enrolling ? '返回普通登录' : '首次使用 / 设置登录验证'}</a><a href={mode === 'recover' ? '#/signin' : '#/auth-recover'} className="text-link">{mode === 'recover' ? '返回登录' : '恢复访问'}</a></div>}
+    </>}
     </>}
   </section><div className="auth-copyright">Spearmint · Your infrastructure. Your Grove.</div></div></div>
 }

@@ -258,6 +258,9 @@ a.grove-panel-entry:hover { background: #f0f7ee; }
 .password-field .input { padding-right: 43px; }
 .password-field .icon-button { position: absolute; right: 6px; top: 7px; color: #8fa494; }
 .auth-form-card > .tabs { margin-bottom: 24px; }
+.auth-local-entry { margin-top: 22px; text-align: center; }
+.auth-local-entry .text-link { padding: 0; border: 0; background: none; cursor: pointer; font-size: 11px; color: var(--muted); }
+.auth-grove-return { display: inline-flex; align-items: center; gap: 5px; margin-bottom: 18px; padding: 0; border: 0; background: none; cursor: pointer; font-size: 12px; }
 .auth-method { margin: 3px 0 7px; }
 .auth-method p { max-width: 280px; margin-inline: auto; }
 .auth-form-card .auth-method p { font-size: 12px; }

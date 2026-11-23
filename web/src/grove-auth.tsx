@@ -9,6 +9,7 @@ import { startBrowserJoin } from './grove-join'
 import './identity.css'
 
 export type GroveInfo = { configured: boolean; realm?: GroveRealm; local_issuer?: boolean; frozen?: string; issuer_paused?: boolean;
+  local_login?: boolean;
   member_login?: boolean; issuer_retired?: boolean; continuity_configured?: boolean; operator_revocation?: 'available' | 'awaiting-quorum';
   recovery_admin?: string; role_votes?: string[];
   identity_voter?: boolean;
@@ -115,8 +116,9 @@ export function groveError(failure: unknown) {
   return '暂时无法完成 Grove 登录，请检查连接后重试。'
 }
 
-export function GroveLoginButton({ onSession, authorizeRequest, onIssuer }: {
+export function GroveLoginButton({ onSession, authorizeRequest, onIssuer, onInfo }: {
   onSession: (session: Session) => void; authorizeRequest?: string; onIssuer?: (direct: boolean) => void
+  onInfo?: (info: GroveInfo | null) => void
 }) {
   const [info, setInfo] = useState<GroveInfo>()
   const [error, setError] = useState(''); const [pending, setPending] = useState(false)
@@ -129,6 +131,7 @@ export function GroveLoginButton({ onSession, authorizeRequest, onIssuer }: {
         const current = await api<GroveInfo>('/auth/grove/info')
         if (!active) return
         setInfo(current)
+        onInfo?.(current)
         if (authorizeRequest && current.local_issuer) onIssuer?.(true)
         else if (authorizeRequest) {
           const result = await api<{ name: string }>('/auth/grove/join-destination', { method: 'POST',
@@ -136,12 +139,13 @@ export function GroveLoginButton({ onSession, authorizeRequest, onIssuer }: {
           if (active) setDestination(result.name)
         }
       } catch {
+        if (active) onInfo?.(null)
         if (active && authorizeRequest) setError('这个面板当前无法验证该请求。请返回新节点，重新查找可用的 Grove 成员。')
       }
     }
     void load()
     return () => { active = false }
-  }, [authorizeRequest, onIssuer])
+  }, [authorizeRequest, onIssuer, onInfo])
   async function start() {
     setPending(true); setError('')
     try {
@@ -189,10 +193,9 @@ export function GroveLoginButton({ onSession, authorizeRequest, onIssuer }: {
       <Icon name="shield-check" size={17} />{pending ? '正在前往身份节点…' : '使用 Grove 账号登录'}<Icon name="arrow-right" size={16} />
     </button>}
     {info.member_login ? <p>在当前成员验证你的 Grove 账号。</p>
-      : !fallbackAvailable ? <p>正在同步 Grove 登录授权。现在可使用下方的节点账号登录。</p>
+      : !fallbackAvailable ? <p>正在同步 Grove 登录授权，请稍后重试。</p>
         : <p>Grove 登录需要浏览器能访问{issuer ? `身份节点 ${issuer.host}` : '身份节点'}。</p>}
     {error && <p className="error" role="alert">{error}</p>}
-    {!destination && <div className="auth-divider"><span>或使用本机账号</span></div>}
   </div>
 }
 
@@ -457,12 +460,13 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
         </tr>)}
         {!data.users.length && <tr><td colSpan={4} className="muted">暂无 Grove 账号。</td></tr>}
       </tbody></table></div> : <p className="muted">正在同步 Grove 账号…</p>}
-      <details className="identity-metadata"><summary>Grove 详情</summary><dl className="facts">
+      <details className="identity-metadata"><summary>诊断详情</summary><dl className="facts">
         <div><dt>身份编号</dt><dd>{data.realm ? <CopyValue value={data.realm.id} short /> : '—'}</dd></div>
         <div><dt>目录版本</dt><dd>{data.sequence ?? '—'}</dd></div>
         <div><dt>同步状态</dt><dd>{directoryCurrent ? '已同步' : '等待同步'}</dd></div>
       </dl><button className="btn btn-secondary btn-small" disabled={directorySync.checking || !!data.frozen || !!data.issuer_paused && !data.issuer_retired}
-        onClick={() => void directorySync.sync()}><Icon name="refresh" size={14} />{directorySync.checking ? '正在同步…' : '刷新账号目录'}</button></details>
+        onClick={() => void directorySync.sync()}><Icon name="refresh" size={14} />{directorySync.checking ? '正在同步…' : '刷新账号目录'}</button>
+        {directorySync.message && <p className={directorySync.message.error ? 'error' : 'muted'} role="status">{directorySync.message.text}</p>}</details>
       </>}
       {operatorToRevoke && <Modal title={`停用 ${operatorToRevoke.name}`} onClose={() => { if (!pending) setOperatorToRevoke(undefined) }}>
         <p>成员收到停用记录后会注销该账号的会话。此操作无法撤销。</p>
@@ -476,7 +480,7 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
       </Modal>}
       {revocation && <p role="status">{revocation}</p>}
       {message && !confirmRetirement && !operatorToRevoke && !roleChange && <p className="error" role="alert">{message}</p>}
-      {directorySync.message && <p className={directorySync.message.error ? 'error' : 'muted'} role="status">{directorySync.message.text}</p>}
+      {mode !== 'identity' && directorySync.message && <p className={directorySync.message.error ? 'error' : 'muted'} role="status">{directorySync.message.text}</p>}
       </>}
   </Panel>
 }
