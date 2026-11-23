@@ -63,18 +63,36 @@ def signature(service: Service) -> str:
     return hashlib.sha256(json.dumps(service.spec, sort_keys=True).encode()).hexdigest()
 
 
-def alive(pid: int, birth: str) -> bool:
+def linux_identity(pid=None):
+    """Kernel identities survive wall-clock corrections and WSL clock drift."""
+    if not sys.platform.startswith('linux'):
+        return None, None
+    boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    if pid is None:
+        return boot, None
+    fields = Path(f'/proc/{pid}/stat').read_text().rpartition(')')[2].split()
+    return boot, fields[19]  # Field 22, counted after the parenthesized process name.
+
+
+def alive(pid: int, birth: str, *, ticks=None, kernel_boot=None) -> bool:
     try:
         process = psutil.Process(pid)
+        if ticks is not None and kernel_boot is not None:
+            current_boot, current_ticks = linux_identity(pid)
+            return (current_boot, current_ticks) == (kernel_boot, ticks) and process.status() != psutil.STATUS_ZOMBIE
         return str(process.create_time()) == birth and process.status() != psutil.STATUS_ZOMBIE
-    except psutil.Error:
+    except (psutil.Error, OSError, IndexError):
         return False
 
 
 def starting_status(service: Service, instance: str, guardian: int) -> dict:
-    return {"spec": signature(service), "boot": boot_id(), "instance": instance,
+    result = {"spec": signature(service), "boot": boot_id(), "instance": instance,
             "guardian_pid": guardian, "guardian_start": process_start(guardian), "pid": 0,
             "child_start": "", "status": "starting"}
+    kernel_boot, ticks = linux_identity(guardian)
+    if kernel_boot is not None:
+        result.update(kernel_boot=kernel_boot, guardian_ticks=ticks)
+    return result
 
 
 def write_status(path: Path, status: dict) -> None:
@@ -111,7 +129,9 @@ class NativeProcessDriver:
             status = json.loads(read_file(path))
             if status["spec"] != signature(service):
                 raise HostError("The workload belongs to a different service configuration")
-            if status["boot"] != boot_id():
+            current_boot, _ = linux_identity()
+            same_boot = status['kernel_boot'] == current_boot if status.get('kernel_boot') else status['boot'] == boot_id()
+            if not same_boot:
                 return None
             return status
         except FileNotFoundError:
@@ -131,8 +151,8 @@ class NativeProcessDriver:
             return Observation("stopped")
         if status["status"] in {"stopped", "failed"}:
             return Observation(status["status"], status.get("message"), instance=status["instance"])
-        guard = alive(status["guardian_pid"], status["guardian_start"])
-        child_live = bool(status.get("pid")) and alive(status["pid"], status["child_start"])
+        guard = alive(status["guardian_pid"], status["guardian_start"], ticks=status.get('guardian_ticks'), kernel_boot=status.get('kernel_boot'))
+        child_live = bool(status.get("pid")) and alive(status["pid"], status["child_start"], ticks=status.get('child_ticks'), kernel_boot=status.get('kernel_boot'))
         if not guard:
             if child_live:
                 return Observation("unknown", "Supervisor exited while the workload is still alive; reconcile it locally", instance=status["instance"], pid=status["pid"])
@@ -168,7 +188,7 @@ class NativeProcessDriver:
             if self.observe(service, directory).status not in {'stopped', 'failed'}:
                 raise HostError('Stop the workload before changing its startup configuration')
             deadline = time.monotonic() + 3
-            while alive(status['guardian_pid'], status['guardian_start']):
+            while alive(status['guardian_pid'], status['guardian_start'], ticks=status.get('guardian_ticks'), kernel_boot=status.get('kernel_boot')):
                 if time.monotonic() >= deadline:
                     raise HostTimeout('Previous supervisor has not exited')
                 time.sleep(.05)
@@ -346,6 +366,8 @@ def supervise(state_dir: str, service_id: str, instance: str | None = None, laun
                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
                 pipe = child.stdout
             status.update(pid=child.pid, child_start=process_start(child.pid), status="running")
+            if status.get('kernel_boot'):
+                _, status['child_ticks'] = linux_identity(child.pid)
             write_status(status_path, status)
             reader = Thread(target=read_output, args=(pipe,), daemon=True)
             reader.start()

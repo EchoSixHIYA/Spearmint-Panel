@@ -498,7 +498,8 @@ class ServiceDeployments:
                     except HostError:
                         self.docker(job, ['image', 'inspect', image])
                         self.note(job, '使用目标节点已缓存的镜像')
-                    image_info = json.loads(self.docker(job, ['image', 'inspect', '--format', '{{json .}}', image]))
+                    template = '{"Id":{{json .Id}},"Os":{{json .Os}},"Config":{"Volumes":{{json .Config.Volumes}}}}'
+                    image_info = json.loads(self.docker(job, ['image', 'inspect', '--format', template, image]))
                     metadata['image_id'] = image_info['Id']
                     arguments = docker_arguments(job['command'], image_override=image_info['Id'])
                     mounts = self.docker(job, ['container', 'inspect', '--format', '{{json .Mounts}}', before.target]) if before else '[]'
