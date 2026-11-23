@@ -66,7 +66,7 @@ Set up a browser-accessible HTTPS address and a local reverse proxy to `127.0.0.
 
 ### Add nodes and register services
 
-1. Create a Grove on the first panel. To enroll an existing panel, copy an invitation from the Grove members page, paste it into the target panel, and authenticate with a Grove account. Check the resulting connection in the topology view.
+1. Create a Grove under Nodes → Set up Grove on the first panel. To enroll an existing panel, copy a code under Nodes → Invite node, paste it under Nodes → Set up Grove → Join existing Grove on the target panel, and authenticate with a Grove account. Check the resulting connection in the topology view; manage accounts and roles under Identity and security.
 2. To install Spearmint on a new device, open node seeding as a Grove administrator and pick an active member that can reach the target over SSH. After the connection test, the initiator detects the target OS and architecture, then automatically fetches and verifies the signed deployment package from its cache, GitHub Releases, or another Grove member. Browse to the installation directory to continue.
    Windows targets need the SSH SFTP subsystem and the built-in `cmd.exe`, `certutil.exe`, and `tar.exe`. The deployment account must be able to register a startup task. The panel task runs with that account's limited privileges.
 3. In service management, choose the local or remote node where the service runs and register it. For an existing container or system service, use observe mode to check its status and logs before switching to manage mode.
