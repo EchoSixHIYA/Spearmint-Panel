@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { ApiError, api, READ_TIMEOUT_MS, timestamp } from './api'
 import { eventLabel, refreshConsole, useConsole, type AuditEntry, type NodeView, type PeerReputation, type Preferences } from './console-data'
 import { meshPathError, OwnerRegistrationLink, PeerDirectory, RouteDetails, RouteObservations, RouteSelectionStatus } from './remote'
@@ -15,6 +15,7 @@ import { SeedWizard } from './seed-wizard'
 import { connectionGroup, connectionLabels, countConnections, meshEndpointLabel, nodeConnectionGroup, pathLabel, reachabilityLabel, reportedPath, type ConnectionGroup } from './connection-status'
 import { hostResources, hostSampleCurrent, resourceWarningPercent, type HostResource } from './host-resources'
 import { HostResourceTrend } from './host-resource-trend'
+import { nodeIcon, nodeIcons, nodeTypes, type NodeIcon, type NodeProfile, type NodeType } from './node-types'
 
 const connectionFilters = Object.keys(connectionLabels) as ConnectionGroup[]
 
@@ -70,7 +71,7 @@ export function NodeHelp({ onClose }: { onClose: () => void }) {
 
 export function NodeMini({ item }: { item: NodeView }) {
   const evidence = reachabilityLabel(item)
-  return <a className="node-mini" href={`#/nodes/${item.id}`}><span className="node-mini-icon"><Icon name={item.local ? 'server' : 'cloud'} size={20} /><NodeIndicator node={item} /></span>
+  return <a className="node-mini" href={`#/nodes/${item.id}`}><span className="node-mini-icon"><Icon name={nodeIcon(item)} size={20} /><NodeIndicator node={item} /></span>
     <span className="node-mini-content"><strong>{item.name}</strong><small>{item.local ? '当前节点' : pathLabel(item.activePath) ?? '远程节点'}</small>
       {evidence && <small>{evidence}</small>}</span>
     <span className="node-mini-end"><NodeConnectionBadge node={item} /><Icon name="chevron-right" size={15} /></span></a>
@@ -188,37 +189,55 @@ function MemberDirectoryNotice() {
 }
 
 export function NodeNote({ nodeId, onSave }: { nodeId: string; onSave: (value: Preferences) => void }) {
-  const { preferences, nodeNotes, session, grove } = useConsole()
-  const [draft, setDraft] = useState<string>()
+  const { preferences, nodeNotes, nodeProfiles, listedNodes, session, grove } = useConsole()
+  const [draft, setDraft] = useState<NodeProfile>()
   const [message, setMessage] = useState('')
   const [pending, setPending] = useState(false)
   const shared = !!grove.data?.realm
-  const note = draft ?? nodeNotes[nodeId] ?? ''
+  const profile = nodeProfiles[nodeId]
+  const stored = { note: nodeNotes[nodeId] ?? '', node_type: profile?.node_type ?? 'generic', icon: profile?.icon ?? 'auto' } satisfies NodeProfile
+  const value = draft ?? stored
+  const current = listedNodes.find(node => node.id === nodeId)
+  useEffect(() => {
+    if (draft && draft.note === stored.note && draft.node_type === stored.node_type && draft.icon === stored.icon) setDraft(undefined)
+  }, [stored.note, stored.node_type, stored.icon, draft])
+  function edit(change: Partial<NodeProfile>) { setDraft({ ...value, ...change }); setMessage('') }
   async function save(event: FormEvent) {
     event.preventDefault()
     setPending(true)
     try {
       if (shared) {
-        await api(`/grove/node-notes/${nodeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrf_token },
-          body: JSON.stringify({ note: note.trim() }) })
+        const saved = await api<NodeProfile>(`/grove/node-profiles/${nodeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrf_token },
+          body: JSON.stringify({ ...value, note: value.note.trim() }) })
+        setDraft(saved)
         refreshConsole()
       } else {
         const browserNotes = { ...preferences.nodeNotes }
-        if (note.trim()) browserNotes[nodeId] = note.trim()
+        if (value.note.trim()) browserNotes[nodeId] = value.note.trim()
         else delete browserNotes[nodeId]
-        onSave({ ...preferences, nodeNotes: browserNotes })
+        onSave({ ...preferences, nodeNotes: browserNotes,
+          nodeProfiles: { ...preferences.nodeProfiles, [nodeId]: { node_type: value.node_type, icon: value.icon } } })
+        setDraft(undefined)
       }
-      setDraft(undefined)
       setMessage(shared ? '已保存，其他节点将自动同步' : '已保存')
     } catch {
-      setMessage('暂时无法保存备注')
+      setMessage('暂时无法保存节点资料')
     } finally { setPending(false) }
   }
   return <form className="stack-small" onSubmit={(event) => void save(event)}>
-    <label className="field-label">节点备注<input className="input" maxLength={80} value={note} placeholder="例如 NAS 或内网工作站"
-      onChange={(event) => { setDraft(event.target.value); setMessage('') }} disabled={pending} /></label>
-    <p className="muted">{shared ? 'Grove 所有节点共用此备注。' : '备注保存在当前浏览器。'}留空保存可清除备注。</p>
-    <div className="button-row"><button className="btn btn-secondary" disabled={pending}>保存备注</button>
+    <label className="field-label">节点备注<input className="input" maxLength={80} value={value.note} placeholder="例如家中 NAS 或训练工作站"
+      onChange={(event) => edit({ note: event.target.value })} disabled={pending} /></label>
+    <label className="field-label">节点类型<select className="input" aria-label="节点类型" value={value.node_type} onChange={event => edit({ node_type: event.target.value as NodeType })} disabled={pending}>
+      {Object.entries(nodeTypes).map(([id, type]) => <option key={id} value={id}>{type.label}</option>)}
+    </select></label>
+    <fieldset className="node-profile-icons" disabled={pending}><legend>节点图标</legend><div className="node-icon-options">
+      {Object.entries(nodeIcons).map(([id, label]) => <label key={id} className={`node-icon-option${value.icon === id ? ' is-selected' : ''}`}>
+        <input type="radio" name={`node-icon-${nodeId}`} value={id} checked={value.icon === id} onChange={() => edit({ icon: id as NodeIcon })} />
+        <Icon name={id === 'auto' ? nodeIcon({ local: current?.local, nodeType: value.node_type, icon: 'auto' }) : id} size={21} /><span>{label}</span>
+      </label>)}
+    </div></fieldset>
+    <p className="muted tiny">{shared ? '备注、类型和图标会同步到整个 Grove。' : '节点资料保存在当前浏览器。'}</p>
+    <div className="button-row"><button className="btn btn-secondary" disabled={pending}>{pending ? '正在保存…' : '保存节点资料'}</button>
       {message && <span role="status">{message}</span>}</div>
   </form>
 }
@@ -263,9 +282,9 @@ export function NodesPage({ nodeId, resources = false, onSave }: { nodeId?: stri
     const names = new Map(listedNodes.map(({ id, name }) => [id, name]))
     const observations = selected.observations
     return <><a href="#/nodes" className="back-link"><Icon name="arrow-left" size={15} />返回节点列表</a><PageHeading eyebrow="INFRASTRUCTURE / NODE" title={selected.name} description={selected.local ? '你当前连接的 Spearmint 节点。' : '已登记的 Mesh 节点，其服务与权限由所属节点管理。'}>{openPanel}<button className="btn btn-secondary" onClick={refreshConsole}><Icon name="refresh" size={15} />刷新状态</button></PageHeading>
-      <div className="detail-identity"><span className="detail-identity-icon"><Icon name={selected.local ? 'server' : 'cloud'} size={26} /></span><div className="detail-identity-tags"><NodeConnectionBadge node={selected} /><Badge tone="outline">{selected.local ? '本机节点' : direct ? '直连邻居' : '远程节点'}</Badge><CopyValue value={selected.id} /></div></div>
+      <div className="detail-identity"><span className="detail-identity-icon"><Icon name={nodeIcon(selected)} size={26} /></span><div className="detail-identity-tags"><NodeConnectionBadge node={selected} /><Badge tone="outline">{selected.local ? '本机节点' : direct ? '直连邻居' : '远程节点'}</Badge><CopyValue value={selected.id} /></div></div>
       <Tabs label="节点详情" current={tab} onChange={setTab} items={[{ id: 'overview', label: '概览', icon: 'layout-dashboard' }, { id: 'services', label: '已授权服务', icon: 'layers' }, { id: 'network', label: '网络与身份', icon: 'network' }]} />
-      {tab === 'overview' && admin && <Panel title="节点备注"><NodeNote key={selected.id} nodeId={selected.id} onSave={onSave} /></Panel>}
+      {tab === 'overview' && admin && <Panel title="节点资料"><NodeNote key={selected.id} nodeId={selected.id} onSave={onSave} /></Panel>}
       {tab === 'overview' && <div className="columns-2"><Panel title={selected.local ? '主机资源' : '当前节点的连接状态'}
         action={selected.local && <NodeResourceLink id={selected.id} />}>{selected.local ? <ResourceBars /> : <>
         <NodeAddresses node={selected} directoryCurrent={directoryCurrent} />
@@ -316,7 +335,7 @@ export function NodesPage({ nodeId, resources = false, onSave }: { nodeId?: stri
     {!visible.length && (meshLoading || directoryLoading) ? <Loading /> : !visible.length ? <Panel><EmptyState icon="search" title="没有匹配的节点">试试其他状态筛选、节点地址或 Node ID。</EmptyState></Panel> : <div className="node-grid">{visible.map((node) => {
       const path = pathLabel(node.activePath)
       const evidence = reachabilityLabel(node)
-      return <a key={node.id} className="node-card" href={`#/nodes/${node.id}`}><div className="node-card-top"><span className="node-card-icon"><Icon name={node.local ? 'server' : 'cloud'} size={25} /><NodeIndicator node={node} /></span><Icon name="arrow-up-right" className="node-card-menu" size={17} /></div>
+      return <a key={node.id} className="node-card" href={`#/nodes/${node.id}`}><div className="node-card-top"><span className="node-card-icon"><Icon name={nodeIcon(node)} size={25} /><NodeIndicator node={node} /></span><Icon name="arrow-up-right" className="node-card-menu" size={17} /></div>
         <div className="node-card-title"><strong>{node.name}</strong><small>{publicPanelLabel(node.memberOrigin ?? (node.local ? location.origin : undefined))}</small></div><div className="tag-row"><Badge tone={node.local ? 'sage' : 'outline'}>{node.local ? '当前节点' : node.memberOrigin !== undefined ? 'Grove 成员' : 'Mesh 成员'}</Badge>{path && <Badge tone="outline">{path}</Badge>}</div><div className="node-card-divider" /><div className="node-card-facts"><span><Icon name={node.local ? 'cpu' : 'network'} size={13} />{node.local ? local.data?.platform?.process_backend || '本机执行' : node.status === 'online' && node.peer?.rtt_ms != null ? `${node.peer.rtt_ms.toFixed(1)} ms RTT` : '暂无链路采样'}</span></div><div className="node-card-bottom"><NodeConnectionBadge node={node} /><span>{node.local ? preferences.grove : shortId(node.id)}</span></div>
         {evidence && <small className="node-reachability">{evidence}</small>}
       </a>

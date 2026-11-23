@@ -6,6 +6,7 @@ import { publicPanelLabel } from './grove-directory'
 import { useRemoteCatalog } from './remote-catalog'
 import { serviceSearchText } from './services'
 import { allowNavigation } from './navigation-guard'
+import { nodeIcon } from './node-types'
 
 export const navigation = [
   { group: '工作台', items: [{ id: 'overview', title: '总览', icon: 'layout-dashboard' }, { id: 'services', title: '服务', icon: 'layers', admin: true }, { id: 'nodes', title: '节点', icon: 'server', admin: true }, { id: 'operations', title: '操作中心', icon: 'activity' }] },
@@ -90,7 +91,7 @@ export function ConsoleLayout({ page, children, onSignOut, signingOut }: {
 }
 
 function GrovePanels({ onClose, onSettings }: { onClose: () => void; onSettings: () => void }) {
-  const { admin, local, localName, webBuild, grove, directoryLoading, directoryPending, directoryCurrent, directorySequence, memberPanelOrigins, memberNodes } = useConsole()
+  const { admin, local, localName, webBuild, grove, directoryLoading, directoryPending, directoryCurrent, directorySequence, memberPanelOrigins, memberNodes, listedNodes } = useConsole()
   const currentId = local.data?.node_id
   const build = local.error ? undefined : local.data?.build
   const otherMembers = memberNodes?.filter(node => !node.local)
@@ -98,7 +99,7 @@ function GrovePanels({ onClose, onSettings }: { onClose: () => void; onSettings:
   const meshPending = directoryCurrent && otherMembers?.length && otherMembers.every(node => node.status === 'unconfigured')
   return <Modal title="Grove 节点" onClose={onClose} className="grove-panels">
     <div className="grove-panel-entry">
-      <span className="service-symbol"><Icon name="server" size={18} /></span>
+      <span className="service-symbol"><Icon name={nodeIcon(listedNodes.find(node => node.local) ?? { local: true })} size={18} /></span>
       <span className="grove-panel-name"><strong>{localName}</strong>
         <small>{publicPanelLabel(location.origin)}{currentId && ` · ${shortId(currentId)}`}</small>
         <small title={build?.commit || undefined}>后端 {build?.version ? `v${build.version}${build.commit ? ` · ${build.commit.slice(0, 8)}` : ''}` : local.data || local.error ? '未知' : '读取中…'}</small>
@@ -109,9 +110,10 @@ function GrovePanels({ onClose, onSettings }: { onClose: () => void; onSettings:
     {directorySequence !== undefined && <p className="muted grove-panel-message">
       {directoryCurrent ? '成员目录' : '上次同步的成员目录'} · 第 {directorySequence} 版
     </p>}
-    {!!panels.length && <ul className="grove-panel-list" aria-label="其他成员面板">{panels.map(({ id, name, memberOrigin }) => {
+    {!!panels.length && <ul className="grove-panel-list" aria-label="其他成员面板">{panels.map((node) => {
+      const { id, name, memberOrigin } = node
       const origin = memberPanelOrigins.get(id)
-      const entry = <><span className="service-symbol"><Icon name="server" size={18} /></span>
+      const entry = <><span className="service-symbol"><Icon name={nodeIcon(node)} size={18} /></span>
         <span className="grove-panel-name"><strong>{name}</strong><small>{publicPanelLabel(memberOrigin)} · {shortId(id)}</small></span></>
       return <li key={id}><a className="grove-panel-entry" href={`#/nodes/${id}`} onClick={onClose}>{entry}<Icon name="arrow-right" size={16} /></a></li>
     })}</ul>}
@@ -133,7 +135,7 @@ function SearchDialog({ onClose }: { onClose: () => void }) {
   const results = [
     ...pages.map((page) => ({ title: page.title, detail: '控制台页面', terms: page.id, href: `#/${page.id}`, icon: page.icon })),
     ...(admin ? listedNodes.map((node) => ({ title: node.name, detail: node.local ? '本机节点' : node.id,
-      terms: `${node.id} ${node.memberOrigin ?? ''}`, href: `#/nodes/${encodeURIComponent(node.id)}`, icon: 'server' })) : []),
+      terms: `${node.id} ${node.memberOrigin ?? ''}`, href: `#/nodes/${encodeURIComponent(node.id)}`, icon: nodeIcon(node) })) : []),
     ...(services.data || []).map((service) => ({ title: service.name, detail: `本机服务 · ${localName}`, terms: serviceSearchText(service),
       href: `#/services/${encodeURIComponent(service.id)}`, icon: 'layers' })),
     ...entries.map(({ node, service, stale }) => ({ title: service.name,

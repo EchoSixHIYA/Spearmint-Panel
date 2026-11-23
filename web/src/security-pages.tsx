@@ -45,6 +45,7 @@ export function AccessPage({ onFactors, expectedJoinNode }: { onFactors: () => v
       </Notice>}
     {admin && (!expectedJoinNode || joinTargetMatches) && <GroveCard key={expectedJoinNode || 'access'} openJoin={!!expectedJoinNode}
       session={session} data={groveDetails} error={groveError} members={members} names={new Map(listedNodes.map(node => [node.id, node.name]))}
+      icons={new Map(listedNodes.map(node => [node.id, nodeIcon(node)]))}
       directoryCurrent={directoryCurrent} directoryLoading={directoryLoading} memberPanelOrigins={memberPanelOrigins}
       onUnauthorized={onUnauthorized} />}
     <Panel title="我获准操作的远程服务" action={<a href="#/operations/approvals" className="panel-link">进入独立签名审批<Icon name="arrow-up-right" size={14} /></a>}>
@@ -89,3 +90,4 @@ export function GrovePasswordDialog({ session, onClose, onUnauthorized }: { sess
     </form>
   </Modal>
 }
+import { nodeIcon } from './node-types'

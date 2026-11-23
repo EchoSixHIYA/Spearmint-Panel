@@ -16,6 +16,22 @@ NOTE = 'node-note'
 DEPARTURE = 'member-departure'
 PAGE_SIZE = 16
 MAX_REVISION = 2**53 - 1
+NODE_TYPES = {'generic', 'pc', 'laptop', 'workstation', 'server', 'nas', 'edge', 'vm'}
+NODE_ICONS = {'auto', 'monitor', 'laptop', 'workstation', 'server', 'hard-drive', 'cpu', 'layers', 'cloud', 'smartphone'}
+
+
+def appearance(data):
+    node_type, icon = data.get('node_type', 'generic'), data.get('icon', 'auto')
+    if not isinstance(node_type, str) or node_type not in NODE_TYPES or not isinstance(icon, str) or icon not in NODE_ICONS:
+        raise PeerError('INVALID_REQUEST', 'Choose a supported node type and icon')
+    return {'node_type': node_type, 'icon': icon}
+
+
+def saved_appearance(envelope):
+    # The envelope was verified before entering the metadata table. Optional
+    # display fields fit the existing signed record and backup format.
+    data = decode_json(parse_b64(json.loads(envelope)['record'], 2048))
+    return appearance(data)
 
 
 def realm_id(db):
@@ -48,12 +64,14 @@ def verify(document, kind):
 
 def store_note(db, realm, document):
     data = verify(document, NOTE)
-    if (data.keys() != {'realm','author','public_key','node','revision','note'} or data['realm'] != realm
+    required = {'realm','author','public_key','node','revision','note'}
+    if (not required <= data.keys() or data.keys() - required - {'node_type', 'icon'} or data['realm'] != realm
             or not isinstance(data['node'], str) or NODE_ID.fullmatch(data['node']) is None
             or type(data['revision']) is not int or not 1 <= data['revision'] <= MAX_REVISION
             or not enabled(db, data['author']) or not enabled(db, data['node'])):
         raise PeerError('DENIED', 'The note does not belong to an active Grove member')
     note = text(data['note'])
+    appearance(data)
     envelope = grove.encoded(document).decode()
     db.execute('''INSERT INTO grove_node_note VALUES (?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET
                    revision=excluded.revision,author=excluded.author,note=excluded.note,envelope=excluded.envelope
@@ -68,20 +86,40 @@ def notes(state):
                             JOIN grove_member m ON m.node_id=n.node_id WHERE m.enabled=1''')}
 
 
+def profiles(state):
+    with state.connect(read_only=True) as db:
+        return {row['node_id']: {'note': row['note'], **saved_appearance(row['envelope'])}
+                for row in db.execute('''SELECT n.node_id,n.note,n.envelope FROM grove_node_note n
+                           JOIN grove_member m ON m.node_id=n.node_id WHERE m.enabled=1''')}
+
+
 def save_note(state, actor, node, value):
+    result = save_profile(state, actor, node, value)
+    return {'note': result['note']}
+
+
+def save_profile(state, actor, node, value, *, node_type=None, icon=None):
     note = text(value.strip())
     local, public = state.identity()
     with state.connect(write=True) as db:
         realm = realm_id(db)
         if realm is None or not enabled(db, local) or not enabled(db, node):
             raise PeerError('NOT_FOUND', 'The node is not an active member of this Grove')
-        old = db.execute('SELECT revision FROM grove_node_note WHERE node_id=?', (node,)).fetchone()
-        revision = (old[0] if old else 0) + 1
+        old = db.execute('SELECT revision,envelope FROM grove_node_note WHERE node_id=?', (node,)).fetchone()
+        settings = saved_appearance(old['envelope']) if old else appearance({})
+        if node_type is not None:
+            settings['node_type'] = node_type
+        if icon is not None:
+            settings['icon'] = icon
+        settings = appearance(settings)
+        revision = (old['revision'] if old else 0) + 1
+        extra = settings if node_type is not None or icon is not None or settings != appearance({}) else {}
         document = grove.signed(NOTE, {'realm':realm,'author':local,'public_key':wire_b64(public),
-                                      'node':node,'revision':revision,'note':note}, state.signing_key())
+                                      'node':node,'revision':revision,'note':note, **extra}, state.signing_key())
         store_note(db, realm, document)
-        audit(db, actor.operation_actor, actor.address, 'grove.node_note_changed', node)
-    return {'note':note}
+        event = 'grove.node_profile_changed' if node_type is not None or icon is not None else 'grove.node_note_changed'
+        audit(db, actor.operation_actor, actor.address, event, node)
+    return {'note':note, **settings}
 
 
 def departure(state):

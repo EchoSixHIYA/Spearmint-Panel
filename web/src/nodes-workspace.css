@@ -36,3 +36,11 @@
   .nodes-workspace-dialog .modal-inner { padding: 12px; }
   .nodes-workspace-dialog .columns-2 { grid-template-columns: 1fr; }
 }
+.node-profile-icons { min-width: 0; padding: 0; margin: 0; border: 0; }
+.node-profile-icons legend { padding: 0; margin-bottom: 8px; font-size: 12px; color: #657f6f; }
+.node-icon-options { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.node-icon-option { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 57px; padding: 7px 3px; border: 1px solid #dce7de; border-radius: 8px; color: #6b8777; cursor: pointer; font-size: 10px; }
+.node-icon-option input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.node-icon-option.is-selected { background: #edf6ee; border-color: #4a966c; color: #246747; }
+.node-icon-option:has(input:focus-visible) { outline: 2px solid #4a966c; outline-offset: 2px; }
+.node-profile-icons:disabled .node-icon-option { opacity: .6; cursor: wait; }

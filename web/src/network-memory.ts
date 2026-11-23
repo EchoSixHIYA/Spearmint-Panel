@@ -1,9 +1,10 @@
 import { useLayoutEffect, useRef } from 'react'
 import { useConsole, type NodeView } from './console-data'
 import { shortId } from './ui'
+import { isNodeIcon, isNodeType, type NodeIcon, type NodeType } from './node-types'
 
 export type RememberedEdge = { from: string; to: string; owners: string[] }
-type SavedNode = { id: string; name: string; depth: number; path?: string[]; relay?: true }
+type SavedNode = { id: string; name: string; depth: number; path?: string[]; relay?: true; nodeType?: NodeType; icon?: NodeIcon }
 type Snapshot = { version: 1; current: string; realm: string | null; realmKnown?: boolean; nodes: SavedNode[]; edges?: RememberedEdge[] }
 const nodeId = /^spm1-[a-f0-9]{64}$/
 
@@ -18,6 +19,7 @@ function read(key: string): Snapshot | undefined {
     for (const node of value.nodes) {
       if (!nodeId.test(node.id) || seen.has(node.id) || typeof node.name !== 'string' || node.name.length > 160
         || !Number.isInteger(node.depth) || node.depth < 0 || node.depth > 512 || (node.relay !== undefined && node.relay !== true)) return
+      if (node.nodeType !== undefined && !isNodeType(node.nodeType) || node.icon !== undefined && !isNodeIcon(node.icon)) return
       seen.add(node.id)
       if (node.path && (!Array.isArray(node.path) || node.path.length < 2 || node.path.length > 512
         || node.path[0] !== value.current || node.path.at(-1) !== node.id
@@ -51,8 +53,10 @@ export function useNetworkMemory() {
   const ids = [...new Set([...saved.keys(), ...live.keys()])]
   let nodes: NodeView[] = ids.map(id => {
     const cached = saved.get(id), actual = live.get(id)
-    if (actual) return { ...actual, name: nodeNotesCurrent ? actual.name : cached?.name ?? actual.name }
-    return { id, name: cached!.name, local: id === current, status: 'unknown', observations: [] }
+    if (actual) return { ...actual, name: nodeNotesCurrent ? actual.name : cached?.name ?? actual.name,
+      nodeType: nodeNotesCurrent ? actual.nodeType : cached?.nodeType ?? actual.nodeType,
+      icon: nodeNotesCurrent ? actual.icon : cached?.icon ?? actual.icon }
+    return { id, name: cached!.name, nodeType: cached?.nodeType, icon: cached?.icon, local: id === current, status: 'unknown', observations: [] }
   })
   const paths = new Map<string, string[]>()
   const depths = new Map<string, number>()
@@ -86,7 +90,7 @@ export function useNetworkMemory() {
   }
   const stored: SavedNode[] = nodes.map(node => {
     const path = paths.get(node.id)
-    return { id: node.id, name: node.name, depth: depths.get(node.id) ?? 1, ...(path && { path }), ...(!live.has(node.id) && (saved.get(node.id)?.relay || !saved.has(node.id)) && { relay: true as const }) }
+    return { id: node.id, name: node.name, nodeType: node.nodeType, icon: node.icon, depth: depths.get(node.id) ?? 1, ...(path && { path }), ...(!live.has(node.id) && (saved.get(node.id)?.relay || !saved.has(node.id)) && { relay: true as const }) }
   })
   const snapshot: Snapshot | undefined = current && nodes.some(node => node.id === current)
     ? { version: 1, current, realm: realmKnown ? realm : previous?.realm ?? realm, realmKnown: realmKnown || (previous?.realmKnown ?? previous?.realm != null), nodes: stored, edges: [...edges.values()] } : undefined

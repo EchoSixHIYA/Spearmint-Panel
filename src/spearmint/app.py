@@ -68,6 +68,11 @@ class GroveNodeNote(BaseModel):
     note: str = Field(max_length=80)
 
 
+class GroveNodeProfile(GroveNodeNote):
+    node_type: str = Field(max_length=32)
+    icon: str = Field(max_length=32)
+
+
 class GrovePasswordChange(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     current_password: str = Field(min_length=1, max_length=256)
@@ -593,6 +598,16 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     @app.get('/api/v1/grove/node-notes')
     def grove_node_notes(_actor: auth.Actor = Depends(require_actor)):
         return grove_metadata.notes(store)
+
+    @app.get('/api/v1/grove/node-profiles')
+    def grove_node_profiles(_actor: auth.Actor = Depends(require_actor)):
+        return grove_metadata.profiles(store)
+
+    @app.put('/api/v1/grove/node-profiles/{node_id}')
+    def set_grove_node_profile(node_id: str, request: Request, data: dict = Depends(grove_body), actor: auth.Actor = Depends(require_admin_write)):
+        require_origin(request)
+        body = grove_model(GroveNodeProfile, data)
+        return grove_metadata.save_profile(store, actor, node_id, body.note, node_type=body.node_type, icon=body.icon)
 
     @app.put('/api/v1/grove/node-notes/{node_id}')
     def set_grove_node_note(node_id: str, request: Request, data: dict = Depends(grove_body), actor: auth.Actor = Depends(require_admin_write)):

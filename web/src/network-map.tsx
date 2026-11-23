@@ -6,6 +6,7 @@ import { useNetworkMemory, type RememberedEdge } from './network-memory'
 import { NodeResourceStats, useNodeResources, type NodeResourceSample } from './node-resources'
 import './network-map.css'
 import { graphLayers, linkGeometry } from './network-geometry'
+import { nodeIcon, nodeTypes } from './node-types'
 
 type Link = { id: string; from: string; to: string; kind: 'active' | 'selected' | 'alternative'; shared?: boolean; pending?: boolean }
 export type NodeMenuAnchor = { x: number; y: number; trigger: HTMLElement }
@@ -135,7 +136,7 @@ function NetworkPreview({ current, levels, byId, links, paths }: {
       const label = [name, node?.local && '当前节点', status, latency != null && `${latency.toFixed(1)} ms`].filter(Boolean).join(' · ')
       const marker = <>
         <span className="mesh-preview-marker" data-mesh-node={id}>
-          <Icon name={node?.local ? 'monitor' : node ? 'server' : 'route'} size={18} />
+          <Icon name={node ? nodeIcon(node) : 'route'} size={18} />
         </span>
         <span className="mesh-preview-name">{name}</span>
       </>
@@ -161,7 +162,7 @@ function MapNode({ node, sample, plotted = false, selected = false, selectTarget
     'data-mesh-node': plotted ? node.id : undefined, title: node.name }
   const card = <>
     <span className="mesh-node-header">
-    <span className="mesh-node-icon"><Icon name={node.local ? 'monitor' : 'server'} size={21} /></span>
+    <span className="mesh-node-icon" title={nodeTypes[node.nodeType ?? 'generic'].label}><Icon name={nodeIcon(node)} size={21} /></span>
     <span className="mesh-node-info"><strong>{node.name}</strong></span>
     <span className="mesh-node-connection"><small><span className="mesh-status-dot" />{nodeConnectionLabel(node)}</small>
       <small className="mesh-latency" title="心跳往返时间">{latency != null ? `${latency.toFixed(1)} ms` : node.local ? '本机' : '—'}</small></span>

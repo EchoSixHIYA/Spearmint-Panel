@@ -9,6 +9,7 @@ import { groveDirectory } from './grove-directory'
 import type { DeploymentHost } from './release-compatibility'
 import { localServiceAlerts, remoteServiceAlerts, type ConsoleAlert } from './service-alerts'
 import { hostResourceAlerts } from './host-resources'
+import { isNodeIcon, isNodeType, type NodeAppearance, type NodeIcon, type NodeProfile, type NodeType } from './node-types'
 
 export type Platform = { os: string; architecture: string; process_backend: string; docker: string; file_security: string }
 export type NodeInfo = { node_id: string; platform?: Platform; deployment_host?: DeploymentHost; package_checksums_sha256?: string; build?: {
@@ -82,6 +83,7 @@ export type Metrics = {
 export type AuditEntry = { id: number; recorded_at: number; actor: string; source: string; event: string; target: string | null; reason?: string | null; count?: number }
 export type NodeView = {
   id: string; name: string; local: boolean; status: string; observations: RouteObservation[]
+  nodeType?: NodeType; icon?: NodeIcon
   activePath?: string[]; idlePath?: IdlePath; peer?: Peer; memberOrigin?: string
 }
 
@@ -140,7 +142,7 @@ function usePeerEvidence(peers: Pick<ReturnType<typeof usePoll<Peer[]>>, 'data' 
   return evidence
 }
 
-export type Preferences = { grove: string; localName: string; compact: boolean; nodeNotes: Record<string, string> }
+export type Preferences = { grove: string; localName: string; compact: boolean; nodeNotes: Record<string, string>; nodeProfiles?: Record<string, NodeAppearance> }
 export const defaultPreferences: Preferences = { grove: '我的 Grove', localName: '本机节点', compact: false, nodeNotes: {} }
 
 export function usePreferences() {
@@ -150,9 +152,14 @@ export function usePreferences() {
       const notes = value.nodeNotes && typeof value.nodeNotes === 'object' ? Object.entries(value.nodeNotes) : []
       const nodeNotes = Object.fromEntries(notes.flatMap(([id, note]) =>
         /^spm1-[a-f0-9]{64}$/.test(id) && typeof note === 'string' && note.trim() ? [[id, note.trim().slice(0, 80)]] : []))
+      const profiles = value.nodeProfiles && typeof value.nodeProfiles === 'object' ? Object.entries(value.nodeProfiles) : []
+      const nodeProfiles = Object.fromEntries(profiles.flatMap(([id, raw]) => {
+        const profile = raw as NodeAppearance | null
+        return /^spm1-[a-f0-9]{64}$/.test(id) && profile && isNodeType(profile.node_type) && isNodeIcon(profile.icon) ? [[id, profile]] : []
+      }))
       return { grove: typeof value.grove === 'string' && value.grove.trim() ? value.grove.slice(0, 40) : defaultPreferences.grove,
         localName: typeof value.localName === 'string' && value.localName.trim() ? value.localName.slice(0, 40) : defaultPreferences.localName,
-        compact: value.compact === true, nodeNotes }
+        compact: value.compact === true, nodeNotes, nodeProfiles }
     } catch { return defaultPreferences }
   })
   function save(value: Preferences) {
@@ -167,8 +174,9 @@ function useConsoleData(session: Session, onUnauthorized: () => void, preference
   const local = usePoll<NodeInfo>('/node', onUnauthorized)
   const grove = usePoll<GroveInfo>('/auth/grove/info', onUnauthorized)
   const realmId = grove.data?.realm?.id
-  const sharedNotes = usePoll<Record<string, string>>(realmId ? '/grove/node-notes' : null, onUnauthorized, 3000, undefined, realmId)
-  const nodeNotes = realmId ? sharedNotes.data ?? {} : preferences.nodeNotes
+  const sharedProfiles = usePoll<Record<string, NodeProfile>>(realmId ? '/grove/node-profiles' : null, onUnauthorized, 3000, undefined, realmId)
+  const nodeNotes = realmId ? Object.fromEntries(Object.entries(sharedProfiles.data ?? {}).map(([id, profile]) => [id, profile.note])) : preferences.nodeNotes
+  const nodeProfiles = realmId ? sharedProfiles.data ?? {} : preferences.nodeProfiles ?? {}
   const roster = usePoll<GroveInfo>(admin && grove.data?.configured ? '/grove' : null, onUnauthorized, 15000, undefined, realmId)
   const directory = groveDirectory(grove, roster, admin)
   const [, refreshDirectory] = useState(0)
@@ -210,6 +218,11 @@ function useConsoleData(session: Session, onUnauthorized: () => void, preference
     memberNodes.push(node)
   }
   const listedNodes = [...inventory.values()]
+  for (const node of listedNodes) {
+    const profile = nodeProfiles[node.id]
+    node.nodeType = isNodeType(profile?.node_type) ? profile.node_type : 'generic'
+    node.icon = isNodeIcon(profile?.icon) ? profile.icon : 'auto'
+  }
   const localName = local.data ? inventory.get(local.data.node_id)?.name ?? preferences.localName : preferences.localName
   const nodes = listedNodes.filter((node) => node.local || node.peer)
   const [, expireAlerts] = useState(0)
@@ -244,7 +257,7 @@ function useConsoleData(session: Session, onUnauthorized: () => void, preference
   return { local, localName, peers, services, metrics, audit, nodes, listedNodes, memberNodes: directory.members ? memberNodes : undefined,
     remoteNodes, connections: countConnections(remoteNodes),
     meshCurrent, meshLoading, meshError, remoteCatalog, alerts,
-    admin, session, preferences, nodeNotes, nodeNotesCurrent: !!grove.data && !grove.error && (!realmId || (!!sharedNotes.data && !sharedNotes.error)),
+    admin, session, preferences, nodeNotes, nodeProfiles, nodeNotesCurrent: !!grove.data && !grove.error && (!realmId || (!!sharedProfiles.data && !sharedProfiles.error)),
     grove, groveError: grove.error || roster.error, ...directory, onUnauthorized }
 }
 
@@ -280,6 +293,7 @@ const events: Record<string, string> = {
   'grove.member_joined': '已批准 Grove 成员',
   'grove.member_departed': 'Grove 成员已退出',
   'grove.node_note_changed': '已更新节点备注',
+  'grove.node_profile_changed': '已更新节点资料',
   'grove.member_approved': '已批准 Grove 成员',
   'grove.member_directory_requested': '收到 Grove 成员的 HTTPS 身份目录请求',
   'grove.member_directory_requested_mesh': '收到 Grove 成员的 Mesh 身份目录请求',

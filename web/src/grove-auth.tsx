@@ -246,9 +246,10 @@ export function GroveReturn({ request, onSession }: { request: string; onSession
   return <div className="auth-layout"><AuthStory /><div className="auth-form-wrap"><section className="auth-form-card"><span className="eyebrow">WELCOME TO YOUR GROVE</span><h1>{error ? '这次登录还没完成。' : '正在进入你的 Grove。'}</h1>{error ? <><p className="error" role="alert">{error}</p><button className="btn btn-primary btn-full" onClick={() => location.assign(location.origin + '/#/signin')}>返回节点入口</button></> : <Loading label="正在核对身份并建立本机会话…" />}</section></div></div>
 }
 
-export function GroveCard({ session, data, error, members, names, directoryCurrent, directoryLoading, memberPanelOrigins, onUnauthorized, openJoin }: {
+export function GroveCard({ session, data, error, members, names, icons, directoryCurrent, directoryLoading, memberPanelOrigins, onUnauthorized, openJoin }: {
   session: Session; data?: GroveInfo; error: string; members?: GroveInfo['members'];
   names: ReadonlyMap<string, string>;
+  icons?: ReadonlyMap<string, string>;
   directoryCurrent: boolean; directoryLoading: boolean; memberPanelOrigins: ReadonlyMap<string, string>; onUnauthorized: () => void; openJoin?: boolean
 }) {
   const [name, setName] = useState('我的 Grove'); const [pending, setPending] = useState(false); const [message, setMessage] = useState('')
@@ -414,7 +415,7 @@ export function GroveCard({ session, data, error, members, names, directoryCurre
       {members && !directoryCurrent && <Notice tone="amber">显示上次同步的 Grove 成员目录。</Notice>}
       {members?.length ? <div className="grove-members">{members.map((member) => {
         const origin = memberPanelOrigins.get(member.node_id)
-        const content = <><Icon name="server" size={19} /><span><strong>{names.get(member.node_id) || shortId(member.node_id)}</strong><small>{publicPanelLabel(member.origin)}</small></span>
+        const content = <><Icon name={icons?.get(member.node_id) ?? 'server'} size={19} /><span><strong>{names.get(member.node_id) || shortId(member.node_id)}</strong><small>{publicPanelLabel(member.origin)}</small></span>
           <Badge tone={member.enabled ? 'green' : 'neutral'}>{member.enabled ? '已加入' : '已停用'}</Badge>{origin && <Icon name="arrow-up-right" size={15} />}</>
         return origin ? <a className="grove-member" key={member.node_id} href={`${origin}/#/access`}>{content}</a>
           : <div className="grove-member" key={member.node_id}>{content}</div>

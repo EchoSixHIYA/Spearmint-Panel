@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { timestamp, usePoll } from './api'
 import { useConsole, type Metrics, type Preferences, refreshConsole } from './console-data'
 import { NodeNote, SettingsPage, TopologyPaths } from './console-pages'
+import { nodeIcon, nodeTypes } from './node-types'
 import { GroveCard } from './grove-auth'
 import { Sessions } from './sessions'
 import { GrovePasswordDialog } from './security-pages'
@@ -53,7 +54,7 @@ export function NodeInspector({ nodeId, onSave, embedded = false, initialTab }: 
     <a className="btn btn-secondary" href={withReturn(`#/ssh/${selected.id}`)}>终端与文件</a><a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(selected.id))}>登记服务</a>
   </PageHeading></>}<div className="workspace-context"><span>当前面板 <strong>{localName}</strong></span><Icon name="arrow-right" size={15} /><span>目标节点 <strong>{selected.name}</strong></span><NodeConnectionBadge node={selected} /></div>
     <Tabs label="节点工作区" current={tab} onChange={setTab} items={[{ id: 'overview', label: '概况' }, { id: 'services', label: '服务' }, { id: 'network', label: '网络' }, { id: 'resources', label: '资源' }, { id: 'version', label: '版本' }]} />
-    {tab === 'overview' && <div className="columns-2"><Panel title="节点信息"><dl className="facts"><div><dt>节点标识</dt><dd><CopyValue value={selected.id} short /></dd></div><div><dt>面板地址</dt><dd>{publicPanelLabel(selected.memberOrigin || (selected.local ? location.origin : undefined))}</dd></div><div><dt>连接</dt><dd>{selected.activePath?.length ? `${selected.activePath.length - 1} 跳` : selected.local ? '当前面板' : '暂无活动路径'}</dd></div></dl></Panel><Panel title="节点备注"><NodeNote nodeId={selected.id} onSave={onSave} /></Panel></div>}
+    {tab === 'overview' && <div className="columns-2"><Panel title="节点信息"><dl className="facts"><div><dt>节点标识</dt><dd><CopyValue value={selected.id} short /></dd></div><div><dt>节点类型</dt><dd>{nodeTypes[selected.nodeType ?? 'generic'].label}</dd></div><div><dt>面板地址</dt><dd>{publicPanelLabel(selected.memberOrigin || (selected.local ? location.origin : undefined))}</dd></div><div><dt>连接</dt><dd>{selected.activePath?.length ? `${selected.activePath.length - 1} 跳` : selected.local ? '当前面板' : '暂无活动路径'}</dd></div></dl></Panel><Panel title="节点资料"><NodeNote nodeId={selected.id} onSave={onSave} /></Panel></div>}
     {tab === 'services' && <ServiceList key={selected.id} initialNode={selected.id} embedded />}
     {tab === 'network' && <Panel title="网络路径">{selected.local ? <p className="muted">这是当前节点，可在拓扑中选择其他节点查看连接路径。</p> : <TopologyPaths key={selected.id} node={selected} />}</Panel>}
     {tab === 'resources' && (online ? <NodeSample target={selected.local ? 'local' : selected.id} full /> : <Notice tone="amber">目标节点当前不可达，等待连接恢复后读取真实采样。</Notice>)}
@@ -64,7 +65,7 @@ export function NodeInspector({ nodeId, onSave, embedded = false, initialTab }: 
 export function IdentityWorkspace() {
   const { session, onUnauthorized, groveDetails, groveError, listedNodes, members, directoryCurrent, directoryLoading, memberPanelOrigins } = useConsole()
   return <><PageHeading eyebrow="MANAGEMENT / IDENTITY" title="身份与成员" description="管理 Grove 成员、用户和邀请。登录 Grove 后在当前面板管理成员服务。" />
-    <GroveCard data={groveDetails} error={groveError} session={session} onUnauthorized={onUnauthorized} members={members} names={new Map(listedNodes.map(node => [node.id, node.name]))} directoryCurrent={directoryCurrent} directoryLoading={directoryLoading} memberPanelOrigins={memberPanelOrigins} />
+    <GroveCard data={groveDetails} error={groveError} session={session} onUnauthorized={onUnauthorized} members={members} names={new Map(listedNodes.map(node => [node.id, node.name]))} icons={new Map(listedNodes.map(node => [node.id, nodeIcon(node)]))} directoryCurrent={directoryCurrent} directoryLoading={directoryLoading} memberPanelOrigins={memberPanelOrigins} />
     <Panel title="成员服务管理"><p>当前账号：{session.display_name || session.username}。成员目录内共 {listedNodes.length} 个节点。</p><a href="#/services" className="btn btn-primary">管理 Grove 服务</a></Panel>
   </>
 }

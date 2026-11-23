@@ -18,7 +18,7 @@ type Menu = { node: NodeView; anchor: NodeMenuAnchor }
 function NodeMenu({ node, anchor, close }: Menu & { close: (restore?: boolean) => void }) {
   const ref = useRef<HTMLDivElement>(null)
   const items = [
-    { label: '节点详情与备注', icon: 'info', route: `#/nodes/${node.id}` },
+    { label: '节点资料与备注', icon: 'info', route: `#/nodes/${node.id}` },
     { label: '查看节点服务', icon: 'layers', route: `#/nodes/${node.id}?tab=services` },
     { label: '资源与趋势', icon: 'activity', route: `#/nodes/${node.id}/resources` },
     { label: '登记服务', icon: 'plus', route: groveServiceRegistrationHref(node.id) },

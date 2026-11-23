@@ -1,5 +1,6 @@
 // Static vector paths retained from the user supplied Grove prototype.
 export const iconPaths: Record<string, string> = {
+  "workstation": '<rect x="3" y="3" width="12" height="11" rx="1.5"/><path d="M7 18h4M9 14v4"/><rect x="17" y="3" width="4" height="18" rx="1"/><path d="M19 6h.01M19 17h.01"/>',
   "maximize": "<path d=\"M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5\"/>",
   "folder": "<path d=\"M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z\"/>",
   "sprout": "<path d=\"M7 20h10M12 20v-7M12 13C6 13 4 9 4 5c6 0 8 3 8 8Zm0 0c0-6 3-9 8-9 0 6-2 9-8 9Z\"/>",
