@@ -4,6 +4,8 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+import subprocess
+import json
 from unittest.mock import patch
 
 from spearmint.catalog import Service
@@ -13,6 +15,16 @@ from spearmint.state import State
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux kernel process identity')
 class NativeIdentityTest(unittest.TestCase):
+    def test_parent_and_child_read_the_same_kernel_identity(self):
+        script = 'import os,json,sys; from spearmint.native_process import linux_identity; print(json.dumps(linux_identity(os.getpid())), flush=True); sys.stdin.read(1)'
+        with subprocess.Popen([sys.executable, '-c', script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as child:
+            try:
+                identity = json.loads(child.stdout.readline())
+                self.assertEqual(list(linux_identity(child.pid)), identity)
+            finally:
+                child.stdin.close()
+                child.wait(timeout=10)
+
     def test_kernel_ticks_keep_live_process_recognized_when_wall_clock_changes(self):
         boot, ticks = linux_identity(os.getpid())
         self.assertIsInstance(boot, str)

@@ -70,7 +70,9 @@ def linux_identity(pid=None):
     boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
     if pid is None:
         return boot, None
-    fields = Path(f'/proc/{pid}/stat').read_text().rpartition(')')[2].split()
+    # The main task view also gives the kernel value under qemu-user, which
+    # synthesizes /proc/<self>/stat at guest exec time instead of fork time.
+    fields = Path(f'/proc/{pid}/task/{pid}/stat').read_text().rpartition(')')[2].split()
     return boot, fields[19]  # Field 22, counted after the parenthesized process name.
 
 
