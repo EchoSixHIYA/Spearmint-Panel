@@ -3,13 +3,16 @@ import asyncio
 import json
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
+import time
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from spearmint.peer.adaptive import AdaptiveRoutes, Binding, COOLDOWN, MAX_TRIALS
 from spearmint.peer.path_selection import Latency, Selector
 from spearmint.peer.protocol import PeerError, encode, wire_b64
-from spearmint.peer.relay import CIRCUITS, PRIMARY_RESERVE, Circuit, Relay
-from spearmint.peer.routing import Route
+from spearmint.peer.relay import CIRCUITS, PRIMARY_RESERVE, Circuit, CircuitError, Relay
+from spearmint.peer.routing import MULTIPATH_CAPABILITY, Route, Routing
 from spearmint.peer.session import RELAY_QUEUE_CIRCUITS, Session
 
 
@@ -185,6 +188,86 @@ class RouteSchedulingTest(unittest.IsolatedAsyncioTestCase):
         f.options['ii']=[distant,nearby]
         await f.scheduler.establish(f.manager.pairs['ii'],background=True)
         self.assertEqual(f.opened,[nearby.path])
+
+    async def test_late_shanghai_candidate_is_sampled_and_replaces_first_us_success(self):
+        f=Fixture();us=f.route('us','ii',first_rtt=250)
+        primary=f.primary(us,900);f.options['ii']=[us]
+        await f.step()
+        self.assertFalse(f.opened)
+        shanghai=f.route('shanghai','ii',first_rtt=20)
+        f.options['ii'].append(shanghai)
+        await f.step()
+        self.assertEqual(f.opened,[shanghai.path])
+        standby=f.scheduler.trials['ii']
+        for _ in range(5):
+            f.now+=1;primary.session.latency.add(900,f.now);standby.session.latency.add(40,f.now)
+            await f.step()
+        self.assertEqual(f.scheduler.active['ii'].route.path,shanghai.path)
+        self.assertEqual(f.scheduler.reasons['ii'],'lower_cost')
+
+    async def test_discovery_collects_late_candidate_after_first_result_is_usable(self):
+        f=Fixture();us=f.route('us','ii');shanghai=f.route('shanghai','ii')
+        f.manager.pairs.update({name:SimpleNamespace(enabled=True) for name in ('us','shanghai')})
+        f.manager.neighbors={route.path[1]:route.first for route in (us,shanghai)}
+        for route in (us,shanghai): route.first.capabilities={MULTIPATH_CAPABILITY}
+        routing=Routing(f.manager,Ed25519PrivateKey.generate(),adaptive=True)
+        future=asyncio.get_running_loop().create_future();routing.first_results['ii']=future
+        def deliver(route):
+            candidate=Route(route.path,route.first,route.ticket,time.monotonic()+30)
+            routing.remember(candidate)
+            if not future.done(): future.set_result(candidate)
+        def send(link,frame):
+            route=us if link is us.first else shanghai
+            asyncio.get_running_loop().call_later(.001 if route is us else .04,deliver,route)
+            return True
+        routing.send=send
+        with patch('spearmint.peer.routing.QUERY_TTL',.1):
+            discovery=asyncio.create_task(routing.discover('ii','fixture'))
+            first=await future
+            self.assertEqual(first.path,us.path)
+            self.assertFalse(discovery.done())
+            await discovery
+        self.assertEqual({route.path for route in routing.routes('ii')},{us.path,shanghai.path})
+
+    async def test_busy_path_keeps_ticket_and_reports_automatic_retry_scope(self):
+        f=Fixture();us=f.route('us','ii');shanghai=f.route('shanghai','ii')
+        primary=f.primary(us,900);f.options['ii']=[us,shanghai]
+        f.relay.open_route=AsyncMock(side_effect=CircuitError('BUSY','Path capacity',scope='path',phase='ready'))
+        await f.step()
+        status=f.scheduler.status('ii');candidate=status['discovered_candidates'][0]
+        self.assertIs(f.scheduler.active['ii'],primary)
+        self.assertEqual(candidate['state'],'cooldown')
+        self.assertEqual(candidate['retry_seconds'],5)
+        self.assertEqual(candidate['failure']['scope'],'path')
+        self.assertEqual(candidate['failure']['phase'],'ready')
+        f.now+=3
+        self.assertEqual(f.scheduler.status('ii')['discovered_candidates'][0]['retry_seconds'],2)
+        f.now+=2;f.relay.open_route=f.open_route
+        await f.step()
+        self.assertIn('ii',f.scheduler.trials)
+        self.assertIsNone(f.scheduler.status('ii')['last_failure'])
+        self.assertEqual(f.scheduler.status('ii')['discovered_candidates'],[])
+
+    async def test_capacity_failure_scope_and_ticket_lifetime(self):
+        f=Fixture();route=f.route('shanghai','ii')
+        relay=self.relay();relay.manager.neighbors={'shanghai':route.first}
+        relay.routing=SimpleNamespace(verified=Mock(),invalidate=Mock())
+        relay.is_link=lambda link: link is route.first
+        route.first.session.discard_relay=Mock()
+        route=Route(route.path,route.first,SimpleNamespace(wire=lambda:{}),time.monotonic()+30)
+        relay.register=Mock(side_effect=PeerError('BUSY','Local capacity'))
+        with self.assertRaises(CircuitError) as raised:
+            await relay.open_route(f.manager.pairs['ii'],route,role='trial')
+        self.assertEqual((raised.exception.scope,raised.exception.phase),('local','capacity'))
+        relay.register=Relay.register.__get__(relay)
+        circuit=Circuit('fixture',route.path,route.ticket,None,route.first,route=route)
+        relay.register(circuit)
+        relay.accept(circuit,circuit.following,{'type':'route.error','code':'BUSY'})
+        self.assertEqual(circuit.failure_scope,'path')
+        self.assertTrue(circuit.ready.is_set())
+        relay.routing.invalidate.assert_not_called()
+        relay.drop(circuit,'ROUTE_LOST')
+        self.assertEqual(circuit.failure_scope,'path')
 
     async def test_reverse_session_is_reused_and_inbound_reply_drains(self):
         f=Fixture();route=f.route('shanghai','nas')

@@ -33,6 +33,12 @@ REASONS = {"CLOSED", "ROUTE_LOST", "DENIED", "BUSY", "PROTOCOL"}
 OPEN_FIELDS = {"mesh_id", "origin_node_id", "target_node_id", "circuit_id", "ticket_digest", "expires_at"}
 
 
+class CircuitError(PeerError):
+    def __init__(self, code: str, message: str, *, scope: str, phase: str):
+        super().__init__(code, message)
+        self.scope, self.phase = scope, phase
+
+
 class Leg:
     def __init__(self, link: Neighbor, circuit_id: str) -> None:
         self.link, self.circuit_id = link, circuit_id
@@ -114,6 +120,7 @@ class Circuit:
         self.member: Pair | None = None
         self.task: asyncio.Task | None = None
         self.failure: str | None = None
+        self.failure_scope = 'local'
         self.valid_until: float | None = None
         self.created = self.last_wire = time.monotonic()
 
@@ -236,32 +243,43 @@ class Relay:
             raise PeerError("ROUTE_LOST", "Mesh first hop was replaced")
         self.routing.verified(route.first, route.ticket.wire(), query=False)
         circuit = Circuit(token_hex(16), route.path, route.ticket, None, route.first, route=route, role=role)
-        self.register(circuit)
+        try:
+            self.register(circuit)
+        except PeerError as error:
+            raise CircuitError(error.code, str(error), scope='local', phase='capacity') from error
         if role == 'active':
             self.outbound[pair.node_id] = circuit
-        phase = 'ready'
+        phase = 'send'
         try:
             token = SignedRecord.create("open", {"mesh_id": pair.mesh_id, "origin_node_id": self.local,
                 "target_node_id": pair.node_id, "circuit_id": circuit.identity, "ticket_digest": sha256(route.ticket.raw).hexdigest(),
                 "expires_at": int(time.time()) + DEADLINE}, self.routing.key)
             circuit.following.frame("relay.open", record=token.wire(), ticket=route.ticket.wire())
+            phase = 'ready'
             async with asyncio.timeout(DEADLINE):
                 await circuit.ready.wait()
             if circuit.failure:
-                raise PeerError(circuit.failure, "Mesh circuit was rejected before authentication")
+                raise CircuitError(circuit.failure, "Mesh circuit was rejected before authentication",
+                                   scope=circuit.failure_scope, phase=phase)
             phase = 'auth'
             self.run_circuit(circuit, self.endpoint(circuit, pair, server=False))
             async with asyncio.timeout(2 * DEADLINE + 1):
                 await circuit.bound.wait()
             if not circuit.session or circuit.failure:
-                raise PeerError(circuit.failure or "ROUTE_LOST", "Mesh circuit failed endpoint authentication")
+                raise CircuitError(circuit.failure or "ROUTE_LOST", "Mesh circuit failed endpoint authentication",
+                                   scope=circuit.failure_scope, phase=phase)
             return circuit
         except TimeoutError as exc:
             self.counts['open_' + phase + '_timeouts'] += 1
             self.drop(circuit, "ROUTE_LOST")
-            raise PeerError("ROUTE_LOST", "Timed out establishing a Mesh circuit") from exc
-        except (PeerError, asyncio.CancelledError):
+            raise CircuitError('ROUTE_LOST', 'Timed out establishing a Mesh circuit', scope='path', phase=phase) from exc
+        except PeerError as error:
             self.drop(circuit, circuit.failure or "ROUTE_LOST")
+            if isinstance(error, CircuitError):
+                raise
+            raise CircuitError(error.code, str(error), scope='local', phase=phase) from error
+        except asyncio.CancelledError:
+            self.drop(circuit, circuit.failure or 'ROUTE_LOST')
             raise
 
     def promote(self, node: str, circuit: Circuit | None) -> None:
@@ -362,7 +380,7 @@ class Relay:
             if (kind == "route.error" and leg is not circuit.following) or frame["code"] not in REASONS:
                 self.counts["invalid_frames"] += 1
                 return
-            self.drop(circuit, frame["code"], skip=leg.link)
+            self.drop(circuit, frame["code"], skip=leg.link, scope='path')
         elif kind == "relay.ready":
             if leg is not circuit.following or circuit.ready.is_set():
                 raise ProtocolError("Unexpected relay ready")
@@ -449,18 +467,21 @@ class Relay:
             raise PeerError("DENIED", "RPC is not allowed on this Mesh circuit")
         return await self.handler(pair, method, params)
 
-    def drop(self, circuit: Circuit, code: str, *, skip: Neighbor | None = None) -> None:
+    def drop(self, circuit: Circuit, code: str, *, skip: Neighbor | None = None, scope: str = 'local') -> None:
         if self.circuits.get(circuit.identity) is not circuit:
             return
         self.circuits.pop(circuit.identity)
         self.retired[circuit.identity] = time.monotonic() + REPLAY_TTL
         circuit.failure = code
+        circuit.failure_scope = scope
         self.counts["closed_circuits"] += 1
         if circuit.route:
             node = circuit.path[-1]
             if self.outbound.get(node) is circuit:
                 self.outbound.pop(node)
-            if code != "CLOSED":
+            # A capacity refusal says nothing about the signed path's validity.
+            # Keep its ticket so the scheduler can retry after its backoff.
+            if code not in {"CLOSED", "BUSY"}:
                 self.routing.invalidate(circuit.route)
         for leg in circuit.legs:
             leg.close()

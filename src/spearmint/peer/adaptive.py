@@ -11,7 +11,7 @@ from .manager import PeerManager
 from .pairing import Pair
 from .path_selection import Candidate, MIN_DWELL, MIN_SAMPLES, REQUIRED_COMPARISONS, Selector, required_saving_ms
 from .protocol import PeerError
-from .relay import CIRCUITS, PER_ORIGIN, PRIMARY_RESERVE, Circuit, Relay
+from .relay import CIRCUITS, PER_ORIGIN, PRIMARY_RESERVE, Circuit, CircuitError, Relay
 from .routing import Route, Routing
 from .session import Session, session_busy
 
@@ -28,6 +28,7 @@ REFRESH = 15
 STANDBY_ROTATION = 30
 COOLDOWN = 5
 MAX_RETRY = 30
+DIAGNOSTIC_TTL = 120
 # Existing tunnel RPCs can wait up to fourteen/fifteen seconds during a bulk
 # reply. Their own timers still end each call; a path switch must not cut that
 # wait short. Draining keeps occupying the same bounded circuit budget.
@@ -65,6 +66,20 @@ class IdlePath:
     pair: Pair
     path: tuple[str, ...]
     retired_at: float
+
+
+@dataclass(frozen=True)
+class PathFailure:
+    path: tuple[str, ...]
+    code: str
+    scope: str
+    phase: str
+    recorded_at: float
+
+    def public_data(self, now: float) -> dict:
+        return {'path': list(self.path), 'code': self.code, 'scope': self.scope, 'phase': self.phase,
+                'age_seconds': round(max(0, now - self.recorded_at), 1),
+                'remaining_seconds': max(0, DIAGNOSTIC_TTL - (now - self.recorded_at))}
 
 
 class SwitchDeferred(Exception):
@@ -108,11 +123,27 @@ class AdaptiveRoutes:
         self.retry_delays: dict[tuple, float] = {}
         self.reasons: dict[str, str] = {}
         self.path_errors: dict[str, str] = {}
+        self.route_failures: dict[tuple, PathFailure] = {}
+        self.last_failures: dict[str, PathFailure] = {}
+        self.opening_routes: dict[str, tuple[str, ...]] = {}
         self.counts: Counter[str] = Counter()
 
     @staticmethod
     def route_key(route: Route):
         return route.path, route.first.generation
+
+    def record_failure(self, route: Route, error: PeerError, phase: str) -> None:
+        failure = PathFailure(route.path, error.code, getattr(error, 'scope', 'unknown'),
+                              getattr(error, 'phase', phase), self.clock())
+        self.route_failures[self.route_key(route)] = failure
+        self.last_failures[route.path[-1]] = failure
+
+    def clear_failure(self, route: Route) -> None:
+        self.route_failures.pop(self.route_key(route), None)
+        node = route.path[-1]
+        if (failure := self.last_failures.get(node)) and failure.path == route.path:
+            self.last_failures.pop(node)
+            self.path_errors.pop(node, None)
 
     def failure_key(self, binding: Binding):
         return binding.key if binding.incoming else self.route_key(binding.route)
@@ -292,7 +323,9 @@ class AdaptiveRoutes:
                 self.routing.cache[node] = binding.route
             self.selectors.setdefault(node, Selector()).choose(binding.candidate(), self.clock(), reason)
             self.reasons[node] = reason
-            self.path_errors.pop(node, None)
+            self.clear_failure(binding.route)
+            if node not in self.last_failures:
+                self.path_errors.pop(node, None)
             self.deferred_switches.pop(node, None)
             self.last_served[node] = self.clock()
             if previous:
@@ -360,6 +393,8 @@ class AdaptiveRoutes:
                 code = error.code.lower() if isinstance(error, PeerError) else 'timeout'
                 self.path_errors[node] = 'prepare_' + code
                 self.failed[self.failure_key(selected)] = self.clock() + COOLDOWN
+                self.record_failure(selected.route, error if isinstance(error, PeerError)
+                                    else PeerError('TIMEOUT', str(error)), 'prepare')
                 if selected.circuit:
                     self.retire(node, selected)
 
@@ -504,9 +539,12 @@ class AdaptiveRoutes:
             return
         if self.relay_capacity_full(background=True):
             self.path_errors[node] = 'trial_busy'
+            self.record_failure(route, CircuitError('BUSY', 'Local relay capacity is occupied',
+                                                    scope='local', phase='capacity'), 'capacity')
             return
         self.last_trial[node] = self.trialled_paths[self.route_key(route)] = self.clock()
         binding = None
+        self.opening_routes[node] = route.path
         try:
             circuit = await self.relay.open_route(pair, route, role='trial')
             binding = Binding(route, circuit.session, circuit)
@@ -519,8 +557,7 @@ class AdaptiveRoutes:
                 return
             self.trials[node] = binding
             self.retry_delays.pop(self.route_key(route), None)
-            if self.path_errors.get(node, '').startswith('trial_'):
-                self.path_errors.pop(node, None)
+            self.clear_failure(route)
             self.counts['trials_opened'] += 1
         except PeerError as error:
             key = self.route_key(route)
@@ -530,10 +567,13 @@ class AdaptiveRoutes:
             if error.code != 'BUSY':
                 self.routing.invalidate(route)
             self.path_errors[node] = 'trial_' + error.code.lower()
+            self.record_failure(route, error, 'open')
         except BaseException:
             if binding and binding.circuit:
                 self.relay.drop(binding.circuit, 'CLOSED')
             raise
+        finally:
+            self.opening_routes.pop(node, None)
 
     async def keep_standby(self, node: str, binding: Binding) -> None:
         def current():
@@ -582,6 +622,12 @@ class AdaptiveRoutes:
         previously_waiting = self.waiting_for_trial
         self.waiting_for_trial = {}
         self.failed = {key: until for key, until in self.failed.items() if until > now}
+        self.route_failures = {key: failure for key, failure in self.route_failures.items()
+                               if now - failure.recorded_at < DIAGNOSTIC_TTL and key[0][-1] in self.manager.pairs}
+        for node, failure in list(self.last_failures.items()):
+            if now - failure.recorded_at >= DIAGNOSTIC_TTL or node not in self.manager.pairs:
+                self.last_failures.pop(node)
+                self.path_errors.pop(node, None)
         self.used = {node: used for node, used in self.used.items() if now - used <= IDLE and node in self.manager.pairs}
         self.trialled_paths = {key: when for key, when in self.trialled_paths.items()
                               if now - when <= 4 * STANDBY_ROTATION and key[0][-1] in self.manager.pairs}
@@ -849,6 +895,24 @@ class AdaptiveRoutes:
                              'role': 'active' if binding is active else 'inbound' if binding.incoming else 'trial' if binding.circuit else 'direct',
                              **readiness, 'circuit_age_seconds': round(max(0, now - binding.created_at), 3),
                              'cost_ms': binding.candidate().measured_cost(now), **binding.session.link_metrics()})
+        existing = {binding.route.path for binding in bindings}
+        discovered = []
+        for route in self.routing.routes(node):
+            if route.ticket is None or route.path in existing:
+                continue
+            key = self.route_key(route)
+            retry = max(0, self.failed.get(key, 0) - now)
+            failure = self.route_failures.get(key)
+            if failure and now - failure.recorded_at >= DIAGNOSTIC_TTL:
+                failure = None
+            state = ('opening' if self.opening_routes.get(node) == route.path else
+                     'cooldown' if retry and failure else 'rotation' if retry else
+                     'local_capacity' if self.relay_capacity_full(background=True) else 'queued')
+            discovered.append({'path': list(route.path), 'state': state, 'retry_seconds': round(retry, 1),
+                               'failure': failure.public_data(now) if failure else None})
+        failure = self.last_failures.get(node)
+        if failure and now - failure.recorded_at >= DIAGNOSTIC_TTL:
+            failure = None
         return {'selected_path': list(active.route.path) if active else None,
                 'circuit_usage': len(self.relay.circuits), 'circuit_limit': CIRCUITS,
                 'sampling_sessions': self.sampling_count(), 'sampling_limit': MAX_TRIALS,
@@ -860,6 +924,8 @@ class AdaptiveRoutes:
                 'best_alternative': best_alternative, 'preparing_switch': node in self.switching and deferred is None,
                 'deferred_switch': deferred,
                 'last_path_error': self.path_errors.get(node),
+                'last_failure': failure.public_data(now) if failure else None,
+                'discovered_candidates': discovered,
                 'backup_sessions': sum(binding.session is not (active.session if active else None) for binding in bindings),
                 'standby_keepalive_tasks': len(self.keepers),
                 'candidate_sessions': sessions, 'incoming_session_selected': bool(active and active.incoming)}

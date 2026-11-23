@@ -32,6 +32,14 @@ type RouteSession = {
   rtt_remaining_seconds?: number
   handshake_ms?: number | null
 }
+export type PathFailure = {
+  path: string[]; code: string; scope: 'local' | 'path' | 'unknown'; phase: string
+  age_seconds: number; remaining_seconds: number
+}
+export type DiscoveredRoute = {
+  path: string[]; state: 'opening' | 'cooldown' | 'rotation' | 'local_capacity' | 'queued'
+  retry_seconds: number; failure: PathFailure | null
+}
 export type RouteDiagnostics = {
   circuit_usage?: number; circuit_limit?: number; sampling_sessions?: number; sampling_limit?: number;
   standby_sessions?: number; standby_limit?: number;
@@ -40,6 +48,7 @@ export type RouteDiagnostics = {
   comparison?: { path: string[]; completed: number; required: number; dwell_remaining_seconds: number; remaining_seconds?: number } | null
   best_alternative?: { path: string[]; saving_ms: number; required_saving_ms: number; meets_threshold: boolean; remaining_seconds?: number } | null
   preparing_switch?: boolean; last_path_error?: string | null
+  last_failure?: PathFailure | null; discovered_candidates?: DiscoveredRoute[]
   deferred_switch?: { reason: string; remaining_seconds: number } | null
   opening_trial?: boolean
   waiting_for_trial?: boolean
@@ -115,6 +124,9 @@ function usePeerEvidence(peers: Pick<ReturnType<typeof usePoll<Peer[]>>, 'data' 
           directory_prepared_remaining_seconds: directorySeconds }), ...(rttExpired && { rtt_fresh: false, cost_ms: null }) }
       })
       const currentPeer = diagnostics && sessions ? { ...peer, route_diagnostics: { ...diagnostics, candidate_sessions: sessions,
+        last_failure: diagnostics.last_failure ? current(diagnostics.last_failure) ?? null : diagnostics.last_failure,
+        discovered_candidates: diagnostics.discovered_candidates?.map(route => ({ ...route,
+          retry_seconds: remaining(route.retry_seconds), failure: route.failure ? current(route.failure) ?? null : null })),
         comparison: live(diagnostics.comparison), best_alternative: live(diagnostics.best_alternative),
         deferred_switch: live(diagnostics.deferred_switch) } } : peer
       evidence.set(peer.node_id, { observations: records, idlePath: lastPath ? current(lastPath) : undefined, peer: currentPeer })

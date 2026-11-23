@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useEffectEvent, useId, useRef, useState } from 'react'
 import { ApiError, api, READ_TIMEOUT_MS, type Session, timestamp, usePoll } from './api'
 import { drivers, serviceSearchText, ServiceState, statuses } from './services'
-import { refreshConsole, useConsole, type NeighborUse, type NodeView, type RouteDiagnostics, type RouteObservation } from './console-data'
+import { refreshConsole, useConsole, type NeighborUse, type NodeView, type PathFailure, type RouteDiagnostics, type RouteObservation } from './console-data'
 import { RemoteActions } from './remote-actions'
 import { FrpMappings } from './frp-mappings'
 import { ServiceLogs } from './service-logs'
@@ -53,7 +53,13 @@ function RouteSelectionProgress({ diagnostics }: { diagnostics: RouteDiagnostics
   if (comparison) return <p>备选路径成本更低，正在比较 · {Math.min(comparison.completed, comparison.required)} / {comparison.required} 组样本
     {comparison.dwell_remaining_seconds > 0 && ` · 当前路径至少再保持 ${Math.ceil(comparison.dwell_remaining_seconds)} 秒`}</p>
   if (opening) return <p>正在建立备选会话。</p>
-  if (waiting) return <p>已发现备选路径，正在等待试用名额。</p>
+  if (waiting) return <p>已发现备选路径，正在等待本机采样或会话名额，后台将继续比较。</p>
+  const candidates = diagnostics.discovered_candidates ?? []
+  if (candidates.length > 0) {
+    const cooling = candidates.filter(route => route.state === 'cooldown' && route.retry_seconds > 0)
+    if (cooling.length === candidates.length) return <p>候选路径暂时未能建链，约 {Math.ceil(Math.min(...cooling.map(route => route.retry_seconds)))} 秒后自动重试，当前路径继续服务。</p>
+    return <p>已发现 {candidates.length} 条待验证候选路径，后台将继续建链、采样和比较。</p>
+  }
   if (alternative) {
     if (alternative.meets_threshold) return <p>最低成本备选路径已达到换路阈值，等待下一轮比较。</p>
     return <p>{alternative.saving_ms > 0
@@ -61,7 +67,8 @@ function RouteSelectionProgress({ diagnostics }: { diagnostics: RouteDiagnostics
       : '在已完成采样的路径中，当前路径成本最低或并列最低。'}</p>
   }
   if (diagnostics.backup_sessions > 0) return <p>已有备选会话，正在等待足够的有效延迟样本。</p>
-  return <p>{diagnostics.selected_path ? '当前只有一条已验证的可用路径。' : '正在确认可用路径。'}</p>
+  if (diagnostics.observations?.length) return <p>正在根据邻居的可达报告发现并验证候选路径。</p>
+  return <p>{diagnostics.selected_path ? '目前已验证一条路径，后台仍会继续发现备路。' : '正在确认可用路径。'}</p>
 }
 
 const meshPathErrors: Record<string, string> = {
@@ -72,6 +79,16 @@ const meshPathErrors: Record<string, string> = {
 
 export function meshPathError(code?: string, fallback = '暂时无法使用') {
   return meshPathErrors[code?.toLowerCase() ?? ''] ?? fallback
+}
+
+function pathFailureLabel(failure: PathFailure) {
+  if (failure.code.toLowerCase() === 'busy') {
+    return failure.scope === 'local' ? '本机暂时没有可用会话名额'
+      : failure.scope === 'path' ? '途经节点或目标节点暂时繁忙，或没有可用会话名额' : '建链暂时繁忙，来源节点未报告'
+  }
+  const scope = failure.scope === 'local' ? '本机' : failure.scope === 'path' ? '路径节点' : '连接过程'
+  const phase: Record<string, string> = { capacity: '会话分配', send: '发送建链请求', ready: '等待建链确认', auth: '端到端认证', prepare: '目录与回执同步', open: '建链' }
+  return `${scope} · ${phase[failure.phase] ?? failure.phase} · ${meshPathError(failure.code)}`
 }
 
 export function RouteDetails({ diagnostics, neighbor, names, showSelection = true }: {
@@ -105,7 +122,8 @@ export function RouteDetails({ diagnostics, neighbor, names, showSelection = tru
       {diagnostics.standby_sessions !== undefined && <> · 已保留备路 {diagnostics.standby_sessions}</>}</p>}
     {showSelection && (diagnostics.selected_path || diagnostics.opening_trial || diagnostics.preparing_switch) &&
       <RouteSelectionStatus diagnostics={diagnostics} />}
-    {pathError && <p>{failureStages[errorStage] || '连接失败'} · {meshPathError(pathError)}</p>}
+    {diagnostics.last_failure && <p>最近一次候选路径异常 · {pathFailureLabel(diagnostics.last_failure)} · {diagnostics.last_failure.age_seconds.toFixed(1)} 秒前</p>}
+    {!diagnostics.last_failure && pathError && <p>{failureStages[errorStage] || '连接失败'} · {meshPathError(pathError)}</p>}
     {comparison && <div className="route-comparison">
       <strong>正在比较的路径</strong>
       <ol className="route-session-path" aria-label="正在比较的路径">{comparison.path.map((node) => <li key={node}>
@@ -136,6 +154,16 @@ export function RouteDetails({ diagnostics, neighbor, names, showSelection = tru
           {route.handshake_ms != null && <small className="table-secondary">建链 {route.handshake_ms.toFixed(1)} ms</small>}
           <small className="table-secondary">{route.rtt_sample_age_seconds == null ? '等待心跳'
             : `${route.rtt_sample_age_seconds.toFixed(1)} 秒前${route.rtt_fresh ? '' : ' · 已过期'}`}</small></td>
+      </tr>)}</tbody>
+    </table></div>}
+    {!!diagnostics.discovered_candidates?.length && <div className="table-wrap"><table className="data-table route-table">
+      <caption>待验证候选路径</caption>
+      <thead><tr><th scope="col">路径</th><th scope="col">进度</th><th scope="col">最近一次结果</th></tr></thead>
+      <tbody>{diagnostics.discovered_candidates.map(route => <tr key={route.path.join('/')}>
+        <td><ol className="route-session-path" aria-label="待验证路径节点">{route.path.map(node => <li key={node}>{names?.get(node) || <CopyValue value={node} short />}</li>)}</ol></td>
+        <td>{route.state === 'opening' ? '正在建链' : route.state === 'local_capacity' ? '等待本机会话名额'
+          : route.retry_seconds > 0 ? `${Math.ceil(route.retry_seconds)} 秒后自动${route.state === 'rotation' ? '轮换采样' : '重试'}` : '等待采样调度'}</td>
+        <td>{route.failure ? <>{pathFailureLabel(route.failure)}<small className="table-secondary">{route.failure.age_seconds.toFixed(1)} 秒前</small></> : '—'}</td>
       </tr>)}</tbody>
     </table></div>}
   </details>
