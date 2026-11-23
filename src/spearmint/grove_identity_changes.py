@@ -56,6 +56,10 @@ def ballot(state, kind, document, actor: str, requester: str | None = None):
                 raise PeerError('CONFLICT', 'The Grove password revision changed')
         elif (role['role'] if role else profile['role']) != 'node_admin':
             raise PeerError('DENIED', 'A Grove administrator is required')
+        if kind == 'revocation':
+            target_role = db.execute('SELECT role FROM grove_login_role WHERE user_id=?', (record['user_id'],)).fetchone()
+            if target_role is not None and target_role['role'] == 'node_admin':
+                raise PeerError('CONFLICT', 'The target is now a Grove administrator; synchronize its role first')
         raw = json.loads(parse_b64(document['record'], 2048))
         author = node_id(Ed25519PublicKey.from_public_bytes(parse_b64(raw['public_key'], 32)))
         if author != (requester or local):

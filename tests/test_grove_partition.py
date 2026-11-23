@@ -177,6 +177,16 @@ class GrovePartitionTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT role FROM grove_login_role WHERE user_id=?',
                                        (self.fixture.users[1]['id'],)).fetchone()[0], 'node_admin')
 
+    def test_role_update_is_checked_by_each_approving_voter(self):
+        actor = self.fixture.login()
+        pending, _ = grove_revocation.issue(self.state, actor, self.fixture.users[1]['id'])
+        coordinator = Coordinator(self.fixture, 1)
+        asyncio.run(coordinator.approve_grove_role(actor, self.fixture.users[1]['id'], 'node_admin'))
+        with self.assertRaises(PeerError) as error:
+            grove_identity_changes.ballot(self.fixture.states[1], 'revocation', pending,
+                self.fixture.users[0]['id'], self.state.identity()[0])
+        self.assertEqual(error.exception.code, 'CONFLICT')
+
 
 if __name__ == '__main__':
     unittest.main()
