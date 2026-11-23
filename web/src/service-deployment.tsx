@@ -12,7 +12,11 @@ import { digestBytes, digestFile } from './deployment-transfer'
 type Job = { id: string; service_id?: string; kind: string; name: string; command: string; filename: string;
   status: string; phase: string; size: number; offset: number; error?: string; log?: string; rolled_back?: boolean; updated_at: number;
   received?: number[]; received_bytes?: number; upload_chunk?: number; expected_sha256?: string; readiness_result?: { status: string; mode: string; detail?: string } }
-type Service = { id: string; name: string; driver: string; version?: number; command?: string }
+type Service = { id: string; name: string; driver: string; version?: number; command?: string;
+  deployment?: { source?: string; kind?: string; directory?: string } }
+export function deployedBySpearmint(service: Service) {
+  return service.deployment?.source === 'managed' || ['package', 'docker'].includes(service.deployment?.kind || '')
+}
 type History = { jobs: Job[]; can_update: boolean; can_rollback: boolean; options: DeploymentOptions }
 const ended = (job?: Job) => !!job && ['succeeded', 'failed', 'cancelled'].includes(job.status)
 const storageKey = (target: string, service?: Service) => `spearmint-deploy/${target}/${service?.id || 'new'}`
@@ -27,6 +31,7 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
   const [name, setName] = useState(service?.name || '')
   const [command, setCommand] = useState(service?.command || '')
   const [file, setFile] = useState<File>()
+  const [directory, setDirectory] = useState('')
   const [history, setHistory] = useState<History>()
   const [capable, setCapable] = useState<boolean>()
   const [settings, setSettings] = useState<DeploymentOptions>(defaultOptions)
@@ -57,7 +62,7 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
   function changed() { refreshConsole(); onChanged?.(); setRevision(value => value + 1) }
   useEffect(() => {
     let live = true
-    void call<{ deployment: number }>('capabilities', {}).then(result => { if (live) { setCapable(result.deployment >= 2); if (result.deployment < 2) setError('请先通过 Grove 群组更新升级目标节点，以使用可续传部署。') } }).catch(failure => { if (live) { setCapable(false); if (failure instanceof ApiError && failure.status === 404) setError('目标节点尚不支持服务部署，请先通过 Grove 群组更新升级该节点。'); else fail(failure) } })
+    void call<{ deployment: number; code_ownership?: number }>('capabilities', {}).then(result => { if (live) { setCapable(result.deployment >= 2 && result.code_ownership === 1); if (result.deployment < 2 || result.code_ownership !== 1) setError('请通过群组更新升级目标节点，以使用独立的一键部署和已有代码登记流程。') } }).catch(failure => { if (live) { setCapable(false); if (failure instanceof ApiError && failure.status === 404) setError('目标节点尚不支持服务部署，请先通过 Grove 群组更新升级该节点。'); else fail(failure) } })
     return () => { live = false }
   }, [target, session])
   useEffect(() => {
@@ -150,9 +155,10 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
         setHashProgress(undefined)
       }
       const next = await call<Job>('begin', { job: identifier, kind: rollback ? 'rollback' : kind === 'docker' ? 'docker' : file ? 'package' : 'command',
-        name, command: rollback ? '' : command, service_id: service?.id || null, version: service?.version || null,
+        name: name.trim(), command: rollback ? '' : command, service_id: service?.id || null, version: service?.version || null,
         filename: !rollback && kind !== 'docker' && file ? file.name : '', size: !rollback && kind !== 'docker' && file ? file.size : 0,
-        options: { ...settings, data_paths: settings.data_paths.map(path => path.trim()).filter(Boolean) }, ...(digest ? { sha256: digest } : {}) })
+        options: { ...settings, data_paths: settings.data_paths.map(path => path.trim()).filter(Boolean) }, ...(digest ? { sha256: digest } : {}),
+        ...(!service && kind !== 'docker' ? { directory: directory.trim() } : {}) })
       begun = true
       if (!active.current) return
       remember(identifier)
@@ -181,14 +187,16 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
     {capable && !jobId && recoverable.length > 0 && <div className="button-row"><small className="muted">目标节点有未完成任务：</small>{recoverable.map(item => <button key={item.id} className="btn btn-secondary" onClick={() => { remember(item.id); setJob(undefined) }}>{item.name} · {item.phase}</button>)}</div>}
     {capable && !jobId && <form className="stack" onSubmit={event => void start(event)} onChange={() => setDirty(true)}>
       {!service && <Tabs label="部署方式" current={kind} onChange={value => { setKind(value); setFile(undefined); setDirty(true) }}
-        items={[{ id: 'package', label: '程序包 / 启动命令' }, { id: 'docker', label: 'Docker' }]} />}
-      {!service && <label>服务名称<input className="input" required maxLength={80} value={name} onChange={event => setName(event.target.value)} /></label>}
-      {kind !== 'docker' && <label>{service ? '新版服务包（只修改命令时可留空）' : '服务压缩包（程序已在目标机上时可留空）'}
+        items={[{ id: 'package', label: '程序包' }, { id: 'docker', label: 'Docker 单容器' }]} />}
+      {!service && <label>服务名称（可选）<input className="input" maxLength={80} value={name} onChange={event => setName(event.target.value)} /></label>}
+      {kind !== 'docker' && <label>{service ? '新版服务包（只修改命令时可留空）' : '服务压缩包（可选）'}
         <input type="file" accept=".zip,.tar,.tar.gz,.tgz,.tar.xz,.tar.bz2" onChange={event => setFile(event.target.files?.[0])} />
         {file && <small className="muted">{file.name} · {bytes(file.size)}</small>}</label>}
       <label>{kind === 'docker' ? 'Docker 启动命令' : '启动命令'}<textarea aria-label={kind === 'docker' ? 'Docker 启动命令' : '启动命令'} className="input deploy-command" required rows={5} maxLength={8192} value={command}
         placeholder={kind === 'docker' ? 'docker run -d --name my-app -p 8080:8080 my-image:latest' : 'python hello.py --port 8080'} onChange={event => setCommand(event.target.value)} /></label>
-      <p className="muted tiny">{kind === 'docker' ? '自动拉取镜像并按容器 ID 托管；后台运行和自动删除参数由 Spearmint 统一处理。' : '支持多行命令。有压缩包时从解压目录运行；无压缩包时可在命令中 cd 到程序目录。持久化文件可写入 SPMT_DATA_DIR，更新保留此目录。'}</p>
+      <p className="muted tiny">{kind === 'docker' ? '自动拉取镜像并按容器 ID 托管；后台运行和自动删除参数由 Spearmint 统一处理。' : 'Spearmint 自动进入本次部署的代码目录后执行命令，无需填写 cd。支持后续上传新版代码和回滚。'}</p>
+      {kind !== 'docker' && !service && <details className="deployment-location"><summary>指定部署目录（可选）</summary><label>部署目录<input aria-label="部署目录" className="input" value={directory} onChange={event => setDirectory(event.target.value)} placeholder="留空使用 Spearmint 专用目录；也可填写目标节点上的空目录" /></label><p className="muted tiny">默认使用 Spearmint 数据目录下的独立应用目录。自定义位置用于存放代码版本和持久数据。</p></details>}
+      {service?.deployment?.directory && <small className="muted">部署目录：{service.deployment.directory}</small>}
       {kind === 'docker' && <p className="muted tiny">自动保留已有卷与绑定目录，镜像声明的数据卷和 /data 使用持久卷。请将需要保留的数据放入这些目录。</p>}
       <DeploymentSettings value={settings} onChange={value => { setSettings(value); setDirty(true) }} docker={kind === 'docker'} />
       <div className="button-row"><button className="btn btn-primary" disabled={busy || (!!history && !history.can_update)} type="submit"><Icon name="package" size={16} />{service ? '更新并启动' : '部署并启动'}</button>

@@ -9,3 +9,6 @@
 .deployment-settings summary { cursor: pointer; }
 .deployment-fields { display: flex; flex-wrap: wrap; gap: 12px; }
 .deployment-fields label { flex: 1; min-width: 160px; }
+.deployment-location { font-size: 12px; }
+.deployment-location summary { cursor: pointer; color: var(--green); }
+.deployment-location label { margin-top: 12px; }

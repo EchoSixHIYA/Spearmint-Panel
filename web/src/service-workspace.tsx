@@ -5,7 +5,7 @@ import { useRemoteCatalog } from './remote-catalog'
 import { ServiceLogs } from './service-logs'
 import { FrpMappings } from './frp-mappings'
 import { GroveServiceSetup } from './remote-service-setup'
-import { ServiceDeployment } from './service-deployment'
+import { ServiceDeployment, deployedBySpearmint } from './service-deployment'
 import { HostServiceAuthorization } from './host-service-authorization'
 import { allowNavigation } from './navigation-guard'
 import { type Service, actions as actionNames, serviceDriver } from './services'
@@ -18,6 +18,7 @@ type ServiceResources = { pid: number | null; sampled_at: number | null; valid_u
   gpu: { utilization_percent: number | null; memory_used_bytes: number | null; valid_until?: number | null } }
 type Receipt = { id?: string; action: string; status: string; updated_at?: number; message?: string | null; reason?: string }
 type Detail = Service & { command?: string; managed: boolean; can_edit_details: boolean; can_unregister: boolean; can_deploy?: boolean;
+  deployment?: { source?: string; kind?: string; directory?: string };
   unregister_reason?: string; can_change_mode: boolean; resources?: ServiceResources; operations: Array<Receipt & { id: string; updated_at: number }> }
 
 function ServiceUsage({ service, unavailable }: { service: Detail; unavailable: boolean }) {
@@ -139,6 +140,7 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
   const path = local ? `/services/${id}` : `/peers/${target}/services/${id}`
   const flow = useServiceOperation(path, session, detail.data?.version || 1, () => { detail.reload(); refreshConsole() })
   const current = detail.data, unavailable = !!detail.error || !current || current.observation.stale
+  const canUpdateCode = !!current?.can_deploy && deployedBySpearmint(current)
   const blocked = busy || unavailable || flow.tracking || ['unknown', 'missing', 'starting', 'stopping'].includes(current?.observation.status || 'unknown')
   const receipt: Receipt | undefined = flow.intent ? { ...flow.intent.operation, action: flow.intent.action,
     status: flow.intent.operation?.status || 'queued', id: flow.intent.request_id || flow.intent.operation?.id || flow.intent.key } : current?.operations[0]
@@ -166,7 +168,7 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
       <button className="btn btn-secondary" onClick={detail.reload}>核对状态</button>
     </PageHeading>
     {detail.error && <Notice tone="amber">{detail.error}</Notice>}{error && <Notice tone="amber">{error}</Notice>}
-    <Tabs label="服务工作区" current={tab} onChange={next => { if (allowNavigation()) setTab(next) }} items={[{ id: 'overview', label: '概览' }, { id: 'logs', label: '日志' }, { id: 'history', label: '操作记录' }, { id: 'settings', label: '管理设置' }, ...(current?.can_deploy ? [{ id: 'update', label: '代码与更新' }] : [])]} />
+    <Tabs label="服务工作区" current={tab} onChange={next => { if (allowNavigation()) setTab(next) }} items={[{ id: 'overview', label: '概览' }, { id: 'logs', label: '日志' }, { id: 'history', label: '操作记录' }, { id: 'settings', label: '管理设置' }, ...(canUpdateCode ? [{ id: 'update', label: '代码与更新' }] : [])]} />
     {!current && !detail.error && <Loading />}
     {current && tab === 'overview' && <div className="stack service-overview">
       <ServiceUsage service={current} unavailable={unavailable} />
@@ -202,7 +204,7 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
           <button className="btn btn-danger btn-small" disabled={blocked || !current.can_unregister} title={current.unregister_reason} onClick={() => setConfirmation('remove')}>取消登记</button></div>
       </section>
     </Panel>}
-    {current && tab === 'update' && current.can_deploy && <Panel title="更新服务"><ServiceDeployment target={target} service={current} onChanged={detail.reload} onOpen={() => setTab('overview')} /></Panel>}
+    {current && tab === 'update' && canUpdateCode && <Panel title="更新服务"><ServiceDeployment target={target} service={current} onChanged={detail.reload} onOpen={() => setTab('overview')} /></Panel>}
     {current && tab === 'mapping' && <div className="stack"><div className="button-row"><button className="btn btn-ghost btn-small" onClick={() => setTab('settings')}><Icon name="arrow-left" size={14} />返回高级管理</button><Badge tone="amber">规划中</Badge></div>
       <FrpMappings path={path} session={session} onUnauthorized={onUnauthorized} stale={unavailable} /></div>}
     {confirmation && <Modal title={confirmation === 'remove' ? `取消登记 ${current?.name}？` : `${actionNames[confirmation as keyof typeof actionNames]} ${current?.name}？`} onClose={() => setConfirmation(undefined)}>

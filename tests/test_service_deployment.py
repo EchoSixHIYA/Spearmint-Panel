@@ -72,13 +72,15 @@ class DeploymentTest(unittest.TestCase):
             archive.writestr('my app/app.py', f'print("{version}")\n')
         return data.getvalue()
 
-    def begin(self, kind='package', command='python app.py', service=None, data=None, options=None):
+    def begin(self, kind='package', command='python app.py', service=None, data=None, options=None, directory=None):
         data = self.archive('v1') if data is None and kind == 'package' else data or b''
         body = {'job': uuid4().hex, 'kind': kind, 'name': service.name if service else 'Example service', 'command': command,
                 'service_id': service.id if service else None, 'version': service.version if service else None,
                 'filename': 'app.zip' if data else '', 'size': len(data)}
         if options is not None:
             body['options'] = options
+        if directory is not None:
+            body['directory'] = str(directory)
         job = self.manager.request(self.actor, 'begin', body)
         self.assertEqual(job, self.manager.request(self.actor, 'begin', body))
         for offset in range(0, len(data), 8192):
@@ -369,6 +371,90 @@ class DeploymentTest(unittest.TestCase):
         self.assertNotEqual(current.spec['cwd'], before.spec['cwd'])
         self.assertTrue((Path(current.spec['cwd']) / 'storage/logic.py').is_file())
         self.assertEqual((Path(current.spec['cwd']) / 'storage/data/db.txt').read_text(), 'persistent')
+
+    def test_custom_deployment_directory_keeps_data_through_update_and_rollback(self):
+        directory = self.root / 'user selected app'
+        first = self.launch(self.begin(command='echo example', directory=directory))
+        self.assertEqual(first['status'], 'succeeded', first)
+        service = self.service(first['service_id'])
+        self.assertTrue(Path(service.spec['cwd']).is_relative_to(directory))
+        self.assertEqual(service.spec['deployment']['directory'], str(directory.resolve()))
+        (directory / 'data/db.txt').write_text('keep custom data')
+        for version in ('v2', 'v3'):
+            result = self.launch(self.begin(service=service, command='echo example', data=self.archive(version)))
+            self.assertEqual(result['status'], 'succeeded', result)
+            service = self.service(service.id)
+        rolled = self.launch(self.begin('rollback', '', service))
+        self.assertEqual(rolled['status'], 'succeeded', rolled)
+        self.assertEqual((directory / 'data/db.txt').read_text(), 'keep custom data')
+        self.assertEqual(len(list((directory / 'releases').iterdir())), 2)
+        self.assertTrue(self.manager.manifest(service.spec['deployment']['app'])['current'])
+
+    def test_existing_directory_uses_registration_instead_of_deployment(self):
+        directory = self.root / 'existing code'
+        directory.mkdir()
+        (directory / 'app.py').write_text('user owned')
+        with self.assertRaisesRegex(PeerError, '登记已有代码'):
+            self.begin(command='echo example', directory=directory)
+        self.assertEqual(list(directory.iterdir()), [directory / 'app.py'])
+
+    def test_failed_first_custom_deployment_can_retry_without_losing_data(self):
+        directory = self.root / 'retry application'
+        failed = self.launch(self.begin(command='echo application', directory=directory,
+            options={'runtime': 'none', 'prepare': 'exit 17'}))
+        self.assertEqual(failed['status'], 'failed', failed)
+        self.assertIsNone(failed['service_id'])
+        (directory / 'data/retry.txt').write_text('preserve across retries')
+        success = self.launch(self.begin(command='echo application', directory=directory))
+        self.assertEqual(success['status'], 'succeeded', success)
+        self.assertEqual((directory / 'data/retry.txt').read_text(), 'preserve across retries')
+
+    def test_existing_code_registration_has_no_code_update_workflow(self):
+        from spearmint.peer.service_setup import ServiceSetup
+        from spearmint.deployment_location import owns_code
+        result = ServiceSetup(self.state, self.node, self.root / 'docker.sock').setup(self.actor, 'create',
+            {'name': 'Already uploaded', 'command': 'cd /existing\necho application'})
+        service = self.service(result['service']['id'])
+        self.assertFalse(owns_code(service))
+        self.assertNotIn('deployment', service.spec)
+        self.assertEqual(service.spec['command'], 'cd /existing\necho application')
+        self.assertFalse(self.manager.request(self.actor, 'history', {'service_id': service.id})['can_update'])
+        with self.assertRaisesRegex(PeerError, '已有代码'):
+            self.begin(service=service)
+
+    def test_new_command_only_deployment_owns_code_and_has_a_default_name(self):
+        from spearmint.deployment_location import owns_code
+        identifier = uuid4().hex
+        self.manager.request(self.actor, 'begin', {'job': identifier, 'kind': 'command', 'name': '',
+            'command': 'echo bootstrap application', 'service_id': None, 'version': None, 'filename': '', 'size': 0})
+        result = self.launch(identifier)
+        self.assertEqual(result['status'], 'succeeded', result)
+        service = self.service(result['service_id'])
+        self.assertTrue(owns_code(service))
+        self.assertTrue(Path(service.spec['cwd']).is_relative_to(self.manager.apps))
+        self.assertTrue(service.name)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows native supervisor integration')
+    def test_real_existing_code_uses_explicit_cd_and_keeps_external_files(self):
+        from spearmint.peer.service_setup import ServiceSetup
+        directory = self.root / 'uploaded application'
+        directory.mkdir()
+        (directory / 'app.py').write_text('import time\nfrom pathlib import Path\nprint("existing-app", Path.cwd(), flush=True)\nwhile True: time.sleep(.2)\n')
+        command = f'cd /d "{directory}"\n"{sys.executable}" -u app.py'
+        result = ServiceSetup(self.state, self.node, self.root / 'docker.sock').setup(self.actor, 'create',
+            {'name': 'Existing application', 'command': command})
+        service = self.service(result['service']['id'])
+        native = process_driver(self.state)
+        try:
+            native.apply(service, 'start', native.inspect(service))
+            deadline = time.monotonic() + 5
+            while 'existing-app' not in native.logs(service, 10).text and time.monotonic() < deadline:
+                time.sleep(.1)
+            self.assertIn('existing-app', native.logs(service, 10).text)
+            self.assertIn(str(directory), native.logs(service, 10).text)
+        finally:
+            native.apply(service, 'stop', native.inspect(service))
+        self.assertEqual(list(directory.iterdir()), [directory / 'app.py'])
 
     def test_python_environment_installs_offline_wheel_before_switch(self):
         wheel = BytesIO()

@@ -6,6 +6,7 @@ import { Icon, Loading, Notice, PageHeading, Panel, Tabs } from './ui'
 import { returnRoute, withReturn } from './workspace-api'
 import { allowNavigation, useUnsavedChanges } from './navigation-guard'
 import { ServiceDeployment } from './service-deployment'
+import { ExistingCodeRegistration } from './existing-code-registration'
 import { HostServiceAuthorization } from './host-service-authorization'
 
 const kinds = { systemd: 'systemd 系统服务', windows: 'Windows 系统服务', docker: 'Docker 容器' }
@@ -18,7 +19,7 @@ type Readiness = { ready: boolean; log_path?: string | null; observe_ready?: boo
   control?: Record<string, boolean>; reason?: string; account?: string; enable_command?: string }
 type SetupProps = { session: Session; onUnauthorized: () => void }
 type Action = 'kinds' | 'running' | 'inspect' | 'take-over' | 'manage'
-type Mode = 'take-over' | 'create'
+type Mode = 'take-over' | 'create' | 'existing'
 
 function request<T>(session: Session, nodeId: string, action: Action, body: object, signal: AbortSignal) {
   return api<T>(`/peers/${encodeURIComponent(nodeId)}/service-setup/${action}`, {
@@ -70,7 +71,7 @@ export function GroveServiceSetup({ targetId, session, onUnauthorized }: SetupPr
 }
 
 function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId: string }) {
-  const [mode, setMode] = useState<Mode>('take-over')
+  const [mode, setMode] = useState<Mode>('create')
   const [supported, setSupported] = useState<Capabilities>()
   const [kind, setKind] = useState<Kind>()
   const [choices, setChoices] = useState<Candidates>()
@@ -163,9 +164,9 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
   }
 
   return <Panel title="接入方式" action={<button className="btn btn-secondary" type="button" onClick={refresh} disabled={busy}>刷新</button>}>
-    <Tabs label="接入方式" current={mode} items={[{ id: 'take-over', label: '接管现有服务' }, { id: 'create', label: '部署新服务' }]}
+    <Tabs label="接入方式" current={mode} items={[{ id: 'create', label: '一键部署新服务' }, { id: 'existing', label: '登记已有代码' }, { id: 'take-over', label: '接管运行中服务' }]}
       onChange={value => { if (!busy && value !== mode && allowNavigation()) { setMode(value as Mode); setStep(1); selectCandidate(''); setChoices(undefined); setDirty(false) } }} />
-    {mode === 'create' ? <ServiceDeployment target={nodeId} /> :
+    {mode === 'create' ? <ServiceDeployment target={nodeId} /> : mode === 'existing' ? <ExistingCodeRegistration target={nodeId} windows={!!supported?.kinds.includes('windows')} /> :
     <div className="stack">
       {error && <Notice tone="amber">{error}</Notice>}
       {!supported ? !error && <Loading label="正在读取目标节点的登记能力…" />

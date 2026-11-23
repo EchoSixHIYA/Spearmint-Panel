@@ -12,7 +12,7 @@ from ..drivers import CONTAINER_ID, ContainerNotFound, DockerDriver, SystemUnitD
 from ..host import DockerAccessError, HostError
 from ..host_service_authorization import Authorization, HostServiceAuthorization, StatusRequest
 from ..service_command import command_spec
-from ..platforms import WINDOWS
+from ..platforms import WINDOWS, secure_private
 from ..service_mode import ModeChangeError, change_mode
 from ..state import StateError
 from ..windows_services import WindowsServiceDriver, application_log
@@ -294,7 +294,11 @@ class ServiceSetup:
             if body.command is not None:
                 if body.executable is not None or body.arguments:
                     raise StateError('Supply one startup command')
-                spec = command_spec(body.command, body.cwd, body.stop_timeout, body.endpoint, state=self.state)
+                working = self.state.directory / 'service-commands'
+                if not working.exists():
+                    working.mkdir(mode=0o700)
+                    secure_private(working, 0o700)
+                spec = command_spec(body.command, body.cwd or str(working), body.stop_timeout, body.endpoint, state=self.state)
             elif body.executable is not None and body.cwd is not None:
                 spec = process_spec([body.executable, *body.arguments], body.cwd, body.stop_timeout, body.endpoint)
             else:

@@ -8,6 +8,7 @@ from ..service_details import update_service_details
 from ..service_removal import unregister
 from ..service_mode import change_mode, ModeChangeError
 from ..state import StateError
+from ..deployment_location import owns_code
 from .grove_service_admin import GroveServiceAdmin
 from .service_setup import LocalAdmin
 from .protocol import PeerError
@@ -96,7 +97,7 @@ class Workspace:
         foreground = service.driver == 'process' and not service.existing_system_service
         stopped = described['observation']['status'] in {'stopped', 'failed'} and not described['observation']['stale']
         return {**described, 'node_id': self.node_id, 'operations': operations, 'command': service.spec.get('command'),
-                'deployment': service.spec.get('deployment'), 'can_deploy': service.managed and not service.existing_system_service,
+                'deployment': service.spec.get('deployment'), 'can_deploy': owns_code(service),
                 'resources': self.controller.service_metrics.snapshot(service, observation),
                 'can_edit_details': True, 'can_unregister': not protected and not mapped and (not foreground or stopped),
                 'unregister_reason': '请先撤销此服务的公网映射，再取消登记。' if mapped else '请先停止此程序，再取消登记。' if foreground and not stopped else None,

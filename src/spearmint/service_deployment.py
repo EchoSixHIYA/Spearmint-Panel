@@ -30,6 +30,7 @@ from .service_artifacts import MAX_UPLOAD, docker_arguments, docker_invocation, 
 from .service_command import command_spec
 from .deployment_options import options as deployment_options
 from . import deployment_runtime
+from .deployment_location import MARKER, claim, location, owns_code
 from .state import StateError, audit
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,7 @@ class ServiceDeployments:
     def view(self, job):
         return {key: job.get(key) for key in ('id', 'kind', 'name', 'command', 'service_id', 'status', 'phase',
                 'size', 'offset', 'filename', 'sha256', 'error', 'log', 'created_at', 'updated_at', 'rolled_back',
-                'options', 'received_bytes', 'upload_chunk', 'expected_sha256', 'readiness_result')} | {
+                'options', 'received_bytes', 'upload_chunk', 'expected_sha256', 'readiness_result', 'directory')} | {
                     'received': job.get('received', []), 'options': job.get('options', deployment_options())}
 
     def service(self, identifier):
@@ -110,7 +111,8 @@ class ServiceDeployments:
             with self.lock:
                 if action == 'capabilities' and not body:
                     return {'deployment': 2, 'max_upload': MAX_UPLOAD, 'chunk': BULK_CHUNK, 'window': 2,
-                            'bulk_upload': 1, 'options': 1, 'formats': ['zip', 'tar', 'tar.gz']}
+                            'bulk_upload': 1, 'options': 1, 'code_ownership': 1, 'managed_directory': 1,
+                            'default_directory': str(self.apps), 'formats': ['zip', 'tar', 'tar.gz']}
                 if action == 'list' and not body:
                     jobs = [json.loads(path.read_text(encoding='utf-8')) for path in self.root.glob('*.json')]
                     return {'jobs': [{k: v for k, v in self.view(job).items() if k not in {'command', 'log', 'options', 'received'}}
@@ -121,7 +123,7 @@ class ServiceDeployments:
                     jobs = [json.loads(path.read_text(encoding='utf-8')) for path in self.root.glob('*.json')]
                     jobs = sorted((job for job in jobs if job.get('service_id') == service.id), key=lambda job: job['created_at'], reverse=True)
                     return {'jobs': [{key: value for key, value in self.view(job).items() if key not in {'command', 'log', 'options', 'received'}} for job in jobs[:12]],
-                            'can_update': service.managed and not service.existing_system_service,
+                            'can_update': owns_code(service),
                             'options': service.spec.get('deployment_options', deployment_options()),
                             'can_rollback': bool(app and self.manifest(app).get('previous'))}
                 if action == 'begin':
@@ -179,7 +181,7 @@ class ServiceDeployments:
 
     def begin(self, actor, body):
         expected = {'job', 'kind', 'name', 'command', 'service_id', 'version', 'filename', 'size'}
-        if not expected <= body.keys() or body.keys() - expected - {'options', 'sha256'} or not isinstance(body['kind'], str) or body['kind'] not in {'package', 'command', 'docker', 'rollback'} or not isinstance(body['name'], str):
+        if not expected <= body.keys() or body.keys() - expected - {'options', 'sha256', 'directory'} or not isinstance(body['kind'], str) or body['kind'] not in {'package', 'command', 'docker', 'rollback'} or not isinstance(body['name'], str):
             raise PeerError('INVALID_REQUEST', 'Invalid deployment configuration')
         identifier = body['job']
         path = self.path(identifier)
@@ -211,13 +213,13 @@ class ServiceDeployments:
             service = self.service(body['service_id'])
             if type(body['version']) is not int or service.version != body['version']:
                 raise StateError('服务配置已变化，请刷新后重新部署。')
-            if not service.managed or service.existing_system_service:
-                raise StateError('此服务由系统安装器管理，请使用对应的程序更新方式。')
+            if not owns_code(service):
+                raise StateError('此服务登记的是已有代码，仅托管启停和日志；请自行更新原有代码。')
             if body['kind'] != 'rollback' and (service.driver == 'docker') != (body['kind'] == 'docker'):
                 raise StateError('更新时请保留原来的服务运行类型。')
         elif body['kind'] == 'rollback':
             raise StateError('请先选择要回滚的服务。')
-        name = service.name if service else service_name(body['name'])
+        name = service.name if service else service_name(body['name'] or '新服务 ' + identifier[:8])
         if service is None:
             with self.state.connect(read_only=True) as db:
                 if db.execute('SELECT 1 FROM service WHERE name=?', (name,)).fetchone():
@@ -228,6 +230,24 @@ class ServiceDeployments:
         if digest is not None and (not isinstance(digest, str) or re.fullmatch('[a-f0-9]{64}', digest) is None):
             raise StateError('请核对程序包摘要。')
         app = app or identifier
+        default = self.apps / app
+        previous_directory = service.spec.get('deployment', {}).get('directory', str(default)) if service else str(default)
+        selected = location(body.get('directory', previous_directory), default)
+        if service is None and selected != default.resolve() and (selected / MARKER).is_file():
+            owner = json.loads((selected / MARKER).read_text(encoding='utf-8'))
+            previous_app = owner.get('app')
+            if owner.get('node') == self.node_id and isinstance(previous_app, str) and ID.fullmatch(previous_app):
+                attempts = [json.loads(path.read_text(encoding='utf-8')) for path in self.root.glob('*.json')]
+                attempts = [entry for entry in attempts if entry.get('app') == previous_app]
+                occupied = any(entry.spec.get('deployment', {}).get('app') == previous_app for entry in list_services(self.state))
+                if attempts and all(entry['status'] in FINAL for entry in attempts) and not occupied and not self.manifest(previous_app).get('current'):
+                    # Reuse a failed first deployment's data, without claiming a registered application.
+                    app, default = previous_app, self.apps / previous_app
+        if service and selected != Path(previous_directory).resolve():
+            raise StateError('更新沿用原部署目录，请勿更改服务的位置。')
+        if body['kind'] == 'docker' and selected != default.resolve():
+            raise StateError('Docker 数据位置请在启动命令中使用卷或绑定目录指定。')
+        claim(selected, default, app, self.node_id)
         if body['kind'] == 'rollback' and not self.manifest(app).get('previous'):
             raise StateError('此服务没有可回滚的上一版。')
         if shutil.disk_usage(self.root).free < size + 32 * 1024 * 1024:
@@ -236,7 +256,7 @@ class ServiceDeployments:
                'service_id': service.id if service else None, 'version': service.version if service else None,
                'app': app, 'filename': filename, 'size': size, 'offset': 0, 'status': 'uploading' if size else 'ready',
                'phase': '上传服务包' if size else '等待部署', 'actor': identity['actor'], 'source': identity['source'],
-               'created_at': time.time(), 'log': '', 'error': None, 'before': None, 'after': None}
+               'created_at': time.time(), 'log': '', 'error': None, 'before': None, 'after': None, 'directory': str(selected)}
         job.update(options=settings, expected_sha256=digest, upload_chunk=BULK_CHUNK if digest else CHUNK)
         if digest:
             job.update(received=[], received_bytes=0)
@@ -432,17 +452,21 @@ class ServiceDeployments:
         reserved = False
         try:
             with self.state.lock('maintenance.lock', exclusive_now=True):
-                app_dir = self.apps / job['app']
-                app_dir.mkdir(mode=0o700, exist_ok=True)
+                control = self.apps / job['app']
+                app_dir = Path(job.get('directory') or control)
+                claim(app_dir, control, job['app'], self.node_id, create=True)
+                control.mkdir(mode=0o700, exist_ok=True)
                 (app_dir / 'data').mkdir(mode=0o700, exist_ok=True)
                 before = self.service(job['service_id']) if job['service_id'] else None
+                if before and not owns_code(before):
+                    raise StateError('登记已有代码的服务不支持由 Spearmint 更新代码。')
                 if before and before.version != job['version']:
                     raise StateError('服务在上传期间已变化，请刷新后重新部署。')
                 observed = self.controller.drivers[before.driver].inspect(before) if before else Observation('stopped')
                 if observed.status not in {'running', 'stopped', 'failed'}:
                     raise StateError('服务当前状态无法确认，请等待启停操作结束后部署。')
                 self.save(job, before=snapshot(before), was_running=observed.status == 'running', old_manifest=self.manifest(job['app']))
-                metadata = {'app': job['app'], 'release': job['id'], 'kind': job['kind']}
+                metadata = {'app': job['app'], 'release': job['id'], 'kind': job['kind'], 'source': 'managed', 'directory': str(app_dir)}
                 settings = deployment_options(job.get('options'))
                 if job['kind'] == 'rollback':
                     desired = self.manifest(job['app'])['previous']
@@ -562,7 +586,7 @@ class ServiceDeployments:
                 driver.apply(new_service, 'start', driver.inspect(new_service))
                 self.wait_running(new_service, job=job)
                 manifest = {'current': snapshot(new_service), 'previous': snapshot(before)}
-                write_private(app_dir / 'manifest.json', json.dumps(manifest).encode('utf-8'))
+                write_private(control / 'manifest.json', json.dumps(manifest).encode('utf-8'))
                 self.save(job, status='succeeded', phase='部署完成', error=None)
         except Exception as error:
             logger.info('Service deployment %s failed: %s', job['id'], type(error).__name__)
@@ -589,7 +613,7 @@ class ServiceDeployments:
                     audit(db, job['actor'], job['source'], 'service.deployment.' + job['status'], job.get('service_id'), reason=job['id'])
             (self.root / (job['id'] + '.upload')).unlink(missing_ok=True)
             (self.root / (job['id'] + '.cid')).unlink(missing_ok=True)
-            preparation_cache = self.apps / job['app'] / 'tmp' / ('prepare-' + job['id'])
+            preparation_cache = Path(job.get('directory') or self.apps / job['app']) / 'tmp' / ('prepare-' + job['id'])
             if preparation_cache.exists():
                 shutil.rmtree(preparation_cache, ignore_errors=True)
             self.cleanup(job)
@@ -634,7 +658,10 @@ class ServiceDeployments:
             if job.get('service_id'):
                 with suppress(PeerError):
                     services.append(self.service(job['service_id']))
-            releases = self.apps / job['app'] / 'releases'
+            control = self.apps / job['app']
+            app_dir = Path(job.get('directory') or control)
+            claim(app_dir, control, job['app'], self.node_id)
+            releases = app_dir / 'releases'
             retained = set()
             for entry in services:
                 cwd = Path(entry.spec.get('cwd', self.apps))
