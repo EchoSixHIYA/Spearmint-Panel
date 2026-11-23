@@ -35,7 +35,7 @@ from .service_mode import ModeChangeError, change_mode
 from .service_removal import unregister
 from .terminal_service import TerminalService
 from .peer.workspace import Workspace
-from .service_deployment import ServiceDeployments
+from .service_deployment import BULK_CHUNK, ServiceDeployments
 from .seeding import SeedDeployments
 from .state import State, StateError
 from .platforms import capabilities
@@ -717,13 +717,37 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             raise
 
     @app.post('/api/v1/peers/{target}/service-deployment/{action}')
-    async def service_deployment_request(target: str, action: Literal['capabilities', 'begin', 'write', 'launch', 'status', 'cancel', 'history'],
-                                         body: dict = Depends(grove_body), actor: auth.Actor = Depends(require_admin_write)):
+    async def service_deployment_request(target: str, action: Literal['capabilities', 'list', 'begin', 'write', 'launch', 'status', 'cancel', 'history'],
+                                         request: Request, actor: auth.Actor = Depends(require_admin_write)):
+        body = await read_grove_body(request, 64 * 1024)
         if target in ('local', node_id):
             return await remote.work(deployments.request, service_setup.LocalAdmin(actor), action, body)
         pair = remote.pair_for(target)
         identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
-        return await remote.call(target, deployments.method, {'identity': identity, 'action': action, 'body': body}, diagnostic=True)
+        params = {'identity': identity, 'action': action, 'body': body}
+        try:
+            return await remote.call(target, deployments.method, params, diagnostic=True)
+        except PeerError as error:
+            if action != 'capabilities' or error.code != 'UNSUPPORTED_METHOD':
+                raise
+            return await remote.call(target, 'grove.deploy.v1', params, diagnostic=True)
+
+    @app.put('/api/v1/peers/{target}/service-deployment-upload/{identifier}')
+    async def service_deployment_upload(target: str, identifier: str, offset: int, request: Request,
+                                         actor: auth.Actor = Depends(require_admin_write)):
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > BULK_CHUNK:
+                raise PeerError('INVALID_REQUEST', '上传分块过大。')
+        digest = request.headers.get('x-chunk-sha256', '')
+        if target in ('local', node_id):
+            return await remote.work(deployments.write_bytes, service_setup.LocalAdmin(actor), identifier, offset, bytes(data), digest)
+        from .peer.protocol import wire_b64
+        pair = remote.pair_for(target)
+        identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+        return await remote.call(target, deployments.upload_method, {'identity': identity, 'action': 'write',
+                                 'body': {'job': identifier, 'offset': offset, 'data': wire_b64(bytes(data)), 'sha256': digest}}, diagnostic=True)
 
     @app.post('/api/v1/peers/{target}/workspace/{action}')
     async def workspace_request(target: str, action: Literal['host', 'detail', 'edit', 'remove', 'mode'],

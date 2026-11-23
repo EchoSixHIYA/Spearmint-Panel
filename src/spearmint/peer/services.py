@@ -490,7 +490,7 @@ class PeerServices:
             return await self.work(self.terminals.dispatch, pair, params, rpc=True)
         if self.workspace is not None and method == self.workspace.method:
             return await self.work(self.workspace.dispatch, pair, params, rpc=True)
-        if self.service_deployments is not None and method == self.service_deployments.method:
+        if self.service_deployments is not None and method in self.service_deployments.methods:
             return await self.work(self.service_deployments.dispatch, pair, params, rpc=True)
         if method in frp_access.METHODS:
             return await self.work(frp_access.handle, self.state, self.local_id, pair, method, params, rpc=True)

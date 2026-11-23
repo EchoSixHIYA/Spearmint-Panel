@@ -71,7 +71,7 @@ def unpack(archive: Path, destination: Path, filename: str) -> Path:
     return entries[0] if len(entries) == 1 and entries[0].is_dir() else destination
 
 
-def docker_invocation(command: str) -> tuple[list[str], str]:
+def docker_invocation(command: str, *, image_override=None) -> tuple[list[str], str]:
     """Convert one docker run invocation to create arguments; no shell is invoked."""
     command = re.sub(r'(?:\\|\^)\r?\n\s*', ' ', command).strip()
     try:
@@ -109,10 +109,10 @@ def docker_invocation(command: str) -> tuple[list[str], str]:
             if index + 1 >= len(options):
                 raise StateError('Docker 命令缺少镜像名称。')
             image = options[index + 1]
-            result.extend(options[index:]); break
+            result.extend(['--', image_override or image, *options[index + 2:]]); break
         if not item.startswith('-'):
             image = item
-            result.extend(options[index:]); break
+            result.extend([image_override or image, *options[index + 1:]]); break
         key = item.split('=', 1)[0]
         if key in {'--cidfile', '--attach', '--help', '--pull', '--name'}:
             if key in {'--cidfile', '--attach', '--help'}:
@@ -143,5 +143,5 @@ def docker_invocation(command: str) -> tuple[list[str], str]:
     return result, image
 
 
-def docker_arguments(command: str) -> list[str]:
-    return docker_invocation(command)[0]
+def docker_arguments(command: str, *, image_override=None) -> list[str]:
+    return docker_invocation(command, image_override=image_override)[0]

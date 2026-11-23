@@ -11,6 +11,8 @@ from .credentials import FINGERPRINT, NODE_ID, RANDOM_ID
 
 FRAME = 512 * 1024
 REQUEST = 16 * 1024
+DEPLOY_REQUEST = 64 * 1024
+DEPLOY_UPLOAD = 384 * 1024
 CATALOG = 64 * 1024
 CONTROL = 16 * 1024
 RELAY_FRAME = 32 * 1024
@@ -100,7 +102,8 @@ def validate_frame(frame: dict, size: int, *, mesh: bool = False, relay: bool = 
         case "ping" | "pong":
             valid = frame.keys() == {"type", "nonce"} and matches(RANDOM_ID, frame["nonce"])
         case "request":
-            valid = (frame.keys() == {"type", "id", "method", "params"} and size <= REQUEST
+            limit = DEPLOY_UPLOAD if frame.get('method') == 'grove.deploy.upload' else DEPLOY_REQUEST if frame.get('method') == 'grove.deploy.v2' else REQUEST
+            valid = (frame.keys() == {"type", "id", "method", "params"} and size <= limit
                      and matches(RANDOM_ID, frame["id"]) and matches(METHOD, frame["method"])
                      and isinstance(frame["params"], dict))
         case "response":

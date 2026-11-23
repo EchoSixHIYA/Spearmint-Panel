@@ -10,6 +10,9 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import os
+import socket
+from urllib.request import ProxyHandler, Request, build_opener
 from threading import Event, RLock, Thread
 import time
 
@@ -25,12 +28,15 @@ from .peer.protocol import PeerError, parse_b64
 from .peer.service_setup import LocalAdmin, acting_as
 from .service_artifacts import MAX_UPLOAD, docker_arguments, docker_invocation, unpack
 from .service_command import command_spec
+from .deployment_options import options as deployment_options
+from . import deployment_runtime
 from .state import StateError, audit
 
 logger = logging.getLogger(__name__)
 ID = re.compile(r'^[a-f0-9]{32}$')
 FINAL = {'succeeded', 'failed', 'cancelled'}
 CHUNK = 8192
+BULK_CHUNK = 256 * 1024
 
 
 def snapshot(service):
@@ -38,7 +44,9 @@ def snapshot(service):
 
 
 class ServiceDeployments:
-    method = 'grove.deploy.v1'
+    method = 'grove.deploy.v2'
+    methods = {'grove.deploy.v1', method, 'grove.deploy.upload'}
+    upload_method = 'grove.deploy.upload'
 
     def __init__(self, state, node_id, controller, docker_socket):
         self.state, self.node_id, self.controller = state, node_id, controller
@@ -49,6 +57,8 @@ class ServiceDeployments:
         self.workers = {}
         self.cleaning = False
         self.stopping = Event()
+        self.cache = state.directory / 'service-artifacts'
+        self.cache.mkdir(mode=0o700, exist_ok=True)
         self.root.mkdir(mode=0o700, exist_ok=True)
         self.apps.mkdir(mode=0o700, exist_ok=True)
 
@@ -76,7 +86,9 @@ class ServiceDeployments:
 
     def view(self, job):
         return {key: job.get(key) for key in ('id', 'kind', 'name', 'command', 'service_id', 'status', 'phase',
-                'size', 'offset', 'filename', 'sha256', 'error', 'log', 'created_at', 'updated_at', 'rolled_back')}
+                'size', 'offset', 'filename', 'sha256', 'error', 'log', 'created_at', 'updated_at', 'rolled_back',
+                'options', 'received_bytes', 'upload_chunk', 'expected_sha256', 'readiness_result')} | {
+                    'received': job.get('received', []), 'options': job.get('options', deployment_options())}
 
     def service(self, identifier):
         with self.state.connect(read_only=True) as db:
@@ -97,21 +109,31 @@ class ServiceDeployments:
         try:
             with self.lock:
                 if action == 'capabilities' and not body:
-                    return {'deployment': 1, 'max_upload': MAX_UPLOAD, 'chunk': CHUNK, 'formats': ['zip', 'tar', 'tar.gz']}
+                    return {'deployment': 2, 'max_upload': MAX_UPLOAD, 'chunk': BULK_CHUNK, 'window': 2,
+                            'bulk_upload': 1, 'options': 1, 'formats': ['zip', 'tar', 'tar.gz']}
+                if action == 'list' and not body:
+                    jobs = [json.loads(path.read_text(encoding='utf-8')) for path in self.root.glob('*.json')]
+                    return {'jobs': [{k: v for k, v in self.view(job).items() if k not in {'command', 'log', 'options', 'received'}}
+                                     for job in sorted(jobs, key=lambda item: item['created_at'], reverse=True)[:24]]}
                 if action == 'history' and body.keys() == {'service_id'}:
                     service = self.service(body['service_id'])
                     app = service.spec.get('deployment', {}).get('app')
                     jobs = [json.loads(path.read_text(encoding='utf-8')) for path in self.root.glob('*.json')]
                     jobs = sorted((job for job in jobs if job.get('service_id') == service.id), key=lambda job: job['created_at'], reverse=True)
-                    return {'jobs': [{key: value for key, value in self.view(job).items() if key not in {'command', 'log'}} for job in jobs[:12]],
+                    return {'jobs': [{key: value for key, value in self.view(job).items() if key not in {'command', 'log', 'options', 'received'}} for job in jobs[:12]],
                             'can_update': service.managed and not service.existing_system_service,
+                            'options': service.spec.get('deployment_options', deployment_options()),
                             'can_rollback': bool(app and self.manifest(app).get('previous'))}
                 if action == 'begin':
                     return self.begin(actor, body)
                 job = self.load(body.get('job'))
                 if action == 'status' and body.keys() == {'job'}:
                     return self.view(job)
+                if action == 'write' and body.keys() == {'job', 'offset', 'data', 'sha256'}:
+                    return self.write_bytes(actor, body['job'], body['offset'], parse_b64(body['data'], BULK_CHUNK), body['sha256'])
                 if action == 'write' and body.keys() == {'job', 'offset', 'data'}:
+                    if job.get('expected_sha256'):
+                        raise PeerError('CONFLICT', '请使用分块传输入口继续此任务。')
                     if job['status'] != 'uploading' or type(body['offset']) is not int:
                         raise PeerError('CONFLICT', '任务当前不接受文件上传。')
                     data = parse_b64(body['data'], CHUNK)
@@ -144,7 +166,7 @@ class ServiceDeployments:
                         return self.view(job)
                     if self.stopping.is_set() or self.cleaning or any(thread.is_alive() for thread in self.workers.values()):
                         raise PeerError('BUSY', '目标节点正在部署其他服务，请稍后重试。')
-                    if job['size'] and job['offset'] != job['size']:
+                    if job['size'] and job.get('received_bytes', job['offset']) != job['size']:
                         raise PeerError('CONFLICT', '服务包尚未上传完整。')
                     self.save(job, status='deploying', phase='准备部署')
                     thread = Thread(target=self.run, args=(job, actor), name='service-deployment', daemon=True)
@@ -157,12 +179,12 @@ class ServiceDeployments:
 
     def begin(self, actor, body):
         expected = {'job', 'kind', 'name', 'command', 'service_id', 'version', 'filename', 'size'}
-        if body.keys() != expected or not isinstance(body['kind'], str) or body['kind'] not in {'package', 'command', 'docker', 'rollback'} or not isinstance(body['name'], str):
+        if not expected <= body.keys() or body.keys() - expected - {'options', 'sha256'} or not isinstance(body['kind'], str) or body['kind'] not in {'package', 'command', 'docker', 'rollback'} or not isinstance(body['name'], str):
             raise PeerError('INVALID_REQUEST', 'Invalid deployment configuration')
         identifier = body['job']
         path = self.path(identifier)
         identity = acting_as(actor)
-        config = {key: body[key] for key in expected - {'job'}}
+        config = {key: body[key] for key in body.keys() - {'job'}}
         if path.exists():
             job = self.load(identifier)
             if job['request'] != config or job['actor'] != identity['actor']:
@@ -201,6 +223,10 @@ class ServiceDeployments:
                 if db.execute('SELECT 1 FROM service WHERE name=?', (name,)).fetchone():
                     raise StateError('服务名称已登记，请从服务详情更新它。')
         app = service.spec.get('deployment', {}).get('app') if service else None
+        settings = deployment_options(body.get('options', service.spec.get('deployment_options') if service else None))
+        digest = body.get('sha256')
+        if digest is not None and (not isinstance(digest, str) or re.fullmatch('[a-f0-9]{64}', digest) is None):
+            raise StateError('请核对程序包摘要。')
         app = app or identifier
         if body['kind'] == 'rollback' and not self.manifest(app).get('previous'):
             raise StateError('此服务没有可回滚的上一版。')
@@ -211,19 +237,71 @@ class ServiceDeployments:
                'app': app, 'filename': filename, 'size': size, 'offset': 0, 'status': 'uploading' if size else 'ready',
                'phase': '上传服务包' if size else '等待部署', 'actor': identity['actor'], 'source': identity['source'],
                'created_at': time.time(), 'log': '', 'error': None, 'before': None, 'after': None}
+        job.update(options=settings, expected_sha256=digest, upload_chunk=BULK_CHUNK if digest else CHUNK)
+        if digest:
+            job.update(received=[], received_bytes=0)
+            cached = self.cache / (digest + '.archive')
+            if size and cached.is_file() and cached.stat().st_size == size:
+                destination = self.root / (identifier + '.upload')
+                try:
+                    os.link(cached, destination)
+                except OSError:
+                    shutil.copyfile(cached, destination)
+                job.update(offset=size, received_bytes=size, received=list(range((size + BULK_CHUNK - 1) // BULK_CHUNK)),
+                           status='ready', phase='已复用目标节点缓存')
         self.save(job)
         return self.view(job)
+
+    def write_bytes(self, actor, identifier, offset, data, digest):
+        with self.state.connect(read_only=True) as db:
+            actor.require(db)
+        with self.lock:
+            job = self.load(identifier)
+            if job['status'] != 'uploading' or type(offset) is not int or offset < 0:
+                raise PeerError('CONFLICT', '任务当前不接受文件上传。')
+            if (offset % BULK_CHUNK or len(data) != min(BULK_CHUNK, job['size'] - offset)
+                    or not data or offset + len(data) > job['size'] or sha256(data).hexdigest() != digest):
+                raise PeerError('CONFLICT', '上传片段不完整，请重新传输此片段。')
+            path = self.root / (identifier + '.upload')
+            received = set(job.get('received', []))
+            index = offset // BULK_CHUNK
+            if index in received:
+                with path.open('rb') as stream:
+                    stream.seek(offset)
+                    if stream.read(len(data)) != data:
+                        raise PeerError('CONFLICT', '续传内容与已上传文件不一致。')
+            else:
+                if shutil.disk_usage(self.root).free < len(data) + 32 * 1024 * 1024:
+                    raise PeerError('DEPLOY_FAILED', '目标节点磁盘空间不足。')
+                with path.open('r+b' if path.exists() else 'w+b') as stream:
+                    stream.seek(offset)
+                    stream.write(data)
+                received.add(index)
+            contiguous = 0
+            while contiguous in received:
+                contiguous += 1
+            accepted = sum(min(BULK_CHUNK, job['size'] - part * BULK_CHUNK) for part in received)
+            self.save(job, received=sorted(received), received_bytes=accepted, offset=min(job['size'], contiguous * BULK_CHUNK))
+            return {key: job[key] for key in ('id', 'status', 'offset', 'received_bytes')}
 
     def note(self, job, phase, log=None):
         self.save(job, phase=phase, log=(job.get('log', '') + ('\n' + log if log else ''))[-12000:])
 
     def docker(self, job, args):
         argv, env = local_docker_command(self.docker_socket)
+        return self.execute(job, [*argv, *args], env=env, timeout=900,
+                            interruptible=args[:2] in (['image', 'pull'], ['container', 'create']))
+
+    def execute_script(self, job, command, cwd, env, *, timeout, record=True):
+        spec = command_spec(command, str(cwd), 8, None, state=self.state, environment=env)
+        return self.execute(job, spec['argv'], cwd=cwd, env=env, timeout=timeout, record=record)
+
+    def execute(self, job, argv, *, env=None, cwd=None, timeout=900, interruptible=True, record=True):
         chunks = deque(maxlen=128)
         output = bytearray()
         # Stream a bounded tail into the durable job instead of buffering all pull output.
-        process = subprocess.Popen([*argv, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, env=env, start_new_session=not WINDOWS,
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, env={**os.environ, **(env or {}), 'PIP_NO_CACHE_DIR': '1'}, cwd=cwd, start_new_session=not WINDOWS,
             creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0)
         def read():
             try:
@@ -233,27 +311,27 @@ class ServiceDeployments:
                 process.stdout.close()
         reader = Thread(target=read, name='deployment-docker-output', daemon=True)
         reader.start()
-        deadline, last = time.monotonic() + 900, 0
+        deadline, last = time.monotonic() + timeout, 0
         previous_log = job.get('log', '')
-        interruptible = args[:2] in (['image', 'pull'], ['container', 'create'])
         try:
             while True:
                 while chunks:
                     output.extend(chunks.popleft())
                 if len(output) > 12000:
                     del output[:-12000]
-                if time.monotonic() - last > 1:
+                if record and time.monotonic() - last > 1:
                     self.save(job, log=(previous_log + '\n' + output.decode('utf-8', 'replace'))[-12000:])
                     last = time.monotonic()
                 if process.poll() is not None and not reader.is_alive() and not chunks:
                     break
                 if time.monotonic() >= deadline or interruptible and self.stopping.is_set():
-                    raise HostError('Docker 操作超时或被面板停机中断。')
+                    raise HostError('准备或检查命令超时，或被面板停机中断。')
                 time.sleep(.1)
             text = output.decode('utf-8', 'replace').strip()
-            self.save(job, log=(previous_log + '\n' + text)[-12000:])
+            if record:
+                self.save(job, log=(previous_log + '\n' + text)[-12000:])
             if process.returncode:
-                raise HostError(text[-1500:] or 'Docker 未能完成操作。')
+                raise HostError(f'命令退出码 {process.returncode}：' + (text[-1400:] or '命令未能完成操作。'))
             return text
         finally:
             if process.poll() is None:
@@ -266,26 +344,58 @@ class ServiceDeployments:
                 process.wait(timeout=5)
             reader.join(timeout=2)
 
-    def wait_running(self, service, *, restoring=False):
+    def probe(self, service, ready):
+        if ready['mode'] == 'tcp':
+            with socket.create_connection(('127.0.0.1', ready['port']), timeout=2):
+                return
+        if ready['mode'] == 'http':
+            with build_opener(ProxyHandler({})).open(Request(ready['url']), timeout=2) as response:
+                if not 200 <= response.status < 400:
+                    raise HostError(f'HTTP {response.status}')
+        if ready['mode'] == 'command':
+            probe = {'log': ''}
+            if service.driver == 'docker':
+                argv, env = local_docker_command(self.docker_socket)
+                shell = ['cmd', '/d', '/c'] if service.spec.get('image_os') == 'windows' else ['sh', '-c']
+                self.execute(probe, [*argv, 'container', 'exec', service.target, *shell, ready['command']], env=env, timeout=3, record=False)
+            else:
+                self.execute_script(probe, ready['command'], Path(service.spec['cwd']),
+                                    service.spec.get('deployment_environment', {}), timeout=3, record=False)
+
+    def wait_running(self, service, *, restoring=False, job=None):
         driver = self.controller.drivers[service.driver]
         stable = None
-        deadline = time.monotonic() + 40
+        ready = deployment_options(service.spec.get('deployment_options'))['readiness']
+        deadline = time.monotonic() + ready['timeout']
+        detail, reported = '等待进程运行', 0
         while time.monotonic() < deadline:
             observed = driver.inspect(service)
             if observed.status == 'running' and observed.health not in {'starting', 'unhealthy'}:
-                stable = stable or time.monotonic()
-                if time.monotonic() - stable >= 1:
-                    self.controller.observe(service)
-                    return
+                try:
+                    self.probe(service, ready)
+                    stable = stable or time.monotonic()
+                    detail = '检查已通过，确认持续运行'
+                    if time.monotonic() - stable >= ready['stable']:
+                        self.controller.observe(service)
+                        if job is not None:
+                            self.save(job, readiness_result={'mode': ready['mode'], 'status': 'ready', 'at': time.time()})
+                        return
+                except (OSError, HostError, ValueError) as error:
+                    stable = None
+                    detail = str(error)[-800:]
             else:
                 stable = None
+                detail = observed.message or ('等待容器健康检查' if observed.health == 'starting' else '等待进程运行')
                 if observed.status in {'failed', 'stopped', 'missing'} or observed.health == 'unhealthy':
                     raise HostError(observed.message or '服务启动后退出，请查看应用日志。')
+            if job is not None and time.monotonic() - reported >= 2:
+                self.save(job, readiness_result={'mode': ready['mode'], 'status': 'waiting', 'detail': detail})
+                reported = time.monotonic()
             if restoring:
                 time.sleep(.2)
             elif self.stopping.wait(.2):
                 raise HostError('面板正在退出，部署已中断。')
-        raise HostError('未能在 40 秒内确认服务持续运行。')
+        raise HostError(f"就绪检查超时（{ready['timeout']} 秒）：{detail}")
 
     def rename_container(self, job, target, name):
         actual = self.docker(job, ['container', 'inspect', '--format', '{{.Name}}', target]).splitlines()[-1].lstrip('/')
@@ -333,6 +443,7 @@ class ServiceDeployments:
                     raise StateError('服务当前状态无法确认，请等待启停操作结束后部署。')
                 self.save(job, before=snapshot(before), was_running=observed.status == 'running', old_manifest=self.manifest(job['app']))
                 metadata = {'app': job['app'], 'release': job['id'], 'kind': job['kind']}
+                settings = deployment_options(job.get('options'))
                 if job['kind'] == 'rollback':
                     desired = self.manifest(job['app'])['previous']
                     spec, target = desired['spec'], desired['target']
@@ -346,12 +457,30 @@ class ServiceDeployments:
                             for chunk in iter(lambda: stream.read(1024 * 1024), b''):
                                 digest.update(chunk)
                         self.save(job, sha256=digest.hexdigest())
+                        if job.get('expected_sha256') and digest.hexdigest() != job['expected_sha256']:
+                            raise StateError('服务包完整性校验失败，请重新上传。')
+                        metadata['sha256'] = digest.hexdigest()
                         cwd = str(unpack(upload, Path(cwd), job['filename']))
+                        cached = self.cache / (digest.hexdigest() + '.archive')
+                        if not cached.exists():
+                            temporary = cached.with_suffix('.new')
+                            shutil.copyfile(upload, temporary)
+                            temporary.replace(cached)
                     else:
+                        old_options = deployment_options(before.spec.get('deployment_options')) if before else None
+                        if before and (settings['prepare'].strip() or any(settings[key] != old_options[key] for key in ('runtime', 'data_paths'))):
+                            destination = app_dir / 'releases' / job['id']
+                            deployment_runtime.copy_release(cwd, destination, settings['data_paths'])
+                            cwd = str(destination)
                         Path(cwd).mkdir(parents=True, exist_ok=True)
+                    # External programs remain in their own directories; only managed releases get data links.
+                    if Path(cwd).is_relative_to(app_dir / 'releases'):
+                        deployment_runtime.data_directories(Path(cwd), app_dir, settings['data_paths'])
+                    fresh = not before or job['kind'] == 'package' or cwd != before.spec.get('cwd')
+                    environment = deployment_runtime.prepare(self, job, Path(cwd), app_dir, settings, fresh=fresh)
                     spec = command_spec(job['command'], cwd, before.spec['stop_timeout'] if before else 8, None, state=self.state,
-                                        environment={'SPMT_APP_DIR': cwd, 'SPMT_DATA_DIR': str(app_dir / 'data')})
-                    spec['deployment'] = metadata
+                                        environment=environment)
+                    spec.update(deployment=metadata, deployment_environment=environment, deployment_options=settings)
                     target = f"spearmint-workload-{before.id}-{job['id'][:8]}.service" if before else ''
                 else:
                     arguments, image = docker_invocation(job['command'])
@@ -364,9 +493,20 @@ class ServiceDeployments:
                         if option == '--platform':
                             platform = [option, arguments[index + 1]]
                             break
-                    self.docker(job, ['image', 'pull', *platform, image])
+                    try:
+                        self.docker(job, ['image', 'pull', *platform, image])
+                    except HostError:
+                        self.docker(job, ['image', 'inspect', image])
+                        self.note(job, '使用目标节点已缓存的镜像')
+                    image_info = json.loads(self.docker(job, ['image', 'inspect', '--format', '{{json .}}', image]))
+                    metadata['image_id'] = image_info['Id']
+                    arguments = docker_arguments(job['command'], image_override=image_info['Id'])
+                    mounts = self.docker(job, ['container', 'inspect', '--format', '{{json .Mounts}}', before.target]) if before else '[]'
+                    extra = deployment_runtime.container_data(arguments[:arguments.index(image_info['Id'])], json.loads(mounts), image_info, job['app'])
+                    arguments = [*extra, *arguments]
                     spec = {'stop_timeout': before.spec['stop_timeout'] if before else 8,
-                            'command': job['command'], 'deployment': metadata}
+                            'command': job['command'], 'deployment': metadata, 'deployment_options': settings,
+                            'image_os': image_info.get('Os', 'linux')}
                     target = ''
                 if before:
                     service = before
@@ -394,7 +534,7 @@ class ServiceDeployments:
                     cidfile = self.root / (job['id'] + '.cid')
                     self.save(job, creating_container=True)
                     self.docker(job, ['container', 'create', '--pull=never', '--label', 'io.spearmint.deployment=' + job['id'],
-                                      '--cidfile', str(cidfile), *docker_arguments(job['command'])])
+                                      '--cidfile', str(cidfile), *arguments])
                     target = cidfile.read_text(encoding='utf-8').strip()
                     if not CONTAINER_ID.fullmatch(target):
                         raise HostError('Docker 未返回有效的容器 ID。')
@@ -416,10 +556,10 @@ class ServiceDeployments:
                     self.reserve(job, actor, new_service)
                     reserved = True
                 self.save(job, after=snapshot(new_service))
-                self.note(job, '启动并确认服务')
+                self.note(job, '等待应用就绪')
                 driver = self.controller.drivers[new_service.driver]
                 driver.apply(new_service, 'start', driver.inspect(new_service))
-                self.wait_running(new_service)
+                self.wait_running(new_service, job=job)
                 manifest = {'current': snapshot(new_service), 'previous': snapshot(before)}
                 write_private(app_dir / 'manifest.json', json.dumps(manifest).encode('utf-8'))
                 self.save(job, status='succeeded', phase='部署完成', error=None)
@@ -448,6 +588,9 @@ class ServiceDeployments:
                     audit(db, job['actor'], job['source'], 'service.deployment.' + job['status'], job.get('service_id'), reason=job['id'])
             (self.root / (job['id'] + '.upload')).unlink(missing_ok=True)
             (self.root / (job['id'] + '.cid')).unlink(missing_ok=True)
+            preparation_cache = self.apps / job['app'] / 'tmp' / ('prepare-' + job['id'])
+            if preparation_cache.exists():
+                shutil.rmtree(preparation_cache, ignore_errors=True)
             self.cleanup(job)
 
     def restore(self, job):
@@ -500,6 +643,14 @@ class ServiceDeployments:
                 for directory in releases.iterdir():
                     if ID.fullmatch(directory.name) and directory.name not in retained and not directory.is_symlink():
                         shutil.rmtree(directory)
+            retained_envs = {entry.spec.get('deployment_environment', {}).get('VIRTUAL_ENV') for entry in services}
+            # Environments belong to releases, not to uploaded .venv directories.
+            for path in self.state.directory.joinpath('service-envs').glob('*'):
+                if not ID.fullmatch(path.name) or str(path) in retained_envs:
+                    continue
+                owner = self.root / (path.name + '.json')
+                if owner.exists() and json.loads(owner.read_text(encoding='utf-8')).get('app') == job['app']:
+                    shutil.rmtree(path)
             if job['status'] == 'succeeded' and job.get('old_manifest'):
                 previous = job['old_manifest'].get('previous')
                 targets = {entry.target for entry in services if entry.driver == 'docker'}
@@ -511,9 +662,25 @@ class ServiceDeployments:
                             raise
             if job.get('cleanup_pending'):
                 self.save(job, cleanup_pending=False)
+            self.prune_archives()
         except Exception as error:
             self.save(job, cleanup_pending=True, cleanup_attempt=time.time())
             self.note(job, job['phase'], '旧版本清理待重试：' + str(error)[:500])
+
+    def prune_archives(self):
+        keep = set()
+        for manifest in self.apps.glob('*/manifest.json'):
+            contents = json.loads(manifest.read_text(encoding='utf-8'))
+            for entry in (contents.get('current'), contents.get('previous')):
+                if entry:
+                    keep.add(entry['spec'].get('deployment', {}).get('sha256'))
+        for path in self.root.glob('*.json'):
+            job = json.loads(path.read_text(encoding='utf-8'))
+            if job['status'] not in FINAL:
+                keep.add(job.get('expected_sha256'))
+        for path in self.cache.glob('*.archive'):
+            if path.stem not in keep:
+                path.unlink(missing_ok=True)
 
     def recover(self):
         for path in self.root.glob('*.json'):

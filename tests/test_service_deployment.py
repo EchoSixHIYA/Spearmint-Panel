@@ -11,6 +11,8 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 import zipfile
+from hashlib import sha256
+import socket
 
 from spearmint import auth
 from spearmint.catalog import get_service, list_services
@@ -70,11 +72,13 @@ class DeploymentTest(unittest.TestCase):
             archive.writestr('my app/app.py', f'print("{version}")\n')
         return data.getvalue()
 
-    def begin(self, kind='package', command='python app.py', service=None, data=None):
+    def begin(self, kind='package', command='python app.py', service=None, data=None, options=None):
         data = self.archive('v1') if data is None and kind == 'package' else data or b''
         body = {'job': uuid4().hex, 'kind': kind, 'name': service.name if service else 'Example service', 'command': command,
                 'service_id': service.id if service else None, 'version': service.version if service else None,
                 'filename': 'app.zip' if data else '', 'size': len(data)}
+        if options is not None:
+            body['options'] = options
         job = self.manager.request(self.actor, 'begin', body)
         self.assertEqual(job, self.manager.request(self.actor, 'begin', body))
         for offset in range(0, len(data), 8192):
@@ -85,7 +89,7 @@ class DeploymentTest(unittest.TestCase):
 
     def launch(self, identifier):
         self.manager.request(self.actor, 'launch', {'job': identifier})
-        self.manager.workers[identifier].join(timeout=12)
+        self.manager.workers[identifier].join(timeout=60)
         self.assertFalse(self.manager.workers[identifier].is_alive())
         return self.manager.request(self.actor, 'status', {'job': identifier})
 
@@ -195,6 +199,8 @@ class DeploymentTest(unittest.TestCase):
     def fake_docker(self, job, args):
         if args[:2] == ['image', 'pull']:
             return 'Downloaded image'
+        if args[:2] == ['image', 'inspect']:
+            return json.dumps({'Id': 'sha256:' + '1' * 64, 'Os': 'linux', 'Config': {'Volumes': {'/var/lib/app': {}}}})
         if args[:2] == ['container', 'create']:
             target = f'{len(self.created) + 1:064x}'
             self.created.append(target)
@@ -202,6 +208,8 @@ class DeploymentTest(unittest.TestCase):
             Path(args[args.index('--cidfile') + 1]).write_text(target)
             return target
         if args[:2] == ['container', 'inspect']:
+            if '{{json .Mounts}}' in args:
+                return '[]'
             return '/' + self.names[args[-1]]
         if args[:2] == ['container', 'rename']:
             target, name = args[2:]
@@ -267,6 +275,118 @@ class DeploymentTest(unittest.TestCase):
             self.assertEqual(third['status'], 'succeeded', third)
             self.assertIn(self.created[0], self.removed)
             self.assertEqual(len(self.names), 2)
+
+    def test_bulk_out_of_order_resume_and_content_cache(self):
+        from spearmint.service_deployment import BULK_CHUNK
+        data = self.archive('x' * (BULK_CHUNK * 5 + 31))
+        identifier = uuid4().hex
+        body = {'job': identifier, 'kind': 'package', 'name': 'Bulk service', 'command': 'echo deployed',
+                'service_id': None, 'version': None, 'filename': 'app.zip', 'size': len(data), 'sha256': sha256(data).hexdigest()}
+        self.manager.request(self.actor, 'begin', body)
+        for index in (2, 0):
+            offset = index * BULK_CHUNK
+            chunk = data[offset:offset + BULK_CHUNK]
+            self.manager.write_bytes(self.actor, identifier, offset, chunk, sha256(chunk).hexdigest())
+        self.manager = ServiceDeployments(self.state, self.node, self.controller, self.root / 'docker.sock')
+        status = self.manager.request(self.actor, 'status', {'job': identifier})
+        self.assertEqual(status['received'], [0, 2])
+        for index in range((len(data) + BULK_CHUNK - 1) // BULK_CHUNK):
+            chunk = data[index * BULK_CHUNK:(index + 1) * BULK_CHUNK]
+            self.manager.write_bytes(self.actor, identifier, index * BULK_CHUNK, chunk, sha256(chunk).hexdigest())
+        result = self.launch(identifier)
+        self.assertEqual(result['status'], 'succeeded', result)
+        current = self.service(result['service_id'])
+        cached = self.manager.request(self.actor, 'begin', {**body, 'job': uuid4().hex, 'service_id': current.id, 'version': current.version})
+        self.assertEqual(cached['received_bytes'], len(data))
+        self.assertEqual(cached['status'], 'ready')
+
+    def test_dependency_prepare_failure_keeps_original_running(self):
+        first = self.launch(self.begin(command='echo existing'))
+        before = self.service(first['service_id'])
+        count = len(self.driver.actions)
+        failure = self.launch(self.begin(service=before, command='echo new', options={'runtime': 'none', 'prepare': 'exit 19'}))
+        self.assertEqual(failure['status'], 'failed', failure)
+        self.assertIn('19', failure['error'])
+        self.assertEqual(len(self.driver.actions), count)
+        self.assertEqual(self.service(before.id), before)
+        self.assertEqual(self.driver.inspect(before).status, 'running')
+
+    def test_failed_readiness_recovers_code_and_running_state(self):
+        first = self.launch(self.begin(command='echo existing'))
+        before = self.service(first['service_id'])
+        with socket.socket() as unused:
+            unused.bind(('127.0.0.1', 0))
+            port = unused.getsockname()[1]
+            result = self.launch(self.begin(service=before, command='echo new', options={'runtime': 'none', 'readiness': {'mode': 'tcp', 'port': port, 'timeout': 2, 'stable': 1}}))
+        self.assertEqual(result['status'], 'failed', result)
+        self.assertTrue(result['rolled_back'], result)
+        self.assertIn('就绪检查超时', result['error'])
+        self.assertEqual(self.service(before.id).spec, before.spec)
+        self.assertEqual(self.driver.inspect(before).status, 'running')
+
+    def test_data_links_keep_writes_across_update_rollback_and_cleanup(self):
+        first = self.launch(self.begin(command='echo example', options={'runtime': 'none', 'data_paths': ['data', 'uploads']}))
+        current = self.service(first['service_id'])
+        original_cwd = Path(current.spec['cwd'])
+        (original_cwd / 'data' / 'db.txt').write_text('database')
+        (original_cwd / 'uploads' / 'image.txt').write_text('image')
+        for version in ('v2', 'v3'):
+            result = self.launch(self.begin(service=current, command='echo example', data=self.archive(version)))
+            self.assertEqual(result['status'], 'succeeded', result)
+            current = self.service(current.id)
+            self.assertEqual((Path(current.spec['cwd']) / 'data' / 'db.txt').read_text(), 'database')
+        self.assertFalse(original_cwd.exists())
+        rolled = self.launch(self.begin('rollback', '', current))
+        self.assertEqual(rolled['status'], 'succeeded', rolled)
+        restored = self.service(current.id)
+        self.assertEqual((Path(restored.spec['cwd']) / 'uploads' / 'image.txt').read_text(), 'image')
+        self.assertEqual(len(list(self.manager.cache.glob('*.archive'))), 2)
+
+    def test_mounts_preserve_previous_and_use_stable_image_volumes(self):
+        from spearmint.deployment_runtime import container_data
+        mounts = [{'Type': 'volume', 'Name': 'existing-db', 'Destination': '/db', 'RW': True},
+                  {'Type': 'bind', 'Source': '/srv/config', 'Destination': '/config', 'RW': False}]
+        image = {'Os': 'linux', 'Config': {'Volumes': {'/db': {}, '/cache': {}}}}
+        result = container_data(['--volume', 'new:/cache'], mounts, image, 'app')
+        self.assertIn('type=volume,source=existing-db,target=/db', result)
+        self.assertIn('type=bind,source=/srv/config,target=/config,readonly', result)
+        self.assertFalse(any('target=/cache' in arg for arg in result))
+        self.assertEqual(result, container_data(['--volume', 'new:/cache'], mounts, image, 'app'))
+
+    def test_command_preparation_clones_code_beside_nested_data(self):
+        package = BytesIO()
+        with zipfile.ZipFile(package, 'w') as archive:
+            archive.writestr('storage/logic.py', 'print("code")')
+            archive.writestr('storage/data/default.txt', 'packaged default')
+            archive.writestr('app.py', 'print("application")')
+        settings = {'runtime': 'none', 'data_paths': ['storage/data']}
+        first = self.launch(self.begin(command='echo original', data=package.getvalue(), options=settings))
+        before = self.service(first['service_id'])
+        (Path(before.spec['cwd']) / 'storage/data/db.txt').write_text('persistent')
+        result = self.launch(self.begin('command', 'echo updated', before, options={**settings, 'prepare': 'echo prepared'}))
+        self.assertEqual(result['status'], 'succeeded', result)
+        current = self.service(before.id)
+        self.assertNotEqual(current.spec['cwd'], before.spec['cwd'])
+        self.assertTrue((Path(current.spec['cwd']) / 'storage/logic.py').is_file())
+        self.assertEqual((Path(current.spec['cwd']) / 'storage/data/db.txt').read_text(), 'persistent')
+
+    def test_python_environment_installs_offline_wheel_before_switch(self):
+        wheel = BytesIO()
+        with zipfile.ZipFile(wheel, 'w') as package:
+            package.writestr('demo_dependency.py', 'VALUE = 42\n')
+            package.writestr('demo_dependency-1.0.dist-info/METADATA', 'Metadata-Version: 2.1\nName: demo-dependency\nVersion: 1.0\n')
+            package.writestr('demo_dependency-1.0.dist-info/WHEEL', 'Wheel-Version: 1.0\nGenerator: fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
+            package.writestr('demo_dependency-1.0.dist-info/RECORD', '')
+        archive = BytesIO()
+        with zipfile.ZipFile(archive, 'w') as package:
+            package.writestr('requirements.txt', './demo_dependency-1.0-py3-none-any.whl\n')
+            package.writestr('demo_dependency-1.0-py3-none-any.whl', wheel.getvalue())
+            package.writestr('app.py', 'import demo_dependency\n')
+        result = self.launch(self.begin(data=archive.getvalue(), options={'prepare': 'python -c "import demo_dependency; assert demo_dependency.VALUE == 42"'}))
+        self.assertEqual(result['status'], 'succeeded', result)
+        service = self.service(result['service_id'])
+        self.assertIn('VIRTUAL_ENV', service.spec['deployment_environment'])
+        self.assertIn('Successfully installed demo-dependency', result['log'])
 
     @unittest.skipUnless(os.name == 'nt', 'Windows native supervisor integration')
     def test_real_windows_package_logs_update_and_failed_start_rollback(self):

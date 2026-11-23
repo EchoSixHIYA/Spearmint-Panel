@@ -6,19 +6,21 @@ import { useUnsavedChanges } from './navigation-guard'
 import { Badge, bytes, Icon, Loading, Notice, Tabs } from './ui'
 import { returnRoute, withReturn } from './workspace-api'
 import './service-deployment.css'
+import { defaultOptions, DeploymentSettings, type DeploymentOptions } from './deployment-options'
+import { digestBytes, digestFile } from './deployment-transfer'
 
 type Job = { id: string; service_id?: string; kind: string; name: string; command: string; filename: string;
-  status: string; phase: string; size: number; offset: number; error?: string; log?: string; rolled_back?: boolean; updated_at: number }
+  status: string; phase: string; size: number; offset: number; error?: string; log?: string; rolled_back?: boolean; updated_at: number;
+  received?: number[]; received_bytes?: number; upload_chunk?: number; expected_sha256?: string; readiness_result?: { status: string; mode: string; detail?: string } }
 type Service = { id: string; name: string; driver: string; version?: number; command?: string }
-type History = { jobs: Job[]; can_update: boolean; can_rollback: boolean }
+type History = { jobs: Job[]; can_update: boolean; can_rollback: boolean; options: DeploymentOptions }
 const ended = (job?: Job) => !!job && ['succeeded', 'failed', 'cancelled'].includes(job.status)
 const storageKey = (target: string, service?: Service) => `spearmint-deploy/${target}/${service?.id || 'new'}`
-function saved(key: string): string | undefined { try { const value = sessionStorage.getItem(key); return value && /^[a-f0-9]{32}$/.test(value) ? value : undefined } catch { return undefined } }
-function encode(data: Uint8Array) { return btoa(String.fromCharCode(...data)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '') }
+function saved(key: string): string | undefined { try { const value = localStorage.getItem(key); return value && /^[a-f0-9]{32}$/.test(value) ? value : undefined } catch { return undefined } }
 
 export function ServiceDeployment({ target, service, onChanged, onOpen }: { target: string; service?: Service; onChanged?: () => void; onOpen?: () => void }) {
   const { session, onUnauthorized } = useConsole()
-  const key = storageKey(target, service)
+  const key = storageKey(target, service) + '/' + session.username
   const [jobId, setJobId] = useState(() => saved(key))
   const [job, setJob] = useState<Job>()
   const [kind, setKind] = useState(service?.driver === 'docker' ? 'docker' : 'package')
@@ -27,6 +29,9 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
   const [file, setFile] = useState<File>()
   const [history, setHistory] = useState<History>()
   const [capable, setCapable] = useState<boolean>()
+  const [settings, setSettings] = useState<DeploymentOptions>(defaultOptions)
+  const [hashProgress, setHashProgress] = useState<number>()
+  const [recoverable, setRecoverable] = useState<Job[]>([])
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [dirty, setDirty] = useState(false)
   const [revision, setRevision] = useState(0)
   const active = useRef(true), working = useRef(false)
@@ -46,21 +51,27 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
     setError(failure instanceof ApiError ? failure.message : '暂时无法获取部署回执。任务已保存，可查询后继续。')
   }
   function remember(value?: string, updateState = true) {
-    try { if (value) sessionStorage.setItem(key, value); else sessionStorage.removeItem(key) } catch { /* Optional persistence. */ }
+    try { if (value) localStorage.setItem(key, value); else localStorage.removeItem(key) } catch { /* Optional persistence. */ }
     if (active.current && updateState) setJobId(value)
   }
   function changed() { refreshConsole(); onChanged?.(); setRevision(value => value + 1) }
   useEffect(() => {
     let live = true
-    void call<{ deployment: number }>('capabilities', {}).then(result => { if (live) setCapable(result.deployment === 1) }).catch(failure => { if (live) { setCapable(false); if (failure instanceof ApiError && failure.status === 404) setError('目标节点尚不支持服务部署，请先通过 Grove 群组更新升级该节点。'); else fail(failure) } })
+    void call<{ deployment: number }>('capabilities', {}).then(result => { if (live) { setCapable(result.deployment >= 2); if (result.deployment < 2) setError('请先通过 Grove 群组更新升级目标节点，以使用可续传部署。') } }).catch(failure => { if (live) { setCapable(false); if (failure instanceof ApiError && failure.status === 404) setError('目标节点尚不支持服务部署，请先通过 Grove 群组更新升级该节点。'); else fail(failure) } })
     return () => { live = false }
   }, [target, session])
   useEffect(() => {
     if (!service || !capable) return
     let live = true
-    void call<History>('history', { service_id: service.id }).then(result => { if (live) setHistory(result) }).catch(failure => { if (live) fail(failure) })
+    void call<History>('history', { service_id: service.id }).then(result => { if (live) { setHistory(result); if (!dirty) setSettings(result.options) } }).catch(failure => { if (live) fail(failure) })
     return () => { live = false }
   }, [service?.id, capable, revision])
+  useEffect(() => {
+    if (!capable || jobId) return
+    let live = true
+    void call<{ jobs: Job[] }>('list', {}).then(result => { if (live) setRecoverable(result.jobs.filter(item => !ended(item) && (!service || item.service_id === service.id))) }).catch(fail)
+    return () => { live = false }
+  }, [capable, jobId, revision])
   useEffect(() => {
     if (!jobId || !capable) return
     let live = true, timer: number | undefined
@@ -77,17 +88,47 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
     return () => { live = false; clearTimeout(timer) }
   }, [jobId, capable, target])
 
-  async function transfer(current: Job, input?: File) {
+  async function transfer(current: Job, input?: File, verified = false) {
     let next = current
-    if (next.size) {
+    if (ended(next) || next.status === 'deploying') return
+    if (next.size && (next.received_bytes ?? next.offset) < next.size) {
       if (!input || input.name !== next.filename || input.size !== next.size) throw new Error('请重新选择同一份服务包以继续上传。')
-      while (next.offset < next.size) {
-        if (!active.current) return
-        const offset = next.offset
-        const data = encode(new Uint8Array(await input.slice(offset, offset + 8192).arrayBuffer()))
-        next = await call<Job>('write', { job: next.id, offset, data })
-        if (active.current) setJob(next)
+      if (!verified) {
+        setHashProgress(0)
+        const digest = await digestFile(input, setHashProgress, () => active.current)
+        setHashProgress(undefined)
+        if (digest !== next.expected_sha256) throw new Error('所选服务包与原任务不同，请选择同一份文件，或取消原任务重新部署。')
       }
+      const chunk = next.upload_chunk || 262144
+      const received = new Set(next.received || [])
+      const parts = Array.from({ length: Math.ceil(next.size / chunk) }, (_, index) => index).filter(index => !received.has(index))
+      let cursor = 0
+      async function worker() {
+        while (cursor < parts.length && active.current) {
+          const index = parts[cursor++], offset = index * chunk
+          const data = new Uint8Array(await input!.slice(offset, offset + chunk).arrayBuffer())
+          for (let attempt = 0; ; attempt++) {
+            try {
+              const result = await api<{ received_bytes: number }>(`/peers/${encodeURIComponent(target)}/service-deployment-upload/${next.id}?offset=${offset}`, {
+                method: 'PUT', headers: { 'X-CSRF-Token': session.csrf_token, 'X-Chunk-SHA256': digestBytes(data), 'Content-Type': 'application/octet-stream' },
+                body: data, signal: AbortSignal.timeout(60_000),
+              })
+              if (active.current) setJob(old => old ? { ...old, received_bytes: Math.max(old.received_bytes || 0, result.received_bytes) } : old)
+              break
+            } catch (failure) {
+              if (attempt >= 3 || !active.current || failure instanceof ApiError && [401, 403, 404].includes(failure.status)) throw failure
+              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)))
+              const status = await call<Job>('status', { job: next.id })
+              if (status.received?.includes(index)) break
+              if (status.status !== 'uploading') throw failure
+            }
+          }
+        }
+      }
+      const results = await Promise.allSettled([worker(), worker()])
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed?.status === 'rejected') throw failed.reason
+      next = await call<Job>('status', { job: next.id })
     }
     if (!active.current) return
     next = await call<Job>('launch', { job: next.id })
@@ -102,33 +143,42 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
     try {
       // Remember before sending: a lost response is queried with the same identifier.
       remember(identifier, false)
+      let digest: string | undefined
+      if (!rollback && kind !== 'docker' && file) {
+        setHashProgress(0)
+        digest = await digestFile(file, setHashProgress, () => active.current)
+        setHashProgress(undefined)
+      }
       const next = await call<Job>('begin', { job: identifier, kind: rollback ? 'rollback' : kind === 'docker' ? 'docker' : file ? 'package' : 'command',
         name, command: rollback ? '' : command, service_id: service?.id || null, version: service?.version || null,
-        filename: !rollback && kind !== 'docker' && file ? file.name : '', size: !rollback && kind !== 'docker' && file ? file.size : 0 })
+        filename: !rollback && kind !== 'docker' && file ? file.name : '', size: !rollback && kind !== 'docker' && file ? file.size : 0,
+        options: { ...settings, data_paths: settings.data_paths.map(path => path.trim()).filter(Boolean) }, ...(digest ? { sha256: digest } : {}) })
       begun = true
       if (!active.current) return
       remember(identifier)
       setJob(next)
-      await transfer(next, file)
+      await transfer(next, file, true)
     } catch (failure) {
       if (!begun && failure instanceof ApiError && failure.status >= 400 && failure.status < 500) remember()
       else if (active.current) remember(identifier)
       if (failure instanceof Error && !(failure instanceof ApiError) && active.current) setError(failure.message)
       else fail(failure)
-    } finally { working.current = false; if (active.current) setBusy(false) }
+    } finally { working.current = false; if (active.current) { setBusy(false); setHashProgress(undefined) } }
   }
   async function resume() {
     if (!jobId || working.current) return
     working.current = true; setBusy(true); setError('')
     try { await transfer(await call<Job>('status', { job: jobId }), file) }
     catch (failure) { if (failure instanceof Error && !(failure instanceof ApiError)) setError(failure.message); else fail(failure) }
-    finally { working.current = false; if (active.current) setBusy(false) }
+    finally { working.current = false; if (active.current) { setBusy(false); setHashProgress(undefined) } }
   }
   const pending = !!jobId && !ended(job)
   const href = job?.service_id ? withReturn(target === 'local' ? localServiceHref(job.service_id) : remoteServiceSyncHref(target, job.service_id), returnRoute()) : undefined
   return <div className="stack service-deployment">
     {error && <Notice tone="amber">{error}</Notice>}
     {capable === undefined && <Loading label="正在读取目标节点的部署能力…" />}
+    {hashProgress !== undefined && <small className="muted" role="status">正在校验服务包 · {bytes(hashProgress)} / {bytes(file?.size || 0)}</small>}
+    {capable && !jobId && recoverable.length > 0 && <div className="button-row"><small className="muted">目标节点有未完成任务：</small>{recoverable.map(item => <button key={item.id} className="btn btn-secondary" onClick={() => { remember(item.id); setJob(undefined) }}>{item.name} · {item.phase}</button>)}</div>}
     {capable && !jobId && <form className="stack" onSubmit={event => void start(event)} onChange={() => setDirty(true)}>
       {!service && <Tabs label="部署方式" current={kind} onChange={value => { setKind(value); setFile(undefined); setDirty(true) }}
         items={[{ id: 'package', label: '程序包 / 启动命令' }, { id: 'docker', label: 'Docker' }]} />}
@@ -139,6 +189,8 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
       <label>{kind === 'docker' ? 'Docker 启动命令' : '启动命令'}<textarea aria-label={kind === 'docker' ? 'Docker 启动命令' : '启动命令'} className="input deploy-command" required rows={5} maxLength={8192} value={command}
         placeholder={kind === 'docker' ? 'docker run -d --name my-app -p 8080:8080 my-image:latest' : 'python hello.py --port 8080'} onChange={event => setCommand(event.target.value)} /></label>
       <p className="muted tiny">{kind === 'docker' ? '自动拉取镜像并按容器 ID 托管；后台运行和自动删除参数由 Spearmint 统一处理。' : '支持多行命令。有压缩包时从解压目录运行；无压缩包时可在命令中 cd 到程序目录。持久化文件可写入 SPMT_DATA_DIR，更新保留此目录。'}</p>
+      {kind === 'docker' && <p className="muted tiny">自动保留已有卷与绑定目录，镜像声明的数据卷和 /data 使用持久卷。请将需要保留的数据放入这些目录。</p>}
+      <DeploymentSettings value={settings} onChange={value => { setSettings(value); setDirty(true) }} docker={kind === 'docker'} />
       <div className="button-row"><button className="btn btn-primary" disabled={busy || (!!history && !history.can_update)} type="submit"><Icon name="package" size={16} />{service ? '更新并启动' : '部署并启动'}</button>
         {service && history?.can_rollback && <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => { if (confirm('回滚到上一版并重启此服务？应用数据目录保持原样。')) void start(undefined, true) }}>回滚上一版</button>}</div>
       {service && <p className="muted tiny">更新会短暂停止服务；启动失败自动恢复上一版，最多保留一份回滚版本。</p>}
@@ -146,7 +198,8 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
     {jobId && <div className="stack deployment-progress" role="status">
       {!job ? <Loading label="正在查询原部署任务…" /> : <>
         <div className="button-row"><strong>{job.phase}</strong><Badge tone={job.status === 'succeeded' ? 'green' : ended(job) ? 'amber' : 'neutral'}>{job.status === 'succeeded' ? '已完成' : job.status === 'failed' ? '失败' : job.status === 'cancelled' ? '已取消' : '进行中'}</Badge></div>
-        {job.size > 0 && <><progress max={job.size} value={job.offset} aria-label="服务包上传进度" /><small className="muted">{bytes(job.offset)} / {bytes(job.size)}</small></>}
+        {job.size > 0 && <><progress max={job.size} value={job.received_bytes ?? job.offset} aria-label="服务包上传进度" /><small className="muted">{bytes(job.received_bytes ?? job.offset)} / {bytes(job.size)} · 断线后可继续上传</small></>}
+        {job.readiness_result && <small className="muted">就绪检查 · {job.readiness_result.status === 'ready' ? '通过' : job.readiness_result.detail || '等待应用就绪'}</small>}
         {job.error && <Notice tone="amber">{job.error}{job.rolled_back && <p>已恢复上一版服务。</p>}</Notice>}
         {job.log && <details open={job.status === 'failed'}><summary>部署输出</summary><pre className="command-block deployment-output">{job.log}</pre></details>}
         {job.status === 'uploading' && !busy && <label>继续上传同一份服务包<input type="file" onChange={event => setFile(event.target.files?.[0])} /></label>}
