@@ -138,6 +138,8 @@ class PeerServices:
         self.service_setup = None
         self.terminals = None
         self.workspace = None
+        from ..peer_failures import PeerFailures
+        self.failures = PeerFailures(state, local_id)
         self.service_deployments = None
         self.grove_directory_issuer: str | None = None
         self.grove_issuer_connection_id: str | None = None
@@ -262,6 +264,18 @@ class PeerServices:
                 asyncio.to_thread(self.local_pool.shutdown, cancel_futures=True),
                 asyncio.to_thread(self.rpc_pool.shutdown, cancel_futures=True),
             )
+
+    def record_failure(self, target: str, method: str, stage: str, error: PeerError) -> None:
+        recorder = getattr(self, 'failures', None)
+        if recorder is None or error.code not in {'DENIED', 'CONFLICT', 'GROVE_SYNCHRONIZING'}:
+            return
+        context = dict(getattr(error, 'diagnostic_context', {}))
+        try:
+            with self.state.connect(read_only=True) as db:
+                context['local_access'] = grove_availability.status(db)
+        except (OSError, ValueError, sqlite3.Error, PeerError):
+            pass
+        recorder.record(target, method, stage, error, context)
 
     async def work(self, function, *args, rpc: bool = False, optional: tuple[str, str] | None = None):
         pool, slots = (self.rpc_pool, self.rpc_slots) if rpc else (self.local_pool, self.local_slots)
@@ -1857,6 +1871,7 @@ class PeerServices:
         try:
             identity = await self.work(source_identity, self.state, self.local_id, pair, actor)
         except PeerError as error:
+            PeerServices.record_failure(self, node_id, f'{GROVE_SERVICE}.{action}', 'local_identity', error)
             if error.code in {'DENIED', 'OFFLINE'}:
                 return None
             raise
@@ -1879,6 +1894,7 @@ class PeerServices:
         except PeerError as error:
             if error.code == 'UNSUPPORTED_METHOD':
                 return None
+            PeerServices.record_failure(self, node_id, f'{GROVE_SERVICE}.{action}', 'remote_rpc', error)
             raise
 
     async def grove_directory(self, actor: Actor, directory: dict) -> dict:
@@ -1966,8 +1982,13 @@ class PeerServices:
 
     async def call(self, node_id: str, method: str, params: dict, *, diagnostic: bool = False,
                    text_logs: bool = False) -> dict:
-        result, _ = await self.call_with_connection(node_id, method, params, diagnostic=diagnostic, text_logs=text_logs)
-        return result
+        try:
+            result, _ = await self.call_with_connection(node_id, method, params, diagnostic=diagnostic, text_logs=text_logs)
+            return result
+        except PeerError as error:
+            if method.startswith('grove.workspace.'):
+                PeerServices.record_failure(self, node_id, method, 'remote_rpc', error)
+            raise
 
     async def call_with_connection(self, node_id: str, method: str, params: dict, *, diagnostic: bool = False,
                                    text_logs: bool = False) -> tuple[dict, Session]:

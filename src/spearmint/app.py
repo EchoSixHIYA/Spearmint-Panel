@@ -784,7 +784,11 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         if target in ('local', node_id):
             return await remote.work(workspace.request, service_setup.LocalAdmin(actor), action, body)
         pair = remote.pair_for(target)
-        identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+        try:
+            identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+        except PeerError as error:
+            remote.record_failure(target, f'workspace.{action}', 'local_identity', error)
+            raise
         return await remote.call(target, workspace.method, {'identity': identity, 'action': action, 'body': body}, diagnostic=True)
 
     @app.post('/api/v1/peers/{target}/terminal/{identifier}/{action}')

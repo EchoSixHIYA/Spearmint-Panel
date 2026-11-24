@@ -24,7 +24,13 @@ def require_member(db, local_id: str, pair: Pair):
     members = trusted_members(db, local_id, operational=True)
     if (pair.legacy or not credentials_current(pair) or quarantine.contains(db, pair.node_id)
             or members is None or pair.node_id not in members.origins):
-        raise PeerError('DENIED', 'Service setup requires an active Grove Mesh peer')
+        error = PeerError('DENIED', 'Service setup requires an active Grove Mesh peer')
+        from .. import grove_availability
+        error.diagnostic_context = {'pair_legacy': pair.legacy, 'credentials_current': credentials_current(pair),
+            'quarantined': quarantine.contains(db, pair.node_id), 'members_available': members is not None,
+            'source_is_member': members is not None and pair.node_id in members.origins,
+            'access_at_rejection': grove_availability.status(db)}
+        raise error
     return members
 
 
@@ -60,7 +66,10 @@ def source_identity(state, local_id: str, pair: Pair | None, actor: auth.Actor) 
         if user is None and db.execute('SELECT 1 FROM grove_realm WHERE is_issuer=1').fetchone():
             user = grove.user_id(members.realm_id, actor.account_id)
         if user is None or session['mfa_at'] is None or session['mfa_at'] > int(time.time()):
-            raise PeerError('DENIED', 'Sign in with a verified Grove administrator account')
+            error = PeerError('DENIED', 'Sign in with a verified Grove administrator account')
+            error.diagnostic_context = {'grove_user_present': user is not None, 'mfa_present': session['mfa_at'] is not None,
+                'mfa_in_future': session['mfa_at'] is not None and session['mfa_at'] > int(time.time())}
+            raise error
         return admin_revision(db, members.realm_id, user)
 
 
