@@ -1,0 +1,6 @@
+# Extra tools for rebuilding the pinned Argon2 binding at the glibc 2.17 baseline.
+scikit-build-core==1.1.2
+setuptools-scm==9.2.2
+cmake==3.31.10
+ninja==1.13.2
+pathspec==1.1.1

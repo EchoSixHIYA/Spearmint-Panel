@@ -29,6 +29,7 @@ const problems: Record<string, string> = {
   SEED_SYSTEM: '目标系统、架构或 SSH 账号不满足原生安装条件。',
   SEED_SYSTEM_ROOT: 'SSH 已连接，但使用的是 root 账号。当前 Linux 安装器需要专用普通账号，请换用该机器的普通账号重试。',
   SEED_SYSTEM_ARCH: '已识别为 Linux，但此架构尚无对应部署包。目前支持 x86_64 和 ARM64。',
+  SEED_SYSTEM_LIBC: '目标需要 glibc 2.17 或以上。暂不支持 musl 系统（如 Alpine）。',
   SEED_SYSTEM_PROBE: 'SSH 已连接，但未取得完整的系统识别结果。请查看下方的识别回执。',
   SEED_LINUX_ACCOUNT: '未能准备专用运行账号或 systemd 用户服务。请核对目标的安装条件，并选择 /opt 或普通账号可访问的安装目录。',
   SEED_PACKAGE: '发起节点暂无对应系统和架构的可校验部署包。',

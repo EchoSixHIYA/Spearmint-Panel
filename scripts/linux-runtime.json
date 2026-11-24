@@ -1,0 +1,23 @@
+{
+  "glibc_baseline": "2.17",
+  "python_version": "3.12.12",
+  "amd64": {
+    "python_url": "https://github.com/astral-sh/python-build-standalone/releases/download/20251014/cpython-3.12.12%2B20251014-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+    "python_sha256": "c74addcd1b033a6e4d60ead3ab47fcc995569027e01d3061c4a934f363c4a0cf",
+    "image": "docker.io/library/centos@sha256:dead07b4d8ed7e29e98de0f4504d87e8880d4347859d839686a31da35a3b532f",
+    "rootfs_blob": "https://registry-1.docker.io/v2/library/centos/blobs/sha256:2d473b07cdd5f0912cd6f1a703352c82b512407db6b05b43f2553732b55df3bc",
+    "rootfs_sha256": "2d473b07cdd5f0912cd6f1a703352c82b512407db6b05b43f2553732b55df3bc"
+  },
+  "arm64": {
+    "python_url": "https://github.com/astral-sh/python-build-standalone/releases/download/20251014/cpython-3.12.12%2B20251014-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz",
+    "python_sha256": "d2a6c0d4ceea088f635b309a59d5d700a256656423225f96ddfb71d532adb1aa",
+    "image": "docker.io/library/centos@sha256:73f11afcbb50d8bc70eab9f0850b3fa30e61a419bc48cf426e63527d14a8373b",
+    "rootfs_blob": "https://registry-1.docker.io/v2/library/centos/blobs/sha256:6717b8ec66cd6add0272c6391165585613c31314a43ff77d9751b53010e531ec",
+    "rootfs_sha256": "6717b8ec66cd6add0272c6391165585613c31314a43ff77d9751b53010e531ec"
+  },
+  "argon2_source": {
+    "version": "26.1.0",
+    "url": "https://files.pythonhosted.org/packages/0b/43/bb8b6e8708d49a5ab36781333af092d9f483b198a2710d01281204640055/argon2_cffi_bindings-26.1.0.tar.gz",
+    "sha256": "63505c71542a44b68b1e38060450fb006404170da375feb31af153e7f9c6205d"
+  }
+}

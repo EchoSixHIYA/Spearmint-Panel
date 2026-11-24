@@ -23,10 +23,12 @@ from .peer.protocol import PeerError
 FINGERPRINT = re.compile(r'SHA256:[A-Za-z0-9+/]{43}')
 WINDOWS_PROBE = 'echo %PROCESSOR_ARCHITECTURE% %PROCESSOR_ARCHITEW6432%'
 WINDOWS_RECEIPT = b'SPEARMINT_WINDOWS_SEED='
+MINIMUM_GLIBC = (2, 17)
 LINUX_PROBE = r'''printf 'SPMT_OS=%s\n' "$(uname -s 2>/dev/null)";
 printf 'SPMT_ARCH=%s\n' "$(uname -m 2>/dev/null)";
 printf 'SPMT_HOME=%s\n' "$HOME";
-printf 'SPMT_UID=%s\n' "$(id -u 2>/dev/null)"'''
+printf 'SPMT_UID=%s\n' "$(id -u 2>/dev/null)";
+printf 'SPMT_LIBC=%s\n' "$(getconf GNU_LIBC_VERSION 2>/dev/null || (ldd --version 2>&1 | head -n 1))"'''
 
 
 class SystemSeedFailure(PeerError):
@@ -204,12 +206,16 @@ class Connection:
             lines = self.answer(LINUX_PROBE).decode('utf-8', errors='replace').splitlines()
         except CalledProcessError:
             lines = []
-        fields = dict(line.split('=', 1) for line in lines if re.match(r'^SPMT_(OS|ARCH|HOME|UID)=', line))
+        fields = dict(line.split('=', 1) for line in lines if re.match(r'^SPMT_(OS|ARCH|HOME|UID|LIBC)=', line))
         if fields.get('SPMT_OS') == 'Linux':
             machine, uid, home = fields.get('SPMT_ARCH', ''), fields.get('SPMT_UID', ''), fields.get('SPMT_HOME', '')
             detail = f'system=Linux; architecture={machine[:40]}; uid={uid[:12]}'
             if not uid.isdigit() or not PurePosixPath(home).is_absolute():
                 raise SystemSeedFailure('SEED_SYSTEM_PROBE', detail)
+            libc = fields.get('SPMT_LIBC', '')
+            version = re.search(r'(?:glibc|GNU C Library|GNU libc)[^0-9]*([0-9]+)\.([0-9]+)', libc, re.IGNORECASE)
+            if 'musl' in libc.lower() or (version and tuple(map(int, version.groups())) < MINIMUM_GLIBC):
+                raise SystemSeedFailure('SEED_SYSTEM_LIBC', f'{detail}; libc={libc[:160]}; requires glibc 2.17 or later')
             target = {'x86_64': 'linux-amd64', 'amd64': 'linux-amd64', 'aarch64': 'linux-arm64', 'arm64': 'linux-arm64'}.get(machine)
             if target:
                 self.linux_root = uid == '0'

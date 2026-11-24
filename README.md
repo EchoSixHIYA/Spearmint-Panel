@@ -45,8 +45,8 @@
 
 | 平台 | 文件名包含 |
 | --- | --- |
-| Linux x86-64，glibc 2.39 或更新版本 | `linux-amd64` · `.tar.gz` |
-| Linux ARM64，Ubuntu 22.04 / glibc 2.35 或更新版本 | `linux-arm64` · `.tar.gz` |
+| Linux x86-64，glibc 2.17 或更新版本 | `linux-amd64` · `.tar.gz` |
+| Linux ARM64，glibc 2.17 或更新版本 | `linux-arm64` · `.tar.gz` |
 | Windows x64 | `windows-amd64` · `.zip` |
 
 将归档与同名的 `.sha256` 文件放在一起。Linux 用 `sha256sum -c <归档名>.sha256` 校验。Windows 用 `Get-FileHash <归档名> -Algorithm SHA256`，将结果与校验文件中的值比较。解包后保留整个 `spearmint/` 目录。
@@ -145,7 +145,9 @@ spearmint --web-dir web/dist --origin https://127.0.0.1:18443 serve --bind 127.0
 
 Windows 可用 `py -3.12 -m venv .venv`、`.\.venv\Scripts\Activate.ps1` 执行等效步骤。本机 HTTPS 沿用上文的 Caddy 示例，源码路径为 [deploy/package/Caddyfile.local](deploy/package/Caddyfile.local)。要在目标平台生成原生归档，在已准备好的虚拟环境中运行 `python -m pip install --no-cache-dir -r requirements-build.lock`，再运行 `python -m scripts.build_package`。归档输出到 `work/tmp/package-build/artifacts/`。
 
-ARM64 发布包以 Ubuntu 22.04（glibc 2.35）为兼容基线。在该环境中使用 Python 3.12 创建 `.venv`；可使用 [固定版本的 CPython 运行库及基础镜像](scripts/arm64-runtime.json)，下载后按记录的 SHA-256 校验。原生 ARM64 机器和本机 QEMU 构建均可。构建和验包会逐一检查 ELF 原生文件的 glibc 依赖，拒绝高于 2.35 的运行库；仅在较新系统上运行成功不足以作为 ARM64 发布验收。
+Linux 两种架构的原生包统一以 glibc 2.17 为运行库下限；不包含 musl 系统（如 Alpine）。托管面板仍需要上文的 systemd 用户服务条件。这是运行库兼容范围，不代表对每一种旧发行版和内核组合均已验收。
+
+发布构建使用 [固定版本的 CPython、glibc 2.17 基础镜像与 Argon2 源码](scripts/linux-runtime.json)，下载后核对 SHA-256。在隔离构建环境中用该 Python 创建仓库 `.venv`，准备锁定依赖对应的 manylinux2014 wheel，然后执行 `python -m scripts.prepare_linux_dependencies --wheelhouse <wheel目录> --argon2-source <源码归档>`；该步骤按 [额外构建依赖](requirements-linux-build.lock) 重编同版本 Argon2，避免其官方 wheel 抬高 glibc 下限。最后安装本项目并执行 `python -m scripts.build_package`。支持原生构建或本机 QEMU。打包和发布验包都会逐一检查全部 ELF 文件，拒绝高于 2.17 的符号依赖；必须同时在最低基线中启动完整安装包，验证登录、部署、更新和回滚，再在较新系统回归。
 
 ## 许可证
 

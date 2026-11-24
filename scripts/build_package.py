@@ -18,9 +18,9 @@ import tomllib
 import zipfile
 
 if __package__:
-    from .linux_compatibility import verify_arm64_glibc
+    from .linux_compatibility import LINUX_GLIBC_VERSION, verify_linux_glibc
 else:
-    from linux_compatibility import verify_arm64_glibc
+    from linux_compatibility import LINUX_GLIBC_VERSION, verify_linux_glibc
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "work/tmp/package-build"
@@ -143,8 +143,8 @@ def build_package(work: Path, env: dict[str, str]):
                 "python": platform.python_version(), "schema": len(MIGRATIONS),
                 "format": "native-executable-with-runtime-and-web", "grove_update": 1, "web_files": web_files,
                 "host_services": 1 if system == 'linux' else 0, "service_deployment": 2}
-    if system == 'linux' and arch == 'arm64':
-        manifest['glibc_baseline'] = '2.35'
+    if system == 'linux':
+        manifest['glibc_baseline'] = LINUX_GLIBC_VERSION
     manifest_path = work / "build-manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--name", "spearmint",
@@ -164,11 +164,11 @@ def build_package(work: Path, env: dict[str, str]):
     copy_runtime_licenses(bundle)
     if sys.platform == "linux":
         copy_debian_library_licenses(bundle)
-    if system == 'linux' and arch == 'arm64':
+    if system == 'linux':
         for path in bundle.rglob('*'):
             if path.is_file():
                 with path.open('rb') as stream:
-                    verify_arm64_glibc(stream, path.relative_to(bundle).as_posix())
+                    verify_linux_glibc(stream, path.relative_to(bundle).as_posix())
     for provenance in (bundle / "_internal").rglob("*.dist-info/direct_url.json"):
         provenance.unlink()
     shutil.copyfile(manifest_path, bundle / "build-manifest.json")

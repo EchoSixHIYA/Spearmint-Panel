@@ -2,7 +2,7 @@ from io import BytesIO
 from struct import pack, pack_into
 import unittest
 
-from scripts.linux_compatibility import glibc_requirements, verify_arm64_glibc
+from scripts.linux_compatibility import glibc_requirements, verify_linux_glibc
 
 
 def elf_with_requirement(label):
@@ -22,22 +22,30 @@ def elf_with_requirement(label):
 
 
 class LinuxCompatibilityTest(unittest.TestCase):
-    def test_accepts_jammy_abi(self):
-        self.assertEqual(glibc_requirements(elf_with_requirement(b'GLIBC_2.35')), {(2, 35)})
-        verify_arm64_glibc(elf_with_requirement(b'GLIBC_2.35'), 'libpython')
+    def test_accepts_minimum_abi(self):
+        self.assertEqual(glibc_requirements(elf_with_requirement(b'GLIBC_2.17')), {(2, 17)})
+        verify_linux_glibc(elf_with_requirement(b'GLIBC_2.17'), 'libpython')
 
-    def test_rejects_noble_python_runtime(self):
-        with self.assertRaisesRegex(ValueError, 'requires GLIBC_2.38'):
-            verify_arm64_glibc(elf_with_requirement(b'GLIBC_2.38'), 'libpython')
+    def test_rejects_newer_dependencies(self):
+        for label in (b'GLIBC_2.18', b'GLIBC_2.26', b'GLIBC_2.35', b'GLIBC_2.38'):
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, 'requires GLIBC_'):
+                verify_linux_glibc(elf_with_requirement(label), 'libpython')
 
     def test_rejects_new_named_abi(self):
         with self.assertRaisesRegex(ValueError, 'GLIBC_ABI_DT_RELR'):
-            verify_arm64_glibc(elf_with_requirement(b'GLIBC_ABI_DT_RELR'), 'library')
+            verify_linux_glibc(elf_with_requirement(b'GLIBC_ABI_DT_RELR'), 'library')
 
     def test_checks_only_native_files_and_rejects_truncated_elf(self):
-        verify_arm64_glibc(BytesIO(b'ordinary data'), 'data')
+        verify_linux_glibc(BytesIO(b'ordinary data'), 'data')
         with self.assertRaises(ValueError):
-            verify_arm64_glibc(BytesIO(b'\x7fELF'), 'broken library')
+            verify_linux_glibc(BytesIO(b'\x7fELF'), 'broken library')
+
+    def test_release_checks_amd64_and_arm64_library_contents(self):
+        from scripts.verify_release import read_entries
+        for target in ('linux-amd64', 'linux-arm64'):
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, 'requires GLIBC_2.38'):
+                read_entries(['spearmint/_internal/libpython3.12.so.1.0'],
+                             lambda name: elf_with_requirement(b'GLIBC_2.38'), target)
 
 
 if __name__ == '__main__':

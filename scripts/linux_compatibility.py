@@ -4,7 +4,8 @@ from struct import unpack_from
 from typing import BinaryIO
 
 
-ARM64_GLIBC_BASELINE = (2, 35)
+LINUX_GLIBC_BASELINE = (2, 17)
+LINUX_GLIBC_VERSION = '.'.join(map(str, LINUX_GLIBC_BASELINE))
 
 
 def glibc_requirements(stream: BinaryIO) -> set[tuple[int, ...]]:
@@ -65,9 +66,9 @@ def glibc_requirements(stream: BinaryIO) -> set[tuple[int, ...]]:
     return versions
 
 
-def verify_arm64_glibc(stream: BinaryIO, name: str) -> None:
+def verify_linux_glibc(stream: BinaryIO, name: str) -> None:
     versions = glibc_requirements(stream)
-    if versions and max(versions) > ARM64_GLIBC_BASELINE:
+    if versions and max(versions) > LINUX_GLIBC_BASELINE:
         required = '.'.join(map(str, max(versions)))
-        raise ValueError(f'{name}: requires GLIBC_{required}; ARM64 packages must support Ubuntu 22.04 (glibc 2.35)')
+        raise ValueError(f'{name}: requires GLIBC_{required}; Linux packages must support glibc {LINUX_GLIBC_VERSION}')
 

@@ -14,6 +14,20 @@ from spearmint.state import State
 
 
 class SeedDiagnosticsTest(unittest.TestCase):
+    def test_linux_runtime_baseline_is_checked_before_installation(self):
+        from scripts.linux_compatibility import LINUX_GLIBC_BASELINE
+        self.assertEqual(seed_ssh.MINIMUM_GLIBC, LINUX_GLIBC_BASELINE)
+        for libc in ('glibc 2.17', 'glibc 2.31', 'glibc 2.39'):
+            connection = object.__new__(seed_ssh.Connection)
+            connection.answer = lambda *args: ('SPMT_OS=Linux\nSPMT_ARCH=x86_64\nSPMT_UID=1000\nSPMT_HOME=/home/test\nSPMT_LIBC=' + libc).encode()
+            self.assertEqual(connection.system(), ('linux-amd64', '/home/test'))
+        for libc in ('glibc 2.16', 'musl libc (x86_64)'):
+            connection = object.__new__(seed_ssh.Connection)
+            connection.answer = lambda *args: ('SPMT_OS=Linux\nSPMT_ARCH=x86_64\nSPMT_UID=1000\nSPMT_HOME=/home/test\nSPMT_LIBC=' + libc).encode()
+            with self.assertRaises(seed_ssh.SystemSeedFailure) as caught:
+                connection.system()
+            self.assertEqual(caught.exception.code, 'SEED_SYSTEM_LIBC')
+
     def test_ssh_preserves_stdout_and_bounded_stderr_separately(self):
         channel = MagicMock()
         channel.__enter__.return_value = channel

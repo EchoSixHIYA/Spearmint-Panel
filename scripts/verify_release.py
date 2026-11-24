@@ -14,9 +14,9 @@ from typing import BinaryIO
 import zipfile
 
 if __package__:
-    from .linux_compatibility import verify_arm64_glibc
+    from .linux_compatibility import LINUX_GLIBC_VERSION, verify_linux_glibc
 else:
-    from linux_compatibility import verify_arm64_glibc
+    from linux_compatibility import LINUX_GLIBC_VERSION, verify_linux_glibc
 
 
 TARGETS = ("linux-amd64", "linux-arm64", "windows-amd64")
@@ -70,8 +70,8 @@ def read_entries(entries: list[str], open_entry: Callable[[str], BinaryIO], targ
             raise ValueError(f"Duplicate package path: {name}")
         folded.add(path.casefold())
         with closing(open_entry(name)) as stream:
-            if target == 'linux-arm64':
-                verify_arm64_glibc(stream, path)
+            if target.startswith('linux-'):
+                verify_linux_glibc(stream, path)
                 stream.seek(0)
             if path in ("checksums.json", "build-manifest.json"):
                 raw = stream.read(METADATA_LIMIT + 1)
@@ -148,6 +148,8 @@ def verify_package(directory: Path, version: str, commit: str, target: str) -> t
     expected = {"version": version, "commit": commit, "os": expected_os, "architecture": expected_arch, "format": FORMAT}
     if any(manifest.get(key) != value for key, value in expected.items()):
         raise ValueError(f"{target}: package does not match the requested version, commit and platform")
+    if expected_os == 'linux' and manifest.get('glibc_baseline') != LINUX_GLIBC_VERSION:
+        raise ValueError(f'{target}: Linux manifest must declare glibc {LINUX_GLIBC_VERSION}')
     schema = manifest.get("schema")
     if type(schema) is not int or schema < 1:
         raise ValueError(f"{target}: invalid database schema")
