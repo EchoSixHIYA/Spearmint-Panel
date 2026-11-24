@@ -99,6 +99,12 @@ sudo ./spearmint host-services enable --user "$(id -un)"
 
 Before authorization, register a service in observation mode; directly readable logs remain available. The UI reports start, stop, restart, and log access separately. Seeding can also leave this option off to install a panel for foreground programs and Docker without system-service management.
 
+### Authorize Docker management
+
+When container discovery reports a permission error, select **Authorize Docker management** in the current page and verify a host administrator once. Docker deployment and existing container settings expose the same entry. The owning node uses its loopback SSH service; Python 3, systemd and `systemd-socket-proxyd` must be available. Access becomes effective immediately while existing containers keep running. Grove administrators can then manage containers, logs, deployment and updates on this Docker engine.
+
+The node-service management seeding option grants system-service access and also grants Docker access when the target already has a running daemon. Missing or stopped Docker does not prevent seeding. The panel account's own Rootless engine remains preferred; an authorized local channel stays bound to the originally selected Unix socket. Host credentials are used for this operation only and are not saved.
+
 ### Deploy and update services
 
 Under Services → Register service, select a node and choose Deploy new service, Register existing code, or Take over a running service. New deployments start in an independent directory, with an optional ZIP/TAR archive or commands that initialize and start the application; `docker run …` is also supported. Service names can be generated automatically. The target owns the job and reports preparation, startup and registration. Closing the browser after launch does not cancel the job.

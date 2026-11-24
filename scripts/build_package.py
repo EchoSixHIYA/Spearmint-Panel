@@ -142,7 +142,8 @@ def build_package(work: Path, env: dict[str, str]):
     manifest = {"version": installed_version, "commit": commit, "os": system, "architecture": arch,
                 "python": platform.python_version(), "schema": len(MIGRATIONS),
                 "format": "native-executable-with-runtime-and-web", "grove_update": 1, "web_files": web_files,
-                "host_services": 1 if system == 'linux' else 0, "service_deployment": 2}
+                "host_services": 1 if system == 'linux' else 0, "service_deployment": 2,
+                "docker_authorization": 1 if system == 'linux' else 0}
     if system == 'linux':
         manifest['glibc_baseline'] = LINUX_GLIBC_VERSION
     manifest_path = work / "build-manifest.json"

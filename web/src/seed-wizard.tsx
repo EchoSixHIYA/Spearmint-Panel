@@ -9,9 +9,9 @@ import type { VoterStatus } from './grove-voters'
 type Job = { source: string; id: string }
 type Directory = { parent: string | null; writable: boolean; free: number | null; truncated: boolean;
   items: Array<{ name: string; path: string }> }
-type SeedView = { status: string; fingerprint?: string; platform?: string; package?: { name: string; size: number; commit: string; host_services?: number };
+type SeedView = { status: string; fingerprint?: string; platform?: string; package?: { name: string; size: number; commit: string; host_services?: number; docker_authorization?: number };
   path?: string; directory?: Directory; install?: string; state?: string; origin?: string; node_id?: string; error?: string
-  failed_stage?: string; failure_detail?: string; failure_phase?: string; failure_exit?: number; host_services_supported?: boolean;
+  failed_stage?: string; failure_detail?: string; failure_phase?: string; failure_exit?: number; host_services_supported?: boolean; docker_authorization_supported?: boolean;
   voting_supported?: boolean; voting_requested?: boolean; voter_job?: string; voter_status?: string; voter_reason?: string }
 
 const progress: Record<string, string> = {
@@ -182,9 +182,11 @@ export function SeedWizard({ follow, sourceId }: { follow: (origin: string, node
           <div><dt>可用空间</dt><dd>{directory.free == null ? '未知' : `${(directory.free / 1024 ** 3).toFixed(1)} GiB`}</dd></div></dl>}
         {view.path && !directory.writable && <p className="error">当前目录不可写或可用空间不足。</p>}
         {view.platform?.startsWith('linux') && <div className="stack">
-          <label className="checkbox-row"><input type="checkbox" checked={hostServices} onChange={event => { setHostServices(event.target.checked); if (!event.target.checked) setHostPassword('') }} />启用节点系统服务管理</label>
-          <p className="muted tiny">安装一次主机管理服务，之后可直接接管系统服务。需要目标账号具备 sudo 权限，密码登录时默认使用本次 SSH 密码，仅在安装期间使用。</p>
+          <label className="checkbox-row"><input type="checkbox" checked={hostServices} onChange={event => { setHostServices(event.target.checked); if (!event.target.checked) setHostPassword('') }} />启用节点服务管理{view.docker_authorization_supported ? '（系统服务和 Docker）' : ''}</label>
+          <p className="muted tiny">完成一次主机授权，之后可直接接管系统服务；目标已有并运行 Docker 时会一并授权容器管理。需要目标账号具备管理员权限，密码仅在安装期间使用。</p>
           {hostServices && !view.host_services_supported && <Notice tone="amber">请先升级发起节点以自动完成主机授权；关闭此选项仍可播种普通面板。</Notice>}
+          {hostServices && view.host_services_supported && !view.docker_authorization_supported && <Notice tone="amber">请升级发起节点，以便播种时一并完成 Docker 授权。</Notice>}
+          {hostServices && view.docker_authorization_supported && view.package?.docker_authorization !== 1 && <Notice tone="amber">发起节点需要获取支持 Docker 授权的新版部署包。</Notice>}
           {hostServices && view.host_services_supported && view.package?.host_services !== 1 && <Notice tone="amber">当前部署包尚不包含主机服务管理，需要包含此能力的新版发布。关闭此选项仍可播种普通面板。</Notice>}
           {hostServices && view.host_services_supported && <details><summary>使用不同的主机管理员密码</summary><label className="field-label">sudo 密码<input type="password" className="input" autoComplete="new-password" value={hostPassword} onChange={event => setHostPassword(event.target.value)} /></label></details>}
         </div>}
@@ -192,7 +194,7 @@ export function SeedWizard({ follow, sourceId }: { follow: (origin: string, node
           onChange={event => setVoting(event.target.checked)} />加入后参与 Grove 投票</label>
         {voting && <p className="muted tiny">先同步权限，再自动取得新旧多数成员确认。适合长期在线的节点；关闭页面后仍会继续。</p>}
         {!view.voting_supported && <p className="muted tiny">升级发起节点后，可在播种时设置投票资格。</p>}
-        <div><button className="btn btn-primary" type="button" disabled={busy || view.status !== 'choose' || !directory.writable || !!(view.platform?.startsWith('linux') && hostServices && (!view.host_services_supported || view.package?.host_services !== 1))}
+        <div><button className="btn btn-primary" type="button" disabled={busy || view.status !== 'choose' || !directory.writable || !!(view.platform?.startsWith('linux') && hostServices && (!view.host_services_supported || view.package?.host_services !== 1 || view.docker_authorization_supported && view.package?.docker_authorization !== 1))}
           onClick={() => { const options = view.platform?.startsWith('linux') ? { host_services: hostServices, host_password: hostPassword } : {}; setHostPassword(''); void send(job, 'install', { path: view.path, voting, ...options }) }}>安装到此位置</button></div>
       </div>}
       {view?.error && <div className="error" role="alert">

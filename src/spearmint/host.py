@@ -138,17 +138,23 @@ def docker_command(socket: Path) -> tuple[list[str], dict[str, str]]:
         return [executable, "--host", "npipe:" + endpoint], env
     if not socket.is_absolute():
         raise HostError("Docker requires an absolute local Unix socket path")
-    default = Path(f'/run/user/{os.getuid()}/docker.sock')
-    if socket == default and not socket.exists():
-        socket = Path('/var/run/docker.sock')
+    from .docker_access import endpoint, proxy_for
+    socket = endpoint(socket)
+    proxy = proxy_for(socket)
     try:
         info = socket.lstat()
+    except PermissionError as exc:
+        if proxy is None:
+            raise DockerAccessError('DOCKER_PERMISSION', 'The panel account cannot access the local Docker socket') from exc
+        info = proxy.lstat()
     except OSError as exc:
         raise DockerAccessError('DOCKER_UNAVAILABLE', 'Local Docker socket is unavailable') from exc
     if not stat.S_ISSOCK(info.st_mode):
         raise DockerAccessError('DOCKER_UNAVAILABLE', 'Local Docker endpoint is not a Unix socket')
     if not os.access(socket, os.R_OK | os.W_OK):
-        raise DockerAccessError('DOCKER_PERMISSION', 'The panel account cannot access the local Docker socket')
+        if proxy is None:
+            raise DockerAccessError('DOCKER_PERMISSION', 'The panel account cannot access the local Docker socket')
+        socket = proxy
     env = {key: value for key, value in os.environ.items() if not key.startswith("DOCKER_")}
     env.update({"LC_ALL": "C", "DOCKER_CONFIG": str(Path.home() / ".config/spearmint/docker-cli")})
     return [executable, "--host", f"unix://{socket}"], env

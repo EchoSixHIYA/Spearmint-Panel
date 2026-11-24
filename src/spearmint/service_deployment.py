@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import os
 import socket
+import sys
 from urllib.request import ProxyHandler, Request, build_opener
 from threading import Event, RLock, Thread
 import time
@@ -112,6 +113,7 @@ class ServiceDeployments:
                 if action == 'capabilities' and not body:
                     return {'deployment': 2, 'max_upload': MAX_UPLOAD, 'chunk': BULK_CHUNK, 'window': 2,
                             'bulk_upload': 1, 'options': 1, 'code_ownership': 1, 'managed_directory': 1,
+                            'docker_authorization': 1 if sys.platform == 'linux' else 0,
                             'default_directory': str(self.apps), 'formats': ['zip', 'tar', 'tar.gz']}
                 if action == 'list' and not body:
                     jobs = [json.loads(path.read_text(encoding='utf-8')) for path in self.root.glob('*.json')]

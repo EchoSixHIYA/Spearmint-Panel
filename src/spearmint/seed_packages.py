@@ -119,7 +119,8 @@ def retain(state, source: Path, release: update_release.Release, platform: str) 
             directory.cleanup()
         raise PeerError('SEED_PACKAGE_FETCH', 'The acquired native deployment package could not be verified') from error
     return SeedArchive(path, {'name': name, 'sha256': asset.sha256, 'commit': release.commit, 'size': asset.size,
-                             'host_services': manifest.get('host_services', 0)}, directory)
+                             'host_services': manifest.get('host_services', 0),
+                             'docker_authorization': manifest.get('docker_authorization', 0)}, directory)
 
 
 def acquire_local(state, platform: str) -> SeedArchive:
@@ -180,4 +181,5 @@ def acquire_indexed(state, platform: str) -> SeedArchive:
     except (OSError, ValueError, KeyError, TypeError, BadZipFile, tarfile.TarError) as error:
         raise PeerError('SEED_PACKAGE', 'No verified native package is available for the detected platform') from error
     return SeedArchive(pinned, {'name': name, 'sha256': digest, 'commit': manifest['commit'], 'size': size,
-                               'host_services': manifest.get('host_services', 0)}, directory)
+                               'host_services': manifest.get('host_services', 0),
+                               'docker_authorization': manifest.get('docker_authorization', 0)}, directory)

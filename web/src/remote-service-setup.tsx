@@ -14,7 +14,7 @@ type Kind = keyof typeof kinds
 type Candidate = { target: string; name: string }
 type Registered = Candidate & { id: string; managed: boolean; version: number; command?: string }
 type Candidates = { candidates: Candidate[]; registered: Registered[]; truncated: boolean; next_offset?: number | null; previous_offset?: number | null }
-type Capabilities = { kinds: Kind[]; workflow?: number; checks?: boolean; commands?: boolean; scripts?: boolean; host_authorization?: number }
+type Capabilities = { kinds: Kind[]; workflow?: number; checks?: boolean; commands?: boolean; scripts?: boolean; host_authorization?: number; docker_authorization?: number }
 type Readiness = { ready: boolean; log_path?: string | null; observe_ready?: boolean; logs_ready?: boolean;
   control?: Record<string, boolean>; reason?: string; account?: string; enable_command?: string }
 type SetupProps = { session: Session; onUnauthorized: () => void }
@@ -39,7 +39,7 @@ function setupError(error: unknown, onUnauthorized: () => void) {
     if (error.code === 'SERVICE_COMMAND') return '请核对启动命令，并确认面板账号能在目标机执行它。'
     if (error.code === 'DOCKER_MISSING') return '目标节点未找到 Docker 命令。请安装 Docker，并让面板账号能找到 docker。'
     if (error.code === 'DOCKER_UNAVAILABLE') return '目标节点的本机 Docker 未启动或连接不可用。请检查 Docker 服务。'
-    if (error.code === 'DOCKER_PERMISSION') return '目标节点的面板账号没有访问本机 Docker 的权限。'
+    if (error.code === 'DOCKER_PERMISSION') return '此节点尚未授权 Docker 管理，请在下方验证主机管理员身份后继续。'
     if (error.code === 'SERVICE_DISCOVERY') return '目标 Windows 未能返回运行中的系统服务，请检查目标机服务管理器和面板运行账号。'
     if (error.code === 'SERVICE_LOG') return '目标节点无法读取该应用的日志。请核对日志配置和面板账号权限。'
     if (error.code === 'INVALID_REQUEST' || error.status === 404) return '目标服务或输入已变更，请核对后重试。'
@@ -80,6 +80,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
   const [checked, setChecked] = useState<Readiness>()
   const [result, setResult] = useState<Registered>()
   const [error, setError] = useState('')
+  const [dockerPermission, setDockerPermission] = useState(false)
   const [reads, setReads] = useState(0)
   const [busy, setBusy] = useState(false)
   const [step, setStep] = useState(1)
@@ -95,7 +96,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
     const controller = new AbortController()
     request<Capabilities>(session, nodeId, 'kinds', {}, AbortSignal.any([controller.signal, AbortSignal.timeout(18_000)]))
       .then(data => { if (!controller.signal.aborted) { setSupported(data); setKind(data.kinds[0]) } })
-      .catch(failure => { if (!controller.signal.aborted) setError(setupError(failure, onUnauthorized)) })
+      .catch(failure => { if (!controller.signal.aborted) showError(failure) })
     return () => controller.abort()
   }, [session, nodeId, reads, supported, onUnauthorized])
 
@@ -104,7 +105,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
     const controller = new AbortController()
     request<Candidates>(session, nodeId, 'running', supported.checks ? { kind, offset } : { kind }, AbortSignal.any([controller.signal, AbortSignal.timeout(18_000)]))
       .then(data => { if (!controller.signal.aborted) setChoices(data) })
-      .catch(failure => { if (!controller.signal.aborted) setError(setupError(failure, onUnauthorized)) })
+      .catch(failure => { if (!controller.signal.aborted) showError(failure) })
     return () => controller.abort()
   }, [mode, supported, kind, offset, reads, result, session, nodeId, onUnauthorized])
 
@@ -114,7 +115,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
     request<Readiness>(session, nodeId, 'inspect', { kind, target: candidateId },
       AbortSignal.any([controller.signal, AbortSignal.timeout(18_000)]))
       .then(data => { if (!controller.signal.aborted) { setChecked(data); if (!data.ready && data.observe_ready) setRegistrationMode('observe') } })
-      .catch(failure => { if (!controller.signal.aborted) setError(setupError(failure, onUnauthorized)) })
+      .catch(failure => { if (!controller.signal.aborted) showError(failure) })
     return () => controller.abort()
   }, [mode, supported, kind, candidateId, reads, result, session, nodeId, onUnauthorized])
 
@@ -125,7 +126,13 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
     setError('')
   }
 
+  function showError(failure: unknown) {
+    setDockerPermission(failure instanceof ApiError && failure.code === 'DOCKER_PERMISSION')
+    setError(setupError(failure, onUnauthorized))
+  }
+
   function refresh() {
+    setDockerPermission(false)
     selectCandidate('')
     setChoices(undefined)
     setReads(value => value + 1)
@@ -142,7 +149,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
         AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]))
       if (!controller.signal.aborted) { setResult(response.service); setDirty(false); refreshConsole() }
     } catch (failure) {
-      if (!controller.signal.aborted) setError(setupError(failure, onUnauthorized))
+      if (!controller.signal.aborted) showError(failure)
     } finally {
       if (!controller.signal.aborted) { mutation.current = null; setBusy(false) }
     }
@@ -188,6 +195,10 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
               onChange={event => { setKind(event.target.value as Kind); setOffset(0); refresh() }}>
               {supported.kinds.map(item => <option value={item} key={item}>{kinds[item]}</option>)}
             </select></label> : <Notice>目标节点没有可接管的系统服务类型。</Notice>}
+            {kind === 'docker' && dockerPermission && (supported.docker_authorization === 1
+              ? <div className="button-row"><HostServiceAuthorization nodeId={nodeId} session={session} onUnauthorized={onUnauthorized}
+                  scope="docker" onAuthorized={refresh} disabled={busy} /></div>
+              : <Notice tone="amber">请先通过群组更新升级目标节点，再在此处完成 Docker 授权。</Notice>)}
             {kind && !choices && !error && <Loading label="正在读取运行中的服务…" />}
             {choices && <>
               {choices.candidates.length ? <label className="field-label">运行中的服务<select className="input" aria-label="运行中的服务" value={candidate?.target || ''} disabled={busy}

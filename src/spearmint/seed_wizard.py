@@ -112,6 +112,7 @@ class Job:
                 'install': self.install, 'state': self.state, 'origin': self.origin, 'node_id': self.node,
                 'error': self.error, 'failed_stage': self.failed_stage, 'failure_detail': self.failure_detail,
                 'failure_phase': self.failure_phase, 'failure_exit': self.failure_exit, 'host_services_supported': True,
+                'docker_authorization_supported': True,
                 'voting_supported': True, 'voting_requested': self.voting_requested, 'voter_job': self.voter_job,
                 'voter_status': self.voter_status, 'voter_reason': self.voter_reason}
 
@@ -399,10 +400,13 @@ class SeedWizard:
             if getattr(job.connection, 'linux_user', None):
                 job.username = job.connection.linux_user
             if host_services:
-                if job.package.metadata.get('host_services') != 1:
+                if job.package.metadata.get('host_services') != 1 or job.package.metadata.get('docker_authorization') != 1:
                     raise PeerError('SEED_HOST_PACKAGE', '请使用已发布且支持主机服务管理的部署包，再启用此安装选项。')
                 try:
-                    host_service_access.ssh_enable(job.connection, job.username, host_password or job.host_password)
+                    password = host_password or job.host_password
+                    host_service_access.ssh_enable(job.connection, job.username, password)
+                    from . import docker_access
+                    docker_access.ssh_enable(job.connection, job.username, password, optional=True)
                 except (HostError, CalledProcessError, ValueError) as error:
                     if isinstance(error, HostError):
                         job.failure_detail = str(error)[:1500]

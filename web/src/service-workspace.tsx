@@ -197,6 +197,9 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
           <label><input type="radio" name="service-management-mode" value="observe" checked={!current.managed} onChange={() => void mutate('mode', { mode: 'observe' })} />观察模式</label>
         </fieldset>{current.runtime === 'systemd-system' && !current.managed && <HostServiceAuthorization nodeId={target} session={session} onUnauthorized={onUnauthorized}
           disabled={busy} onAuthorized={() => { void mutate('mode', { mode: 'manage' }) }} />}</div>
+      {current.driver === 'docker' && <div className="service-setting-row"><span className="service-setting-label">Docker 访问</span>
+        <HostServiceAuthorization nodeId={target} session={session} onUnauthorized={onUnauthorized} scope="docker"
+          disabled={busy} onAuthorized={() => { detail.reload(); refreshConsole() }} /></div>}
       {current.command && <details className="service-settings-command"><summary>启动命令</summary><pre className="command-block">{current.command}</pre></details>}
       <section className="service-advanced-management" role="group" aria-labelledby="service-advanced-title"><h3 id="service-advanced-title">高级管理</h3>
         <div className="service-advanced-actions"><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={15} />打开该节点终端</a>

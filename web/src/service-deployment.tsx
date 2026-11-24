@@ -8,6 +8,7 @@ import { returnRoute, withReturn } from './workspace-api'
 import './service-deployment.css'
 import { defaultOptions, DeploymentSettings, type DeploymentOptions } from './deployment-options'
 import { digestBytes, digestFile } from './deployment-transfer'
+import { HostServiceAuthorization } from './host-service-authorization'
 
 type Job = { id: string; service_id?: string; kind: string; name: string; command: string; filename: string;
   status: string; phase: string; size: number; offset: number; error?: string; log?: string; rolled_back?: boolean; updated_at: number;
@@ -39,6 +40,7 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
   const [recoverable, setRecoverable] = useState<Job[]>([])
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [dirty, setDirty] = useState(false)
   const [revision, setRevision] = useState(0)
+  const [dockerAuthorization, setDockerAuthorization] = useState(false)
   const active = useRef(true), working = useRef(false)
   useEffect(() => { active.current = true; return () => { active.current = false } }, [])
   useUnsavedChanges(dirty || busy)
@@ -62,7 +64,7 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
   function changed() { refreshConsole(); onChanged?.(); setRevision(value => value + 1) }
   useEffect(() => {
     let live = true
-    void call<{ deployment: number; code_ownership?: number }>('capabilities', {}).then(result => { if (live) { setCapable(result.deployment >= 2 && result.code_ownership === 1); if (result.deployment < 2 || result.code_ownership !== 1) setError('请通过群组更新升级目标节点，以使用独立的一键部署和已有代码登记流程。') } }).catch(failure => { if (live) { setCapable(false); if (failure instanceof ApiError && failure.status === 404) setError('目标节点尚不支持服务部署，请先通过 Grove 群组更新升级该节点。'); else fail(failure) } })
+    void call<{ deployment: number; code_ownership?: number; docker_authorization?: number }>('capabilities', {}).then(result => { if (live) { setCapable(result.deployment >= 2 && result.code_ownership === 1); setDockerAuthorization(result.docker_authorization === 1); if (result.deployment < 2 || result.code_ownership !== 1) setError('请通过群组更新升级目标节点，以使用独立的一键部署和已有代码登记流程。') } }).catch(failure => { if (live) { setCapable(false); if (failure instanceof ApiError && failure.status === 404) setError('目标节点尚不支持服务部署，请先通过 Grove 群组更新升级该节点。'); else fail(failure) } })
     return () => { live = false }
   }, [target, session])
   useEffect(() => {
@@ -182,6 +184,10 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
   const href = job?.service_id ? withReturn(target === 'local' ? localServiceHref(job.service_id) : remoteServiceSyncHref(target, job.service_id), returnRoute()) : undefined
   return <div className="stack service-deployment">
     {error && <Notice tone="amber">{error}</Notice>}
+    {capable && kind === 'docker' && dockerAuthorization && <div className="button-row">
+      <HostServiceAuthorization nodeId={target} session={session} onUnauthorized={onUnauthorized} scope="docker"
+        onAuthorized={() => { setError(''); setRevision(value => value + 1) }} disabled={busy || !!jobId && !ended(job)} />
+    </div>}
     {capable === undefined && <Loading label="正在读取目标节点的部署能力…" />}
     {hashProgress !== undefined && <small className="muted" role="status">正在校验服务包 · {bytes(hashProgress)} / {bytes(file?.size || 0)}</small>}
     {capable && !jobId && recoverable.length > 0 && <div className="button-row"><small className="muted">目标节点有未完成任务：</small>{recoverable.map(item => <button key={item.id} className="btn btn-secondary" onClick={() => { remember(item.id); setJob(undefined) }}>{item.name} · {item.phase}</button>)}</div>}

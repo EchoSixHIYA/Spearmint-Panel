@@ -11,6 +11,7 @@ from ..catalog import ACTIONS, RegistrationError, Service, TargetAlreadyRegister
 from ..drivers import CONTAINER_ID, ContainerNotFound, DockerDriver, SystemUnitDriver
 from ..host import DockerAccessError, HostError
 from ..host_service_authorization import Authorization, HostServiceAuthorization, StatusRequest
+import sys
 from ..service_command import command_spec
 from ..platforms import WINDOWS, secure_private
 from ..service_mode import ModeChangeError, change_mode
@@ -105,7 +106,7 @@ class ServiceSetup:
         self.local_id = local_id
         self.docker = DockerDriver(docker_socket)
         self.docker_socket = docker_socket
-        self.host_authorization = HostServiceAuthorization(state)
+        self.host_authorization = HostServiceAuthorization(state, docker_socket)
 
     def dispatch(self, pair, params: dict) -> dict:
         if params.keys() != {'identity', 'action', 'body'}:
@@ -120,9 +121,9 @@ class ServiceSetup:
         try:
             if action == 'kinds' and body == {}:
                 return {'kinds': available_kinds(), 'workflow': 2, 'checks': True, 'commands': True, 'scripts': True,
-                        'host_authorization': 1}
-            if action == 'host-access' and body == {}:
-                return self.host_authorization.capabilities()
+                        'host_authorization': 1, 'docker_authorization': 1 if sys.platform == 'linux' else 0}
+            if action == 'host-access' and body in ({}, {'scope': 'systemd'}, {'scope': 'docker'}):
+                return self.host_authorization.capabilities(body.get('scope', 'systemd'))
             if action == 'host-authorize':
                 identity = acting_as(actor)
                 identity.pop('authorize')

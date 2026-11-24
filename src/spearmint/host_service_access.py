@@ -191,20 +191,28 @@ def plan(username: str):
 
 
 def ssh_enable(connection, username: str, password: str = ''):
+    result = ssh_bootstrap(connection, bootstrap_source(username), password)
+    if result.get('enabled') is not True:
+        raise HostError('目标机没有确认主机服务管理已启用。')
+    return result
+
+
+def ssh_bootstrap(connection, script: str, password: str = ''):
     try:
         connection.answer('/usr/bin/test -x /usr/bin/python3', timeout=5)
     except subprocess.CalledProcessError as error:
         raise HostError('目标机缺少 /usr/bin/python3；主机服务管理需要系统已有 Python3，普通面板不受影响。') from error
-    script = bootstrap_source(username)
     command = ['/usr/bin/python3', '-I', '-B', '-c', script]
     try:
         if getattr(connection, 'linux_root', False) and getattr(connection, 'linux_user', None):
             output = connection.root_answer(join(command), timeout=65)
+        elif getattr(connection, 'linux_root', False):
+            output = connection.answer(join(command), timeout=65)
         else:
             output = connection.answer(join(['/usr/bin/env', 'LC_ALL=C', '/usr/bin/sudo', '-n', '--', *command]), timeout=65)
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or b'').decode('utf-8', 'replace').lower()
-        if getattr(connection, 'linux_root', False) and getattr(connection, 'linux_user', None):
+        if getattr(connection, 'linux_root', False):
             raise HostError('主机管理服务未能安装：' + detail[-800:]) from error
         if password and 'password' not in detail and 'terminal is required' not in detail:
             raise HostError('主机管理服务未能安装：' + detail[-800:]) from error
@@ -213,10 +221,7 @@ def ssh_enable(connection, username: str, password: str = ''):
         # The password travels on SSH stdin, never in command arguments or job receipts.
         output = connection.answer(join(['/usr/bin/env', 'LC_ALL=C', '/usr/bin/sudo', '-S', '-p', '', '--', *command]),
                                    input_data=(password + '\n').encode('utf-8'), timeout=65)
-    result = json.loads(output)
-    if result.get('enabled') is not True:
-        raise HostError('目标机没有确认主机服务管理已启用。')
-    return result
+    return json.loads(output)
 
 
 BOOTSTRAP = r'''

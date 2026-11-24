@@ -39,6 +39,8 @@ class PageHostAuthorizationTest(unittest.TestCase):
                 fixture.logins.append((username, secret, key))
                 if secret == 'incorrect-fixture':
                     raise PeerError('SEED_SSH_AUTH', 'Rejected credentials')
+            def system(self):
+                return 'linux-amd64', '/home/host-admin'
             def close(self):
                 self.closed = True
 
@@ -117,6 +119,48 @@ class PageHostAuthorizationTest(unittest.TestCase):
                 self.assertEqual(enable.call_count, 1)
         finally:
             finish.set()
+
+    def test_existing_systemd_grant_does_not_hide_missing_docker_access(self):
+        self.enabled = True
+        docker = {'enabled': False}
+        def authorize(connection, account, password, **options):
+            self.assertEqual(account, 'panel-user')
+            self.assertEqual(options['configured'], self.setup.docker_socket)
+            docker['enabled'] = True
+            return {'enabled': True}
+        with patch('spearmint.host_service_authorization.docker_access.available', side_effect=lambda path: docker['enabled']), \
+             patch('spearmint.host_service_authorization.docker_access.ssh_enable', side_effect=authorize) as grant:
+            self.assertTrue(self.setup.setup(self.actor, 'host-access', {})['enabled'])
+            self.assertFalse(self.setup.setup(self.actor, 'host-access', {'scope': 'docker'})['enabled'])
+            self.start(scope='docker')
+            self.assertEqual(self.result()['status'], 'succeeded')
+            self.assertEqual(grant.call_count, 1)
+            self.assertFalse(self.authorizations)
+            self.assertTrue(self.setup.setup(self.actor, 'host-access', {'scope': 'docker'})['enabled'])
+        with self.state.connect(read_only=True) as db:
+            events = [row[0] for row in db.execute("SELECT event FROM audit WHERE event LIKE 'docker_access.%'")]
+        self.assertEqual(events, ['docker_access.authorization_requested', 'docker_access.authorized'])
+
+    def test_docker_scope_grants_access_even_when_systemd_is_already_authorized(self):
+        self.enabled = True
+        docker_enabled = False
+        def authorize(*args, **kwargs):
+            nonlocal docker_enabled
+            docker_enabled = True
+            self.assertEqual(kwargs['configured'], self.setup.docker_socket)
+            return {'enabled': True}
+        with patch('spearmint.host_service_authorization.docker_access.available', side_effect=lambda _: docker_enabled), \
+             patch('spearmint.host_service_authorization.docker_access.ssh_enable', side_effect=authorize) as enable:
+            self.assertFalse(self.setup.setup(self.actor, 'host-access', {'scope': 'docker'})['enabled'])
+            self.start(scope='docker')
+            self.assertEqual(self.result()['status'], 'succeeded')
+            self.assertEqual(self.result()['scope'], 'docker')
+            self.assertTrue(self.setup.setup(self.actor, 'host-access', {'scope': 'docker'})['enabled'])
+            self.assertEqual(enable.call_count, 1)
+            self.assertFalse(self.authorizations)
+        with self.state.connect(read_only=True) as db:
+            self.assertEqual([r[0] for r in db.execute("SELECT event FROM audit WHERE event LIKE 'docker_access.%'")],
+                             ['docker_access.authorization_requested', 'docker_access.authorized'])
 
 
 if __name__ == '__main__':

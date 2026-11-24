@@ -6,7 +6,7 @@ import './host-service-authorization.css'
 type Access = { supported: boolean; enabled: boolean; account: string | null; port: number }
 type Job = { job: string; status: string; error?: string | null }
 const complete = (job?: Job) => job && ['succeeded', 'failed'].includes(job.status)
-const phases: Record<string, string> = { connecting: '正在连接目标节点的本机 SSH…', authenticating: '正在验证主机管理员身份…', authorizing: '正在启用节点系统服务管理…' }
+const phases: Record<string, string> = { connecting: '正在连接目标节点的本机 SSH…', authenticating: '正在验证主机管理员身份…', authorizing: '正在启用节点管理权限…' }
 
 function message(error: unknown) {
   const code = error instanceof ApiError ? error.code : typeof error === 'string' ? error : undefined
@@ -21,8 +21,8 @@ function message(error: unknown) {
   return '暂未收到授权回执。保留原任务并继续查询，避免重复执行。'
 }
 
-export function HostServiceAuthorization({ nodeId, session, onUnauthorized, onAuthorized, disabled = false }: {
-  nodeId: string; session: Session; onUnauthorized: () => void; onAuthorized: () => void; disabled?: boolean
+export function HostServiceAuthorization({ nodeId, session, onUnauthorized, onAuthorized, disabled = false, scope = 'systemd' }: {
+  nodeId: string; session: Session; onUnauthorized: () => void; onAuthorized: () => void; disabled?: boolean; scope?: 'systemd' | 'docker'
 }) {
   const [open, setOpen] = useState(false), [access, setAccess] = useState<Access>()
   const [username, setUsername] = useState(''), [secret, setSecret] = useState(''), [sudoPassword, setSudoPassword] = useState('')
@@ -30,7 +30,7 @@ export function HostServiceAuthorization({ nodeId, session, onUnauthorized, onAu
   const [job, setJob] = useState<Job>(), [error, setError] = useState(''), [revision, refresh] = useState(0)
   const changed = useRef(onAuthorized), submitted = useRef(false), notified = useRef<string | undefined>(undefined)
   changed.current = onAuthorized
-  const storage = `spearmint-host-authorization/${session.csrf_token}/${nodeId}`
+  const storage = `spearmint-host-authorization/${session.csrf_token}/${nodeId}/${scope}`
   const active = busy || !!job && !complete(job)
 
   async function request<T>(action: string, body: object, signal?: AbortSignal) {
@@ -51,7 +51,7 @@ export function HostServiceAuthorization({ nodeId, session, onUnauthorized, onAu
   useEffect(() => {
     if (!open) return
     const controller = new AbortController()
-    void request<Access>('host-access', {}, controller.signal).then(value => {
+    void request<Access>('host-access', scope === 'docker' ? { scope } : {}, controller.signal).then(value => {
       if (controller.signal.aborted) return
       setAccess(value); setUsername(previous => previous || value.account || '')
       if (value.enabled) { forget(); changed.current() }
@@ -85,7 +85,7 @@ export function HostServiceAuthorization({ nodeId, session, onUnauthorized, onAu
     if (submitted.current || active) return
     submitted.current = true; setBusy(true); setError('')
     const identifier = crypto.randomUUID().replaceAll('-', '')
-    const body = { job: identifier, username: username.trim(), secret, key, port, sudo_password: sudoPassword }
+    const body = { job: identifier, username: username.trim(), secret, key, port, sudo_password: sudoPassword, ...(scope === 'docker' ? { scope } : {}) }
     setSecret(''); setSudoPassword('')
     try {
       try { sessionStorage.setItem(storage, identifier) } catch { /* Only the task ID is persisted. */ }
@@ -100,14 +100,14 @@ export function HostServiceAuthorization({ nodeId, session, onUnauthorized, onAu
   function close() { setSecret(''); setSudoPassword(''); setOpen(false) }
   const succeeded = access?.enabled || job?.status === 'succeeded'
   return <>
-    <button type="button" className="btn btn-secondary btn-small" disabled={disabled} onClick={() => { setError(''); setOpen(true) }}>授权此节点</button>
-    {open && <Modal title="启用节点系统服务管理" onClose={close}>
+    <button type="button" className="btn btn-secondary btn-small" disabled={disabled} onClick={() => { setError(''); setOpen(true) }}>{scope === 'docker' ? '授权 Docker 管理' : '授权此节点'}</button>
+    {open && <Modal title={scope === 'docker' ? '启用节点 Docker 管理' : '启用节点系统服务管理'} onClose={close}>
       {error && <Notice tone="amber">{error}</Notice>}
-      {succeeded ? <><Notice>节点主机授权已完成，可以在当前页面托管系统服务。</Notice><div className="modal-actions"><button className="btn btn-primary" onClick={close}>完成</button></div></>
+      {succeeded ? <><Notice>{scope === 'docker' ? 'Docker 授权已完成，可以接管容器、启停、读取日志及部署更新。' : '节点主机授权已完成，可以在当前页面托管系统服务。'}</Notice><div className="modal-actions"><button className="btn btn-primary" onClick={close}>完成</button></div></>
         : !access ? <>{!error && <Loading label="正在检查目标节点的授权能力…" />}{error && <button className="btn btn-secondary" onClick={() => { setError(''); refresh(value => value + 1) }}>重新检查</button>}</>
         : !access.supported ? <Notice>此节点不需要 Linux 主机服务授权。</Notice>
         : <form className="host-authorization-form" onSubmit={event => void submit(event)}>
-          <p className="muted">验证目标主机的管理员身份，为面板账号 <strong>{access.account}</strong> 启用节点级系统服务管理。此后接管其他服务无需重复授权。</p>
+          <p className="muted">验证目标主机的管理员身份，为面板账号 <strong>{access.account}</strong> 启用此节点的{scope === 'docker' ? ' Docker 管理' : '系统服务管理'}。此后接管其他{scope === 'docker' ? '容器' : '服务'}无需重复授权。</p>
           {job && !complete(job) && <Loading label={phases[job.status] || '正在等待主机授权回执…'} />}
           {job?.status === 'failed' && <Notice tone="amber">{message(job.error)}</Notice>}
           <label className="field-label">主机管理员账号<input className="input" value={username} onChange={event => setUsername(event.target.value)} required maxLength={128} disabled={active} autoComplete="off" /></label>

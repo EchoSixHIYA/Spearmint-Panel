@@ -2,13 +2,15 @@
 from dataclasses import dataclass, field
 from subprocess import SubprocessError
 import sys
+from pathlib import Path
+from typing import Literal
 from threading import Event, RLock, Thread
 from time import monotonic
 
 from paramiko import SSHException
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import host_service_access, seed_ssh
+from . import docker_access, host_service_access, seed_ssh
 from .host import HostError
 from .peer.protocol import PeerError
 from .state import audit
@@ -22,6 +24,7 @@ class Authorization(BaseModel):
     key: bool = False
     port: int = Field(default=22, ge=1, le=65535)
     sudo_password: str = Field(default='', max_length=1024, repr=False)
+    scope: Literal['systemd', 'docker'] = 'systemd'
 
 
 class StatusRequest(BaseModel):
@@ -36,22 +39,29 @@ class Job:
     status: str = 'connecting'
     error: str | None = None
     expires: float = field(default_factory=lambda: monotonic() + 900)
+    scope: str = 'systemd'
 
     def view(self):
-        return {'job': self.id, 'status': self.status, 'error': self.error}
+        return {'job': self.id, 'status': self.status, 'error': self.error, 'scope': self.scope}
 
 
 class HostServiceAuthorization:
-    def __init__(self, state):
+    def __init__(self, state, docker_socket: Path | None = None):
         self.state = state
+        self.docker_socket = docker_socket
         self.lock = RLock()
         self.jobs: dict[str, Job] = {}
         self.worker: Thread | None = None
         self.stopping = Event()
 
-    def capabilities(self):
+    def enabled(self, scope):
+        if scope == 'docker':
+            return self.docker_socket is not None and docker_access.available(self.docker_socket)
+        return host_service_access.available()
+
+    def capabilities(self, scope='systemd'):
         supported = sys.platform == 'linux'
-        return {'supported': supported, 'enabled': supported and host_service_access.available(),
+        return {'supported': supported, 'enabled': supported and self.enabled(scope), 'scope': scope,
                 'account': host_service_access.account_name() if supported else None,
                 'transport': 'node-local-ssh', 'port': 22}
 
@@ -61,15 +71,15 @@ class HostServiceAuthorization:
         with self.lock:
             self.jobs = {key: value for key, value in self.jobs.items() if value.expires > monotonic()}
             if existing := self.jobs.get(body.job):
-                if existing.owner != identity['actor']:
+                if existing.owner != identity['actor'] or existing.scope != body.scope:
                     raise PeerError('CONFLICT', '此授权任务属于另一位管理员。')
                 return existing.view()
             if self.stopping.is_set() or self.worker and self.worker.is_alive():
                 raise PeerError('BUSY', '此节点正在处理主机授权，请等待当前任务完成。')
-            job = Job(body.job, identity['actor'])
+            job = Job(body.job, identity['actor'], scope=body.scope)
             with self.state.connect(write=True) as db:
                 actor.require(db)
-                audit(db, identity['actor'], identity['source'], 'host_services.authorization_requested', job.id)
+                audit(db, identity['actor'], identity['source'], self.event(body.scope, 'authorization_requested'), job.id)
             self.jobs[job.id] = job
             self.worker = Thread(target=self.run, args=(job, actor, identity, body), name='host-authorization', daemon=True)
             self.worker.start()
@@ -89,25 +99,34 @@ class HostServiceAuthorization:
             for key, value in values.items():
                 setattr(job, key, value)
 
+    @staticmethod
+    def event(scope, action):
+        return ('docker_access.' if scope == 'docker' else 'host_services.') + action
+
     def run(self, job, actor, identity, body):
         connection = None
         error = None
         try:
             # SSH is opened by the owning node to itself. No public address or
             # inbound route from the user's browser/development PC is needed.
-            if not host_service_access.available():
+            if not self.enabled(body.scope):
                 connection = seed_ssh.Connection('127.0.0.1', body.port)
                 self.change(job, status='authenticating')
                 connection.login(connection.fingerprint, body.username, body.secret, body.key)
+                connection.system()
                 with self.state.connect(read_only=True) as db:
                     actor.require(db)
                 if self.stopping.is_set():
                     raise PeerError('HOST_AUTH_INTERRUPTED', 'Panel is stopping')
                 self.change(job, status='authorizing')
                 with self.state.lock('maintenance.lock', exclusive_now=True):
-                    host_service_access.ssh_enable(connection, host_service_access.account_name(),
-                                                   body.sudo_password or ('' if body.key else body.secret))
-                if not host_service_access.available():
+                    password = body.sudo_password or ('' if body.key else body.secret)
+                    if body.scope == 'docker':
+                        docker_access.ssh_enable(connection, host_service_access.account_name(), password,
+                                                 configured=self.docker_socket)
+                    else:
+                        host_service_access.ssh_enable(connection, host_service_access.account_name(), password)
+                if not self.enabled(body.scope):
                     raise HostError('Host helper did not become available')
         except PeerError as failure:
             error = {'SEED_SSH_AUTH': 'HOST_SSH_AUTH', 'SEED_HOST_KEY': 'HOST_SSH_CONNECTION'}.get(failure.code, failure.code)
@@ -129,12 +148,12 @@ class HostServiceAuthorization:
                     pass
         # Host configuration can have succeeded even if its final SSH reply was
         # lost. Verify locally before deciding whether a retry is necessary.
-        if error and host_service_access.available():
+        if error and self.enabled(body.scope):
             error = None
         try:
             with self.state.connect(write=True) as db:
                 audit(db, identity['actor'], identity['source'],
-                      'host_services.authorization_failed' if error else 'host_services.authorized', job.id, reason=error)
+                      self.event(body.scope, 'authorization_failed' if error else 'authorized'), job.id, reason=error)
         finally:
             self.change(job, status='failed' if error else 'succeeded', error=error)
 
