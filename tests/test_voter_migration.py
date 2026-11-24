@@ -1,10 +1,11 @@
-"""Back up schema 30, preserve its state, and add voter persistence offline."""
+"""Voter persistence keeps the schema supported by existing group updaters."""
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from spearmint.maintenance import migrate_offline, verify_backup
 from spearmint.state import State, audit
+from spearmint import grove_voters
 
 
 class VoterMigrationTest(unittest.TestCase):
@@ -16,18 +17,15 @@ class VoterMigrationTest(unittest.TestCase):
             state = State(directory / 'state')
             node = state.initialize(lambda: 'owned-fixture-password-hash')
             with state.connect(write=True) as db:
-                for table in ('grove_voter_configuration', 'grove_voter_ballot', 'grove_voter_job'):
-                    db.execute('DROP TABLE ' + table)
-                db.execute('PRAGMA user_version=30')
                 audit(db, 'fixture', 'local', 'fixture.before_voter_migration', node)
             snapshot = directory / 'before-voters'
             self.assertEqual(migrate_offline(state, snapshot), node)
-            self.assertEqual(state.verify_schema()[1], 31)
+            self.assertEqual(state.verify_schema()[1], 30)
             self.assertEqual(State(snapshot).verify_schema(allow_older=True)[1], 30)
             self.assertEqual(verify_backup(snapshot)['node_id'], node)
             with state.connect(read_only=True) as db:
                 self.assertIsNotNone(db.execute("SELECT 1 FROM audit WHERE event='fixture.before_voter_migration'").fetchone())
-                self.assertEqual(db.execute('SELECT count(*) FROM grove_voter_job').fetchone()[0], 0)
+                self.assertEqual(grove_voters.local_state(db)['jobs'], {})
 
 
 if __name__ == '__main__':

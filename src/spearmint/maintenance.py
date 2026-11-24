@@ -311,6 +311,8 @@ def restore(state: State, source: Path, save_current: Path | None) -> str:
             raise StateError("Backup database checksum does not match the manifest")
         with closing(sqlite3.connect(candidate)) as db, db:
             check_integrity(db)
+            from . import grove_voters
+            snapshot_voter_state = grove_voters.recovery_checkpoint(db)
             schema = db.execute("PRAGMA user_version").fetchone()[0]
             if schema != manifest["schema"]:
                 raise StateError("Backup schema does not match the manifest")
@@ -369,6 +371,7 @@ def restore(state: State, source: Path, save_current: Path | None) -> str:
                 if db.execute('SELECT 1 FROM grove_realm WHERE id=? AND public_key=?',
                               (grove_checkpoint['id'], grove_checkpoint['public_key'])).fetchone():
                     from . import grove_voters
+                    grove_voters.restore_checkpoint(db, snapshot_voter_state)
                     grove_voters.restore_checkpoint(db, grove_checkpoint['voters'])
             db.execute("DELETE FROM login_attempt")
             db.execute("DELETE FROM panel_auth_flow")

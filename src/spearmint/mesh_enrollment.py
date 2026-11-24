@@ -76,11 +76,9 @@ def load_policy(state: State) -> Policy | None:
     # The on-disk bootstrap is immutable; committed membership overrides it
     # transactionally, so a crash cannot leave identity and Mesh rosters apart.
     with state.connect(read_only=True) as db:
-        if db.execute("SELECT 1 FROM sqlite_master WHERE name='grove_voter_configuration'").fetchone():
-            latest = db.execute('SELECT document FROM grove_voter_configuration ORDER BY version DESC LIMIT 1').fetchone()
-            if latest:
-                import json
-                settings['policy'] = json.loads(latest[0])['certificate']['proposal']['policy']
+        from . import grove_voters
+        if saved := grove_voters.rows(db):
+            settings['policy'] = saved[-1]['certificate']['proposal']['policy']
     return read_policy(settings)
 
 

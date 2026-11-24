@@ -227,6 +227,22 @@ class GroveVoterTest(unittest.TestCase):
             asyncio.run(self.f.service().change(self.f.states[2].identity()[0], False, self.f.identity))
         self.assertEqual(error.exception.code, 'GROVE_VOTER_LIMIT')
 
+    def test_private_requests_keep_public_anchor_and_existing_schema_unchanged(self):
+        from spearmint import grove_quorum_join
+        f = self.f
+        service = f.service()
+        identifier = service.enqueue(f.new.identity()[0], True, f.identity)
+        with f.states[0].connect(read_only=True) as db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 30)
+            envelope, anchor = grove_continuity.read_anchor(db)
+            self.assertEqual(envelope, f.envelope)
+            self.assertEqual(set(envelope), {'record', 'signature'})
+            self.assertIn(identifier, grove_voters.local_state(db)['jobs'])
+            document = grove_continuity.retirement_document(db, f.realm['id'], f.new.identity()[0])
+            self.assertNotIn(grove_voters.LOCAL_STATE, document)
+        code = grove_quorum_join.invitation(f.states[0], mesh_enrollment.load_policy(f.states[0]))
+        self.assertEqual(grove_quorum_join.read_invitation(code)[2]['voters'], f.voters)
+
     def test_promoted_voter_can_change_password_and_history_survives_its_demotion(self):
         from pyotp import TOTP
         from spearmint import auth
@@ -271,8 +287,8 @@ class GroveVoterTest(unittest.TestCase):
             asyncio.run(service.change(f.new.identity()[0], False, f.identity))
         restore(state, snapshot, directory / 'save-current')
         with state.connect(read_only=True) as db:
-            self.assertEqual(db.execute('SELECT max(version) FROM grove_voter_configuration').fetchone()[0], 1)
-            self.assertIsNotNone(db.execute('SELECT proposal FROM grove_voter_ballot WHERE version=2').fetchone()[0])
+            self.assertEqual(len(grove_voters.configurations(db)), 1)
+            self.assertIsNotNone(grove_voters.ballot_for(db, 2)['proposal'])
         self.assertEqual((state.directory / mesh_enrollment.SIGNING_KEY).read_bytes(),
                          (snapshot / mesh_enrollment.SIGNING_KEY).read_bytes())
 

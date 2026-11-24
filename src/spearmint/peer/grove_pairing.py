@@ -31,7 +31,7 @@ def authority(db):
         return None
     if realm['issuer_paused'] and (not realm['is_issuer'] or record['recovery_proof'] is not None):
         return None
-    envelope = json.loads(record['anchor'])
+    envelope = grove_continuity.base_envelope(json.loads(record['anchor']))
     directory = grove.directory_data(json.loads(realm['manifest']),grove.realm_data(realm),allow_expired=True)
     kind = 'login-continuity' if record['recovery_proof'] is None else 'login-recovery'
     anchor = grove_continuity.snapshot_authorization(realm,directory,envelope,kind)

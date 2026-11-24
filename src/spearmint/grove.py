@@ -228,7 +228,8 @@ def describe(state: State, *, private: bool = False) -> dict:
                         directory['members'] = members_after_handoff(db, directory['members'])
                         kind = 'login-continuity' if continuity['recovery_proof'] is None else 'login-recovery'
                         from . import grove_voters
-                        anchor = grove_voters.extend(db, verified(kind, json.loads(continuity['anchor']), row['public_key']))
+                        from .grove_continuity import base_envelope
+                        anchor = grove_voters.extend(db, verified(kind, base_envelope(json.loads(continuity['anchor'])), row['public_key']))
                         local = db.execute('SELECT node_id FROM node').fetchone()[0]
                         result['identity_voter'] = local in anchor['voters']
                     result.update(members=directory['members'], sequence=directory['sequence'], valid_until=directory['expires_at'])

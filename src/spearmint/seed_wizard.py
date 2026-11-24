@@ -150,7 +150,7 @@ class SeedWizard:
             try:
                 kind = 'login-continuity' if current['recovery_proof'] is None else 'login-recovery'
                 directory = grove.directory_data(json.loads(realm['manifest']), grove.realm_data(realm), allow_expired=True)
-                return grove_voters.extend(db, grove_continuity.snapshot_authorization(realm, directory, json.loads(current['anchor']), kind))
+                return grove_voters.extend(db, grove_continuity.snapshot_authorization(realm, directory, grove_continuity.base_envelope(json.loads(current['anchor'])), kind))
             except (KeyError, ValueError, TypeError, PeerError) as error:
                 raise PeerError('SEED_GROVE_STATE', 'The executor is waiting for its Grove quorum authorization') from error
 
@@ -224,7 +224,7 @@ class SeedWizard:
             job.expire = monotonic() + 900
             if job.voter_job:
                 with self.state.connect(read_only=True) as db:
-                    result = db.execute('SELECT status,reason FROM grove_voter_job WHERE id=?', (job.voter_job,)).fetchone()
+                    result = grove_voters.local_state(db)['jobs'].get(job.voter_job)
                 if result:
                     job.voter_status, job.voter_reason = result['status'], result['reason']
             return job.view()

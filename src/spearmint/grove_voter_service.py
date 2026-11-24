@@ -120,13 +120,19 @@ class VoterService:
             voters.authorize(self.state, db, identity, None, fresh=not recovering)
             if not db.execute('SELECT 1 FROM grove_member WHERE node_id=? AND enabled=1', (node,)).fetchone():
                 raise PeerError('NOT_FOUND', '此节点尚未完成 Grove 入网。')
-            old = db.execute('SELECT * FROM grove_voter_job WHERE id=?', (request_id,)).fetchone()
+            old = voters.local_state(db)['jobs'].get(request_id)
             if old:
                 if old['node_id'] != node or bool(old['desired']) != desired or json.loads(old['identity']) != identity:
                     raise PeerError('CONFLICT', '此请求已用于另一项投票名单变更。')
                 return request_id
-            db.execute('INSERT INTO grove_voter_job VALUES(?,?,?,?,?,?,?)',
-                (request_id, node, desired, json.dumps(identity), 'pending', '正在等待同步并收集多数确认。', int(time.time())))
+            pending = [row for row in voters.local_state(db)['jobs'].values() if row['status'] == 'pending']
+            for row in pending:
+                if row['node_id'] == node and bool(row['desired']) == desired and json.loads(row['identity']) == identity:
+                    return row['id']
+            if len(pending) >= 32:
+                raise PeerError('BUSY', '已有多项投票资格调整正在等待处理，请稍后重试。')
+            voters.put_job(db, {'id': request_id, 'node_id': node, 'desired': int(desired), 'identity': json.dumps(identity),
+                'status': 'pending', 'reason': '正在等待同步并收集多数确认。', 'updated_at': int(time.time())})
             from .state import audit
             audit(db, identity[1], 'local', 'grove.voter_requested', node, reason='promote' if desired else 'demote')
         self.wake.set()
@@ -139,8 +145,9 @@ class VoterService:
 
     def outcome(self, job_id, status, reason=None):
         with self.state.connect(write=True) as db:
-            db.execute('UPDATE grove_voter_job SET status=?,reason=?,updated_at=? WHERE id=?',
-                       (status, reason, int(time.time()), job_id))
+            row = voters.local_state(db)['jobs'].get(job_id)
+            if row:
+                voters.put_job(db, {**row, 'status': status, 'reason': reason, 'updated_at': int(time.time())})
 
     async def change(self, node, desired, identity):
         async with self.lock:
@@ -158,8 +165,8 @@ class VoterService:
                 history = voters.rows(db)
                 bootstrap = history[0]['bootstrap'] if history else voters.base_policy(self.state)
                 snapshot = voters.checkpoint(self.state, db)
-                prior_ballot = db.execute('SELECT promised FROM grove_voter_ballot WHERE version=?', (anchor.get('_version', 0) + 1,)).fetchone()
-            prior_counter = json.loads(prior_ballot[0])[0] if prior_ballot else 0
+                prior_ballot = voters.ballot_for(db, anchor.get('_version', 0) + 1)
+            prior_counter = json.loads(prior_ballot['promised'])[0] if prior_ballot else 0
             self.term = max(self.term, prior_counter) + 1
             term = [self.term, self.remote.local_id]
             previous = voters.current_id(anchor)
@@ -232,10 +239,9 @@ class VoterService:
             current = grove_continuity.read_anchor(db)
             if current is None:
                 return
-            row = db.execute('SELECT proposal FROM grove_voter_ballot WHERE version=? AND proposal IS NOT NULL',
-                             (current[1].get('_version', 0) + 1,)).fetchone()
-        if row:
-            proposal = json.loads(row[0])
+            row = voters.ballot_for(db, current[1].get('_version', 0) + 1)
+        if row and row['proposal'] is not None:
+            proposal = json.loads(row['proposal'])
             desired = proposal['target'] in {item['node_id'] for item in proposal['policy']['voters']}
             self.enqueue(proposal['target'], desired, proposal['identity'], voters.digest(proposal)[:32], recovering=True)
 
@@ -246,7 +252,7 @@ class VoterService:
                 await self.synchronize()
                 await self.remote.work(self.recover_request)
                 with self.state.connect(read_only=True) as db:
-                    jobs = [dict(row) for row in db.execute("SELECT * FROM grove_voter_job WHERE status='pending' ORDER BY updated_at LIMIT 4")]
+                    jobs = sorted((row for row in voters.local_state(db)['jobs'].values() if row['status'] == 'pending'), key=lambda row: row['updated_at'])[:4]
                 for job in jobs:
                     try:
                         completed = await self.change(job['node_id'], bool(job['desired']), json.loads(job['identity']))

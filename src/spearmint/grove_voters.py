@@ -26,6 +26,59 @@ VOTE_KIND = 'voter-configuration'
 MIN_VOTERS, MAX_VOTERS = 3, 7
 MAX_HISTORY = 8 * 1024 * 1024
 MAX_WIRE = 256 * 1024
+LOCAL_STATE = 'voter_state'
+
+
+def local_state(db):
+    row = db.execute('SELECT anchor FROM grove_login_continuity').fetchone()
+    value = json.loads(row[0]).get(LOCAL_STATE) if row else None
+    if value is None:
+        return {'format': 1, 'configurations': [], 'ballots': {}, 'jobs': {}}
+    if not isinstance(value, dict) or value.get('format') != 1:
+        from .state import StateError
+        raise StateError('Unsupported local Grove voter state format')
+    return value
+
+
+def save_local_state(db, value):
+    from .state import StateError
+    row = db.execute('SELECT anchor FROM grove_login_continuity').fetchone()
+    if row is None:
+        raise StateError('An installed Grove continuity authorization is required')
+    envelope = json.loads(row[0])
+    envelope[LOCAL_STATE] = value
+    db.execute('UPDATE grove_login_continuity SET anchor=? WHERE singleton=1', (json.dumps(envelope),))
+
+
+def configurations(db):
+    return local_state(db)['configurations']
+
+
+def ballot_for(db, version):
+    return local_state(db)['ballots'].get(str(version))
+
+
+def put_ballot(db, version, ballot):
+    state = local_state(db)
+    state['ballots'][str(version)] = ballot
+    save_local_state(db, state)
+
+
+def jobs(db):
+    return list(local_state(db)['jobs'].values())
+
+
+def job_for(db, identifier):
+    return local_state(db)['jobs'].get(identifier)
+
+
+def put_job(db, job):
+    state = local_state(db)
+    state['jobs'][job['id']] = job
+    terminal = sorted((item for item in state['jobs'].values() if item['status'] != 'pending'), key=lambda item: item['updated_at'])
+    for expired in terminal[:-128]:
+        del state['jobs'][expired['id']]
+    save_local_state(db, state)
 
 
 def digest(value):
@@ -39,9 +92,10 @@ def proof_digest(document):
 def base_policy(state):
     from . import mesh_enrollment
     with state.connect(read_only=True) as db:
-        first = db.execute('SELECT document FROM grove_voter_configuration ORDER BY version LIMIT 1').fetchone()
+        saved = configurations(db)
+        first = saved[0] if saved else None
         if first:
-            return json.loads(first[0])['bootstrap']
+            return json.loads(first['document'])['bootstrap']
     path = state.directory / mesh_enrollment.POLICY_FILE
     return mesh_enrollment.read_policy(json.loads(path.read_bytes())).core
 
@@ -93,7 +147,7 @@ def effective(anchor, bootstrap, changes):
 
 
 def rows(db):
-    return [json.loads(row[0]) for row in db.execute('SELECT document FROM grove_voter_configuration ORDER BY version')]
+    return [json.loads(row['document']) for row in configurations(db)]
 
 
 def extend(db, anchor):
@@ -136,8 +190,9 @@ def unstamp(record):
 
 
 def require_unlocked(db):
-    latest = db.execute('SELECT coalesce(max(version),0) FROM grove_voter_configuration').fetchone()[0]
-    if db.execute('SELECT 1 FROM grove_voter_ballot WHERE version=? AND proposal IS NOT NULL', (latest + 1,)).fetchone():
+    latest = len(configurations(db))
+    pending = ballot_for(db, latest + 1)
+    if pending and pending['proposal'] is not None:
         raise PeerError('GROVE_CONFIGURATION_PENDING', '投票名单正在变更，身份变更将在名单确认后恢复。')
 
 
@@ -209,7 +264,9 @@ def install_history(db, anchor, encoded, source):
     for version in range(len(installed) + 1, len(incoming) + 1):
         cert = incoming[version - 1]
         document = {'bootstrap': data['bootstrap'], 'certificate': cert}
-        db.execute('INSERT INTO grove_voter_configuration VALUES(?,?,?)', (version, digest(cert['proposal']), json.dumps(document)))
+        saved = local_state(db)
+        saved['configurations'].append({'version': version, 'digest': digest(cert['proposal']), 'document': json.dumps(document)})
+        save_local_state(db, saved)
         for entry in cert['proposal']['policy']['voters']:
             if not db.execute('SELECT 1 FROM grove_member_departure WHERE node_id=?', (entry['node_id'],)).fetchone():
                 db.execute('INSERT INTO grove_member VALUES(?,?,1) ON CONFLICT(node_id) DO UPDATE SET origin=excluded.origin',
@@ -222,32 +279,32 @@ def install_history(db, anchor, encoded, source):
 
 def refresh_mesh_roots(db):
     from . import mesh_enrollment
-    last = db.execute('SELECT document FROM grove_voter_configuration ORDER BY version DESC LIMIT 1').fetchone()
+    saved = configurations(db)
+    last = saved[-1] if saved else None
     if last:
-        core = json.loads(last[0])['certificate']['proposal']['policy']
+        core = json.loads(last['document'])['certificate']['proposal']['policy']
         policy = mesh_enrollment.read_policy({'policy': core, 'bind_ip': None, 'trusted_proxy': False})
         db.execute('UPDATE mesh_profile SET ca_pem=? WHERE mesh_id=? AND ca_pem!=?',
                    (policy.roots_pem(), policy.mesh, policy.roots_pem()))
 
 
 def recovery_checkpoint(db):
-    return {table: [dict(row) for row in db.execute('SELECT * FROM ' + table)] for table in
-            ('grove_voter_configuration', 'grove_voter_ballot', 'grove_voter_job')}
+    return local_state(db)
 
 
 def restore_checkpoint(db, checkpoint):
     """A data restore must not undo a committed configuration or durable promise."""
     from .state import StateError
-    for row in checkpoint['grove_voter_configuration']:
-        previous = db.execute('SELECT digest FROM grove_voter_configuration WHERE version=?', (row['version'],)).fetchone()
-        if previous and previous[0] != row['digest']:
+    saved = local_state(db)
+    for index, row in enumerate(checkpoint['configurations']):
+        previous = saved['configurations'][index] if index < len(saved['configurations']) else None
+        if previous and previous['digest'] != row['digest']:
             raise StateError('Backup conflicts with the confirmed Grove voter configuration')
-        db.execute('INSERT OR IGNORE INTO grove_voter_configuration VALUES(?,?,?)',
-                   (row['version'], row['digest'], row['document']))
-    for row in checkpoint['grove_voter_ballot']:
-        previous = db.execute('SELECT * FROM grove_voter_ballot WHERE version=?', (row['version'],)).fetchone()
+        if previous is None:
+            saved['configurations'].append(row)
+    for key, row in checkpoint['ballots'].items():
+        previous = saved['ballots'].get(key)
         if previous:
-            previous = dict(zip(('version', 'promised', 'accepted_term', 'proposal'), previous))
             row = dict(row)
             row['promised'] = json.dumps(max(json.loads(row['promised']), json.loads(previous['promised'])))
             prior_term = json.loads(previous['accepted_term']) if previous['accepted_term'] else None
@@ -256,11 +313,13 @@ def restore_checkpoint(db, checkpoint):
                 row['accepted_term'], row['proposal'] = previous['accepted_term'], previous['proposal']
             elif prior_term and prior_term == term and previous['proposal'] != row['proposal']:
                 raise StateError('Backup conflicts with an accepted Grove voter change')
-        db.execute('INSERT OR REPLACE INTO grove_voter_ballot VALUES(?,?,?,?)',
-                   (row['version'], row['promised'], row['accepted_term'], row['proposal']))
-    for row in checkpoint['grove_voter_job']:
-        db.execute('INSERT OR REPLACE INTO grove_voter_job VALUES(?,?,?,?,?,?,?)',
-                   tuple(row[key] for key in ('id', 'node_id', 'desired', 'identity', 'status', 'reason', 'updated_at')))
+        saved['ballots'][key] = row
+    for key, row in checkpoint['jobs'].items():
+        if key not in saved['jobs'] or saved['jobs'][key]['updated_at'] <= row['updated_at']:
+            saved['jobs'][key] = row
+    if not saved['configurations'] and not saved['ballots'] and not saved['jobs']:
+        return
+    save_local_state(db, saved)
     refresh_mesh_roots(db)
 
 
@@ -271,7 +330,8 @@ def status(state):
         if current is None:
             return {'available': False, 'voters': [], 'version': 0, 'required': 0, 'jobs': []}
         anchor = current[1]
-        jobs = [dict(row) for row in db.execute('SELECT id,node_id,desired,status,reason,updated_at FROM grove_voter_job ORDER BY updated_at DESC LIMIT 20')]
+        jobs = [{key: row[key] for key in ('id', 'node_id', 'desired', 'status', 'reason', 'updated_at')}
+                for row in sorted(local_state(db)['jobs'].values(), key=lambda item: item['updated_at'], reverse=True)[:20]]
         return {'available': True, 'voters': anchor['voters'], 'version': anchor.get('_version', 0),
                 'configuration': current_id(anchor), 'required': len(anchor['voters']) // 2 + 1, 'jobs': jobs,
                 'min_voters': MIN_VOTERS, 'max_voters': MAX_VOTERS}
@@ -385,12 +445,13 @@ def prepare(state, identity, previous, version, term, pair=None):
         if (current_id(anchor) != previous or version != anchor.get('_version', 0) + 1
                 or state.identity()[0] not in anchor['voters']):
             raise PeerError('CONFLICT', '投票名单已变化，请同步后重试。')
-        prior = db.execute('SELECT * FROM grove_voter_ballot WHERE version=?', (version,)).fetchone()
+        prior = ballot_for(db, version)
         promised = json.loads(prior['promised']) if prior else None
         if promised and term < promised:
             return {'promised': promised, 'granted': False}
-        db.execute('INSERT INTO grove_voter_ballot(version,promised) VALUES(?,?) ON CONFLICT(version) DO UPDATE SET promised=excluded.promised',
-                   (version, json.dumps(term)))
+        saved = local_state(db)
+        saved['ballots'][str(version)] = {**(prior or {'version': version, 'accepted_term': None, 'proposal': None}), 'promised': json.dumps(term)}
+        save_local_state(db, saved)
         return {'granted': True, 'promised': term,
                 'accepted_term': json.loads(prior['accepted_term']) if prior and prior['accepted_term'] else None,
                 'proposal': json.loads(prior['proposal']) if prior and prior['proposal'] else None}
@@ -424,14 +485,15 @@ def accept(state, identity, proposal, term, bootstrap, pair=None):
         # The same validation is also run on the final certificate. Here validate
         # the proposed policy/readiness separately, without inventing quorum votes.
         validate_proposal(base, bootstrap, changes, proposal)
-        prior = db.execute('SELECT * FROM grove_voter_ballot WHERE version=?', (proposal['version'],)).fetchone()
+        prior = ballot_for(db, proposal['version'])
         if prior and term < json.loads(prior['promised']):
             raise PeerError('CONFLICT', '另一个节点正在推进此版本的投票名单。')
         if prior and prior['accepted_term'] and json.loads(prior['accepted_term']) == term and json.loads(prior['proposal']) != proposal:
             raise PeerError('CONFLICT', '同一确认轮次不能接受不同的投票名单。')
-        db.execute('''INSERT INTO grove_voter_ballot VALUES(?,?,?,?) ON CONFLICT(version) DO UPDATE SET
-            promised=excluded.promised,accepted_term=excluded.accepted_term,proposal=excluded.proposal''',
-            (proposal['version'], json.dumps(term), json.dumps(term), json.dumps(proposal)))
+        saved = local_state(db)
+        saved['ballots'][str(proposal['version'])] = {'version': proposal['version'], 'promised': json.dumps(term),
+            'accepted_term': json.dumps(term), 'proposal': json.dumps(proposal)}
+        save_local_state(db, saved)
         key = state.signing_key()
         return grove.signed(VOTE_KIND, {'proposal': digest(proposal), 'term': term,
             'public_key': wire_b64(key.public_key().public_bytes_raw())}, key)
