@@ -32,7 +32,6 @@ from .session import Session, close_stream
 
 logger = logging.getLogger(__name__)
 HANDSHAKES = 4
-GroveAddress = tuple[str, str, bool]
 MESH_CAPABILITY = "mesh.v2"
 RPC_CAPABILITIES = ("peer.ping", "catalog.sync", "service.status", "service.logs", POLICY_METHOD, "grove.identity.get")
 LEGACY_OPERATION_CAPABILITIES = ("operation.prepare", "operation.submit", "operation.get")
@@ -62,6 +61,15 @@ def error_message(error: BaseException) -> str:
     if isinstance(error, BaseExceptionGroup):
         return error_message(error.exceptions[0])
     return str(error) or type(error).__name__
+
+
+@dataclass(frozen=True)
+class GroveIngress:
+    realm_id: str
+    member_origin: str
+
+
+GroveAddress = tuple[str, str, bool] | GroveIngress
 
 
 @dataclass(frozen=True)
@@ -200,6 +208,8 @@ class PeerManager:
                 trust = trusted_members(db, self.local_id, operational=True, transport=True)
                 origin = trust.origins.get(node_id) if trust else None
                 if grove_address is not None and origin is not None:
+                    if isinstance(grove_address, GroveIngress):
+                        return pair if grove_address == GroveIngress(trust.realm_id, origin) else None
                     binding = self.grove_endpoints.connection_address(origin, pair)
                     if binding is not None and grove_address == (trust.realm_id, *binding):
                         return pair
@@ -407,7 +417,8 @@ class PeerManager:
                 or not self.address_allowed(pair, address)
                 or (expected is None and pair.legacy and self.local_id < peer_id)):
             raise ProtocolError("TLS peer identity or certificate fingerprint mismatch")
-        grove_address = self.grove_address(pair)
+        inbound = expected is None
+        grove_address = self.grove_address(pair, inbound=inbound)
         if peer_id in self.automatic_members and not self.automatic_address_allowed(pair, address, dialed_endpoint, grove_address):
             raise ProtocolError("Peer address is outside the current Grove advertisement")
         own_session = token_hex(16)
@@ -426,7 +437,7 @@ class PeerManager:
             if (await asyncio.to_thread(self.read_neighbor, peer_id, address, grove_address) != pair
                     or self.admitted.get(peer_id) != pair
                     or not self.address_allowed(pair, address)
-                    or grove_address != self.grove_address(pair)
+                    or grove_address != self.grove_address(pair, inbound=inbound)
                     or (peer_id in self.automatic_members and not self.automatic_address_allowed(pair, address, dialed_endpoint, grove_address))):
                 raise ProtocolError("Peer pairing changed during authentication")
         return pair, ":".join(sorted((own_session, hello["session_id"]))), address, frozenset(hello["capabilities"]), grove_address
@@ -515,28 +526,31 @@ class PeerManager:
         return (pair.source_ip == ip or pair.node_id in self.automatic_members
                 or any(policy.allows(ip) for policy in self.networks.get(pair.node_id, ())))
 
-    def grove_address(self, pair: Pair) -> GroveAddress | None:
+    def grove_address(self, pair: Pair, *, inbound: bool) -> GroveAddress | None:
         if self.grove_endpoints is None or pair.node_id not in self.automatic_members:
             return None
         trust = self.grove_endpoints.members
         origin = trust.origins.get(pair.node_id) if trust else None
-        binding = self.grove_endpoints.connection_address(origin, pair) if origin is not None else None
+        if origin is None:
+            return None
+        # A member behind NAT can initiate a session without a reverse dial target.
+        if inbound:
+            return GroveIngress(trust.realm_id, origin)
+        binding = self.grove_endpoints.connection_address(origin, pair)
         return (trust.realm_id, *binding) if binding is not None else None
 
     def automatic_address_allowed(self, pair: Pair, address: str, endpoint: Endpoint | None, grove_address: GroveAddress | None) -> bool:
-        if grove_address is None:
+        if isinstance(grove_address, GroveIngress):
+            return endpoint is None
+        if grove_address is None or endpoint is None:
             return False
-        _, enrolled, lan_only = grove_address
-        candidates = self.endpoints.get(pair.node_id, ())
-        if endpoint is not None:
-            return address == enrolled and endpoint in candidates
-        # A NAT source may differ from the current signed listening address.
-        return address == enrolled or (not lan_only and bool(candidates))
+        _, enrolled, _ = grove_address
+        return address == enrolled and endpoint in self.endpoints.get(pair.node_id, ())
 
     def neighbor_address_current(self, link: Neighbor) -> bool:
         if not self.address_allowed(link.pair, link.address):
             return False
-        current = self.grove_address(link.pair)
+        current = self.grove_address(link.pair, inbound=link.initiator != self.local_id)
         if link.pair.node_id not in self.automatic_members:
             return link.grove_address is None
         return current == link.grove_address and self.automatic_address_allowed(link.pair, link.address, link.dialed_endpoint, current)

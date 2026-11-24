@@ -11,7 +11,7 @@ from spearmint.state import State
 
 
 class GroveFixture:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, member_origins: dict[int, str] | None = None):
         self.now = int(time.time())
         self.password = 'owned-fixture-password'
         self.password_hash = auth.PASSWORD.hash(self.password)
@@ -26,7 +26,9 @@ class GroveFixture:
         self.users = [{'id': 'usr1-' + value * 32, 'name': name, 'role': role,
             'enabled': True, 'epoch': 1, 'require_mfa': True} for value, name, role in
             [('1', 'admin', 'node_admin'), ('2', 'operator', 'remote_operator')]]
-        origins = {state.identity()[0]: f'https://voter-{i}.example:18443' for i, state in enumerate(self.states)}
+        member_origins = member_origins or {}
+        origins = {state.identity()[0]: member_origins.get(i, f'https://voter-{i}.example:18443')
+                   for i, state in enumerate(self.states)}
         origins[owner_id] = self.realm['issuer_origin']
         self.directory = {'version': 1, 'realm': self.realm, 'sequence': 1, 'issued_at': self.now,
             'expires_at': self.now + grove.DIRECTORY_TTL, 'users': self.users,
