@@ -15,6 +15,7 @@ from spearmint import grove, grove_admission, grove_continuity, grove_identity_c
 from spearmint.state import State
 from spearmint.config import Config
 from spearmint.grove_voter_service import VoterService
+from spearmint.onboarding import write_private
 from spearmint.peer.credentials import ca_certificate, make_csr, sign_csr, fingerprint
 from spearmint.peer.grove_service_admin import admin_revision
 from spearmint.peer.pairing import add_member, configure_mesh, configured, set_neighbor, set_enabled
@@ -66,8 +67,8 @@ class VoterFixture(GroveFixture):
         self.core = {'realm_id': self.realm['id'], 'mesh_id': 'b' * 32, 'legacy_ca': ca.public_bytes(Encoding.PEM).decode(),
                      'voters': sorted(entries, key=lambda item: item['node_id'])}
         for index, state in enumerate(self.all_states):
-            (state.directory / mesh_enrollment.POLICY_FILE).write_text(json.dumps({'policy': self.core,
-                'bind_ip': f'192.168.56.{index + 10}', 'trusted_proxy': False}))
+            write_private(state.directory / mesh_enrollment.POLICY_FILE, json.dumps({'policy': self.core,
+                'bind_ip': f'192.168.56.{index + 10}', 'trusted_proxy': False}).encode())
             for other in self.all_states:
                 if other is state:
                     continue
