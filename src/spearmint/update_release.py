@@ -85,6 +85,8 @@ def github(path: str, *, binary: bool = False):
         'Accept': 'application/octet-stream' if binary else 'application/vnd.github+json',
         'User-Agent': 'Spearmint-Grove-Updater',
     })
+    if not binary:
+        request.add_header('Cache-Control', 'no-cache')
     token = os.environ.get('SPEARMINT_GITHUB_TOKEN')
     if token:
         request.add_unredirected_header('Authorization', f'Bearer {token}')
@@ -112,7 +114,8 @@ def archive_name(version: str, commit: str, target: str) -> str:
 
 
 def latest_release() -> Release | None:
-    releases = json_response('/releases?per_page=10', 1024 * 1024)
+    # The shared GitHub cache can still serve the previous list after publication.
+    releases = json_response(f'/releases?per_page=10&_={time.time_ns()}', 1024 * 1024)
     for row in sorted(releases, key=lambda release: release['published_at'] or '', reverse=True):
         if row['draft'] or not row['published_at'] or not re.fullmatch(RELEASE_PATTERN, row['tag_name']):
             continue

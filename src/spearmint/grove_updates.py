@@ -168,42 +168,62 @@ class UpdateCoordinator:
         finally:
             self.github_checked = time.monotonic()
 
-    def check_in_background(self) -> asyncio.Task | None:
+    def check_in_background(self, *, refresh: bool = False) -> asyncio.Task | None:
         if self.check_task is not None and not self.check_task.done():
             return self.check_task
-        if self.github_checked and time.monotonic() - self.github_checked < 45:
+        if not refresh and self.github_checked and time.monotonic() - self.github_checked < 45:
             return None
         self.check_task = asyncio.create_task(self.check_github())
         return self.check_task
 
-    async def discover_release(self) -> tuple[release.Release | None, str | None]:
-        task = self.check_in_background()
+    async def discover_release(self, *, refresh: bool = False) -> tuple[release.Release | None, str | None]:
+        task = self.check_in_background(refresh=refresh)
         if task is not None:
             await asyncio.shield(task)
         if self.github_catalog is not None:
             return self.github_catalog, 'github'
+        return await self.discover_peer_release(refresh=refresh)
+
+    async def discover_peer_release(self, *, refresh: bool) -> tuple[release.Release | None, str | None]:
         peers = [node for node in await self.remote.work(self.members) if node != self.local_id]
-        for start in range(0, len(peers), 8):
-            candidates = peers[start:start + 8]
-            for attempt in range(4):
-                responses = await asyncio.gather(*(self.ask(node, {'action': 'catalog'}) for node in candidates))
-                available = []
-                for node, response in zip(candidates, responses, strict=True):
-                    if response and response.get('release'):
-                        with suppress(ValidationError):
-                            available.append((node, release.Release.model_validate(response['release'])))
-                if available:
-                    node, catalog = max(available, key=lambda item: item[1].sequence)
-                    return catalog, node
-                if not any(response and response.get('pending') for response in responses):
-                    break
-                if attempt < 3:
-                    await asyncio.sleep(2)
-        return None, None
+        available: dict[str, release.Release] = {}
+        slots = asyncio.Semaphore(8)
+
+        async def check(node: str) -> None:
+            params = {'action': 'catalog', 'refresh': True} if refresh else {'action': 'catalog'}
+            while True:
+                async with slots:
+                    response = await self.ask(node, params)
+                if not response:
+                    return
+                if response.get('release'):
+                    with suppress(ValidationError):
+                        catalog = release.Release.model_validate(response['release'])
+                        if node not in available or catalog.sequence > available[node].sequence:
+                            available[node] = catalog
+                if not response.get('pending'):
+                    return
+                params = {'action': 'catalog'}
+                await asyncio.sleep(2)
+
+        # Keep valid replies even when a slow peer exceeds the discovery deadline.
+        with suppress(TimeoutError):
+            async with asyncio.timeout(35):
+                await asyncio.gather(*(check(node) for node in peers))
+        node = max(available, key=lambda peer: (available[peer].sequence, peer), default=None)
+        return (available[node], node) if node is not None else (None, None)
 
     async def find_release(self) -> dict:
-        self.catalog, source = await self.discover_release()
+        catalog, source = await self.discover_release(refresh=True)
+        cached = self.latest_cached_release()
+        if cached is not None and (catalog is None or cached.sequence > catalog.sequence):
+            catalog, source = cached, 'cache'
+        self.catalog = catalog
         return {'release': self.catalog.model_dump(), 'source': source} if self.catalog is not None else {'release': None}
+
+    def latest_cached_release(self) -> release.Release | None:
+        candidates = (self.catalog, self.cached_seed_release(), self.cached_group_release())
+        return max((item for item in candidates if item is not None), key=lambda item: item.sequence, default=None)
 
     def cached_seed_release(self) -> release.Release | None:
         with suppress(OSError, ValueError, TypeError):
@@ -267,6 +287,8 @@ class UpdateCoordinator:
         try:
             return await self.remote.call(node, METHOD, params, diagnostic=True)
         except PeerError as error:
+            if params == {'action': 'catalog', 'refresh': True} and error.code == 'INVALID_REQUEST':
+                return await self.ask(node, {'action': 'catalog'})
             if error.code == 'UNSUPPORTED_METHOD':
                 return {'status': 'unsupported', 'reason': 'updater_missing'}
             if params['action'] == 'offer' and (result := self.authorization_result(error)) is not None:
@@ -338,6 +360,9 @@ class UpdateCoordinator:
         if previous and previous['status'] not in TERMINAL:
             return {'status': 'queued', 'reason': 'another_update'}
         if previous and previous['status'] == 'succeeded' and previous['release']['sequence'] > offer.release.sequence:
+            return {'status': 'unsupported', 'reason': 'older_release'}
+        cached = self.cached_seed_release()
+        if cached is not None and cached.commit == self.build['commit'] and cached.sequence > offer.release.sequence:
             return {'status': 'unsupported', 'reason': 'older_release'}
         config = {'origin': self.config.origin}
         if WINDOWS:
@@ -449,8 +474,9 @@ class UpdateCoordinator:
                 with self.state.connect() as db:
                     require_member(db, self.local_id, pair)
             await self.remote.work(authorize, rpc=True)
-            if action == 'catalog' and set(params) == {'action'}:
-                pending = self.check_in_background() is not None
+            if action == 'catalog' and (set(params) == {'action'}
+                    or (set(params) == {'action', 'refresh'} and params['refresh'] is True)):
+                pending = self.check_in_background(refresh=params.get('refresh') is True) is not None
                 cached = (self.github_catalog, self.cached_seed_release(), self.cached_group_release())
                 catalog = max((item for item in cached if item is not None), key=lambda item: item.sequence, default=None)
                 return {'pending': pending, 'release': catalog.model_dump() if catalog else None}

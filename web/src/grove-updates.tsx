@@ -7,6 +7,7 @@ import { updateCounts, updateCoversMembers, updateNeedsAttention, updatePresenta
 
 type Action = 'checking' | 'starting' | 'retrying' | 'refreshing'
 type Feedback = { text: string; error?: boolean }
+type ReleaseCheck = { release: UpdateRelease | null; source?: string }
 const actionLabels: Record<Action, string> = { checking: '正在检查…', starting: '正在提交…', retrying: '正在重试…', refreshing: '正在刷新…' }
 
 function failureMessage(error: unknown, action: Action) {
@@ -91,10 +92,11 @@ export function GroveUpdatePanel() {
         return
       }
     }
-    const result = await api<{ release: UpdateRelease | null }>('/grove/updates/release', { signal })
+    const result = await api<ReleaseCheck>('/grove/updates/release', { signal })
     setAwaiting(undefined)
     setCandidate(result.release ?? undefined)
     if (!result.release) setFeedback({ text: '暂未找到可用版本，可稍后重新检查。' })
+    else if (result.source === 'cache') setFeedback({ text: '目前可用的是本机已验证的版本，暂时无法确认是否有更新。' })
   }
 
   async function start(release: UpdateRelease, signal: AbortSignal) {
@@ -117,7 +119,7 @@ export function GroveUpdatePanel() {
 
   async function retry(signal: AbortSignal) {
     if (!batch) return
-    const result = await api<{ release: UpdateRelease | null }>('/grove/updates/release', { signal })
+    const result = await api<ReleaseCheck>('/grove/updates/release', { signal })
     if (!result.release) {
       setFeedback({ text: '暂时无法取得本次更新版本，请稍后重试。', error: true })
       return
