@@ -31,8 +31,8 @@ class Config:
         if self.route_mode not in {None, 'legacy', 'adaptive'}:
             raise ValueError('SPEARMINT_ROUTE_MODE must be legacy or adaptive')
         if (type(self.neighbor_target) is not int or type(self.neighbor_minimum) is not int
-                or not 1 <= self.neighbor_minimum <= self.neighbor_target <= 7):
-            raise ValueError('Neighbor settings require 1 <= minimum <= target <= 7, with a hard limit of 8')
+                or not 1 <= self.neighbor_minimum <= self.neighbor_target < 128):
+            raise ValueError('Neighbor settings require 1 <= minimum <= target < 128, with a hard limit of 128')
         if self.mesh_advertise_ip is not None:
             address = ip_address(self.mesh_advertise_ip)
             if str(address) != self.mesh_advertise_ip or address.is_unspecified or address.is_multicast or '%' in str(address):

@@ -47,6 +47,29 @@ class Catalog:
 
 
 class ServiceCatalogRefreshTest(unittest.TestCase):
+    def test_local_work_congestion_keeps_an_established_directory_ready(self):
+        pair = SimpleNamespace(node_id='owned')
+        connection = SimpleNamespace(closed=False)
+        class Congested:
+            state = None
+            failures = None
+            ready = {'owned': connection}
+            manager = SimpleNamespace(pairs={'owned': pair})
+            def target_lock(self, _node):
+                return asyncio.Lock()
+            def connection_for(self, _node):
+                return connection
+            def cursor(self, _pair):
+                pass
+            async def work(self, *_args):
+                raise PeerError('BUSY', 'Owned local worker is occupied')
+        source = Congested()
+        self.assertFalse(asyncio.run(PeerServices.sync_peer(source, pair, connection)))
+        self.assertIs(source.ready['owned'], connection)
+        connection.closed = True
+        self.assertFalse(asyncio.run(PeerServices.sync_peer(source, pair, connection)))
+        self.assertNotIn('owned', source.ready)
+
     def test_unchanged_lease_renewal_keeps_ordinary_access_online(self):
         with TemporaryDirectory() as root:
             fixture = GroveFixture(Path(root))

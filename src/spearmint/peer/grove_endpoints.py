@@ -21,6 +21,7 @@ from .signed import SignedRecord
 METHOD = 'mesh.grove_endpoints'
 DOMAIN = 'grove endpoint'
 FIELDS = {'realm_id', 'mesh_id', 'node_id', 'fingerprint', 'ip', 'port', 'issued_at', 'expires_at'}
+DEFAULT_MESH_PORT = 8766
 
 
 @dataclass(frozen=True)
@@ -137,8 +138,21 @@ class GroveEndpoints:
                 self.records.pop(node)
         if trust is None:
             return {}
-        return {node: (record.endpoint,) for node, record in self.records.items()
-                if self.connection_address(trust.origins[node], record.pair) is not None}
+        endpoints = {}
+        for node, pair in pairs.items():
+            origin = trust.origins.get(node)
+            if origin is None or not pair.enabled or pair.legacy:
+                continue
+            binding = self.connection_address(origin, pair)
+            if binding is None:
+                continue
+            if record := self.records.get(node):
+                endpoints[node] = (record.endpoint,)
+            elif not binding[1]:
+                # An approved literal address can bootstrap the standard Mesh
+                # listener. TLS still verifies the enrolled node certificate.
+                endpoints[node] = ((binding[0], pair.port or DEFAULT_MESH_PORT),)
+        return endpoints
 
     def connection_address(self, origin: str, pair: Pair) -> tuple[str, bool] | None:
         enrolled = enrolled_ip(origin, pair.host)
@@ -192,7 +206,8 @@ class GroveEndpoints:
         now = int(time.time())
         records = [entry.record.wire() for entry in self.records.values() if entry.expires_at > now]
         if listening:
-            address = self.advertise_ip or local_pair.bind_ip
+            own_origin = trust.origins.get(self.local_id)
+            address = self.advertise_ip or (enrolled_ip(own_origin, '') if own_origin else None) or local_pair.bind_ip
             if ip_address(address).version == ip_address(local_pair.bind_ip).version:
                 leaf = certificate(local_pair.local_pem)
                 data = {'realm_id': trust.realm_id, 'mesh_id': local_pair.mesh_id, 'node_id': self.local_id,

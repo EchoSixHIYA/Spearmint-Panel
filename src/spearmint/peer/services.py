@@ -1755,7 +1755,10 @@ class PeerServices:
         except (PeerError, sqlite3.Error) as exc:
             if isinstance(exc, PeerError):
                 PeerServices.record_failure(self, node, 'catalog.sync', 'directory_sync', exc)
-            if self.ready.get(node) is connection:
+            transient = isinstance(exc, PeerError) and exc.code in {'BUSY', 'TIMEOUT'}
+            current = (connection is self.connection_for(node) and not connection.closed
+                       and self.manager.pairs.get(node) == pair)
+            if self.ready.get(node) is connection and not (transient and current):
                 self.ready.pop(node, None)
             logger.debug("Cannot update remote directory for %s: %s", node, exc)
         return False

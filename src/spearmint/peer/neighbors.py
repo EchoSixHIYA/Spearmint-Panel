@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from .pairing import Pair
 
 
-LIMIT = 8
+LIMIT = 128
 QUALIFY_TIMEOUT = 20
 RETRY = 30
 TRIAL_INTERVAL = 10
@@ -29,7 +29,7 @@ class Neighbors:
     def __init__(self, manager: 'PeerManager', *, minimum=2, target=7, protected=lambda: {},
                  coverage=lambda: {}, demand=lambda: set(), clock=time.monotonic):
         if (type(minimum) is not int or type(target) is not int or not 1 <= minimum <= target < LIMIT):
-            raise ValueError('Neighbor settings require 1 <= minimum <= target <= 7')
+            raise ValueError(f'Neighbor settings require 1 <= minimum <= target < {LIMIT}')
         self.manager, self.minimum, self.target = manager, minimum, target
         self.protected, self.coverage, self.demand, self.clock = protected, coverage, demand, clock
         self.trial: Trial | None = None
