@@ -267,7 +267,7 @@ class PeerServices:
 
     def record_failure(self, target: str, method: str, stage: str, error: PeerError) -> None:
         recorder = getattr(self, 'failures', None)
-        if recorder is None or error.code not in {'DENIED', 'CONFLICT', 'GROVE_SYNCHRONIZING'}:
+        if recorder is None or error.code not in recorder.codes:
             return
         context = dict(getattr(error, 'diagnostic_context', {}))
         try:
@@ -1753,6 +1753,8 @@ class PeerServices:
                         self.sync_modes[node] = result["mode"]
                     return True
         except (PeerError, sqlite3.Error) as exc:
+            if isinstance(exc, PeerError):
+                PeerServices.record_failure(self, node, 'catalog.sync', 'directory_sync', exc)
             if self.ready.get(node) is connection:
                 self.ready.pop(node, None)
             logger.debug("Cannot update remote directory for %s: %s", node, exc)
@@ -1982,8 +1984,13 @@ class PeerServices:
 
     async def call(self, node_id: str, method: str, params: dict, *, diagnostic: bool = False,
                    text_logs: bool = False) -> dict:
+        started = time.monotonic()
         try:
             result, _ = await self.call_with_connection(node_id, method, params, diagnostic=diagnostic, text_logs=text_logs)
+            if method.startswith('grove.workspace.') and params.get('action') == 'host':
+                recorder = getattr(self, 'failures', None)
+                if recorder is not None:
+                    recorder.host_result(node_id, result, time.monotonic() - started)
             return result
         except PeerError as error:
             if method.startswith('grove.workspace.'):

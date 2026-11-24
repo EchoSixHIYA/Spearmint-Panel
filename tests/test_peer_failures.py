@@ -37,13 +37,40 @@ class PeerFailureTest(unittest.TestCase):
             self.log.record('owned-' + str(index), 'workspace.host', 'remote_rpc', PeerError('DENIED', 'Owned reason'))
         self.assertEqual(len(self.read()['events']), 64)
 
-    def test_routine_disconnects_do_not_create_a_diagnostic_file(self):
+    def test_disconnect_evidence_is_bounded_like_rejections(self):
         self.log.record('owned-target', 'workspace.host', 'remote_rpc', PeerError('OFFLINE', 'Owned reconnect'))
-        self.assertFalse(self.log.path.exists())
+        self.assertEqual(self.read()['events'][0]['code'], 'OFFLINE')
+
+    def test_host_timestamps_can_distinguish_successful_but_expired_sampling(self):
+        self.log.host_result('owned-target', {'metrics': {'sampled_at': 100, 'valid_until': 108,
+            'stale': False, 'cpu_percent': 17, 'memory': {'total': 1000}, 'private_fixture': 'excluded'}}, .25)
+        value = json.loads(self.log.path.with_name('peer-hosts.json').read_bytes())
+        sample = value['hosts']['owned-target']
+        self.assertEqual((sample['sampled_at'], sample['valid_until'], sample['duration_ms']), (100, 108, 250))
+        self.assertTrue(sample['cpu_present'] and sample['memory_present'])
+        self.assertNotIn('private_fixture', json.dumps(value))
 
     def test_failed_diagnostic_write_does_not_replace_business_failure(self):
         with patch('spearmint.peer_failures.write_record', side_effect=OSError('Owned disk fixture')):
             self.log.record('owned-target', 'workspace.host', 'remote_rpc', PeerError('DENIED', 'Owned denial'))
+
+    def test_guard_failure_is_recorded_before_the_workspace_handler(self):
+        from fastapi.testclient import TestClient
+        from spearmint.app import create_app, require_admin_write
+        from spearmint.config import Config
+        from spearmint.state import State
+        state = State(self.state.directory / 'guard-fixture')
+        state.initialize(lambda: 'owned-fixture')
+        app = create_app(Config(state.directory, 'https://localhost:18443', self.state.directory / 'web', self.state.directory / 'docker.sock'))
+        def waiting_guard():
+            raise PeerError('GROVE_SYNCHRONIZING', 'Owned guard is synchronizing')
+        app.dependency_overrides[require_admin_write] = waiting_guard
+        with TestClient(app, base_url='https://localhost:18443') as client:
+            response = client.post('/api/v1/peers/owned-target/workspace/host', json={})
+        self.assertEqual(response.status_code, 503)
+        records = json.loads((state.directory / 'diagnostics/peer-failures.json').read_bytes())
+        self.assertEqual(records['events'][0]['stage'], 'http_request')
+        self.assertEqual(records['events'][0]['code'], 'GROVE_SYNCHRONIZING')
 
     def test_rpc_capture_keeps_original_error_and_omits_request_body(self):
         recorder = self.log

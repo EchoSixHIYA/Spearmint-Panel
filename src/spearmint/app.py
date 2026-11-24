@@ -499,6 +499,9 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
 
     @app.exception_handler(PeerError)
     async def peer_failure(_request: Request, error: PeerError):
+        target = _request.path_params.get('target')
+        if target and '/workspace/' in _request.url.path:
+            remote.record_failure(target, f'workspace.{_request.path_params.get("action", "unknown")}', 'http_request', error)
         status = {
             "NOT_FOUND": 404, "DEPLOYMENT_UNSUPPORTED": 404, "INVALID_REQUEST": 400, "BUSY": 429, "PROTOCOL": 502, "TIMEOUT": 504,
             "DENIED": 403, "CONFLICT": 409, "DIRECTORY_CHANGED": 409, "EXPIRED": 410, "SESSION_REQUIRED": 401,
@@ -512,6 +515,14 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             "GROVE_INVITATION_EXPIRED": 410, 'GROVE_QUORUM_REQUIRED': 409, 'GROVE_SYNCHRONIZING': 503,
         }.get(error.code, 503)
         return JSONResponse({"detail": str(error), "code": error.code}, status_code=status)
+
+    @app.exception_handler(HTTPException)
+    async def http_failure(request: Request, error: HTTPException):
+        target = request.path_params.get('target')
+        if target and '/workspace/' in request.url.path and error.status_code in {401, 403}:
+            remote.record_failure(target, f'workspace.{request.path_params.get("action", "unknown")}',
+                                  'http_guard', PeerError('SESSION_REQUIRED' if error.status_code == 401 else 'DENIED', str(error.detail)))
+        return JSONResponse({'detail': error.detail}, status_code=error.status_code, headers=error.headers)
 
     @app.get("/healthz")
     def health():
