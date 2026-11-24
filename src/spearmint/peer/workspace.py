@@ -1,5 +1,5 @@
 """Read and edit a Grove node's service workspace using its current login identity."""
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError, field_validator
 
 from ..catalog import get_service
 from ..control import ControlError, operation_data
@@ -23,9 +23,34 @@ class Versioned(Target):
     version: int = Field(ge=1, le=2**53 - 1)
 
 
+class AccessLink(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True, str_strip_whitespace=True)
+    label: str = Field(min_length=1, max_length=60)
+    url: str = Field(min_length=1, max_length=400)
+
+    @field_validator('label')
+    @classmethod
+    def printable_label(cls, value: str) -> str:
+        if not value.isprintable():
+            raise ValueError('Use a printable link name')
+        return value
+
+    @field_validator('url')
+    @classmethod
+    def web_address(cls, value: str) -> str:
+        if not value.lower().startswith(('http://', 'https://')) or any(
+                char == '\\' or char.isspace() or not char.isprintable() for char in value):
+            raise ValueError('Use a complete HTTP or HTTPS address')
+        address = HttpUrl(value)
+        if address.username is not None or address.password is not None:
+            raise ValueError('Do not include login credentials in the address')
+        return value
+
+
 class Details(Versioned):
     name: str = Field(min_length=1, max_length=80)
     endpoint: str | None = Field(default=None, max_length=180)
+    access_links: list[AccessLink] | None = Field(default=None, max_length=8)
 
 
 class Mode(Versioned):
@@ -62,8 +87,10 @@ class Workspace:
                 identity = actor.actor if isinstance(actor, LocalAdmin) else actor
                 with self.state.lock('maintenance.lock', exclusive_now=True):
                     if action == 'edit':
+                        links = selection.access_links
                         update_service_details(self.state, selection.service_id, identity,
-                            name=selection.name, endpoint=selection.endpoint, version=selection.version)
+                            name=selection.name, endpoint=selection.endpoint, version=selection.version,
+                            access_links=[link.model_dump() for link in links] if links is not None else None)
                     elif action == 'remove':
                         unregister(self.state, selection.service_id, actor=identity, version=selection.version)
                         return {'removed': True}
@@ -97,6 +124,7 @@ class Workspace:
         foreground = service.driver == 'process' and not service.existing_system_service
         stopped = described['observation']['status'] in {'stopped', 'failed'} and not described['observation']['stale']
         return {**described, 'node_id': self.node_id, 'operations': operations, 'command': service.spec.get('command'),
+                'access_links': service.spec.get('access_links', []),
                 'deployment': service.spec.get('deployment'), 'can_deploy': owns_code(service),
                 'resources': self.controller.service_metrics.snapshot(service, observation),
                 'can_edit_details': True, 'can_unregister': not protected and not mapped and (not foreground or stopped),

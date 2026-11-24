@@ -68,6 +68,34 @@ class WorkspaceTest(unittest.TestCase):
             self.workspace.request(self.actor, 'detail', {'service_id': self.service.id})
         self.assertEqual(caught.exception.code, 'NOT_FOUND')
 
+    def test_service_links_round_trip_and_survive_renaming(self):
+        service_id = self.service.id
+        links = [
+            {'label': '用户面板', 'url': 'http://nas.local:8080/#/home'},
+            {'label': '管理后台', 'url': 'https://example.test/admin'},
+            {'label': 'API', 'url': 'http://[fd00::1]:8000/api?v=1'},
+        ]
+        self.assertEqual(self.workspace.request(self.actor, 'detail', {'service_id': service_id})['access_links'], [])
+        edit = {'service_id': service_id, 'version': 1, 'name': self.service.name, 'endpoint': None, 'access_links': links}
+        result = self.workspace.request(self.actor, 'edit', edit)
+        self.assertEqual(result['access_links'], links)
+        self.assertEqual(self.workspace.request(self.actor, 'edit', edit)['version'], 2)
+        renamed = self.workspace.request(self.actor, 'edit',
+            {'service_id': service_id, 'version': 2, 'name': 'Renamed', 'endpoint': None})
+        self.assertEqual(renamed['access_links'], links)
+        with self.assertRaises(PeerError) as stale:
+            self.workspace.request(self.actor, 'edit', {**edit, 'access_links': []})
+        self.assertEqual(stale.exception.code, 'CONFLICT')
+        self.workspace.request(self.actor, 'edit', {**edit, 'version': 3, 'name': 'Renamed', 'access_links': []})
+        self.assertEqual(self.workspace.request(self.actor, 'detail', {'service_id': service_id})['access_links'], [])
+
+    def test_service_links_require_a_complete_web_address(self):
+        for url in ('nas.local/admin', 'file:///admin', 'https://'):
+            with self.subTest(url=url), self.assertRaises(PeerError) as error:
+                self.workspace.request(self.actor, 'edit', {'service_id': self.service.id, 'version': 1,
+                    'name': self.service.name, 'endpoint': None, 'access_links': [{'label': 'Admin', 'url': url}]})
+            self.assertEqual(error.exception.code, 'INVALID_REQUEST')
+
 
 if __name__ == '__main__':
     unittest.main()

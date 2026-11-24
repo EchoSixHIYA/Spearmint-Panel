@@ -21,6 +21,7 @@ from spearmint.drivers import Observation
 from spearmint.host import HostError
 from spearmint.peer.protocol import PeerError, wire_b64
 from spearmint.peer.service_setup import LocalAdmin
+from spearmint.service_details import update_service_details
 from spearmint.service_artifacts import docker_arguments
 from spearmint.service_deployment import ServiceDeployments
 from spearmint.native_process import process_driver
@@ -107,10 +108,14 @@ class DeploymentTest(unittest.TestCase):
         app = self.manager.apps / original.spec['deployment']['app']
         (app / 'data' / 'important.txt').write_text('keep this')
         self.assertIn('SPMT_DATA_DIR', original.spec['script_source'])
+        links = [{'label': 'Admin', 'url': 'http://localhost:8080/admin'}]
+        original = update_service_details(self.state, original.id, self.actor.actor,
+            name=original.name, endpoint=None, version=original.version, access_links=links)
         second = self.launch(self.begin(service=original, data=self.archive('v2')))
         self.assertEqual(second['status'], 'succeeded')
         current = self.service(original.id)
-        self.assertEqual(current.version, 2)
+        self.assertEqual(current.version, 3)
+        self.assertEqual(current.spec['access_links'], links)
         self.assertNotEqual(current.target, original.target)
         self.assertNotEqual(current.spec['cwd'], original.spec['cwd'])
         third = self.launch(self.begin(service=current, data=self.archive('v3')))
@@ -121,7 +126,8 @@ class DeploymentTest(unittest.TestCase):
         self.assertEqual(rolled['status'], 'succeeded')
         restored = self.service(original.id)
         self.assertEqual(restored.spec['cwd'], current.spec['cwd'])
-        self.assertEqual(restored.version, 4)
+        self.assertEqual(restored.version, 5)
+        self.assertEqual(restored.spec['access_links'], links)
         self.assertEqual((app / 'data' / 'important.txt').read_text(), 'keep this')
         self.assertEqual(list(self.manager.root.glob('*.upload')), [])
         self.assertEqual(len(list_services(self.state)), 1)

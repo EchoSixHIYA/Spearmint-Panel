@@ -6,6 +6,7 @@ import { ServiceLogs } from './service-logs'
 import { FrpMappings } from './frp-mappings'
 import { GroveServiceSetup } from './remote-service-setup'
 import { ServiceDeployment, deployedBySpearmint } from './service-deployment'
+import { ServiceAccessLinks, type AccessLink } from './service-access-links'
 import { HostServiceAuthorization } from './host-service-authorization'
 import { allowNavigation } from './navigation-guard'
 import { type Service, actions as actionNames, serviceDriver } from './services'
@@ -18,6 +19,7 @@ type ServiceResources = { pid: number | null; sampled_at: number | null; valid_u
   gpu: { utilization_percent: number | null; memory_used_bytes: number | null; valid_until?: number | null } }
 type Receipt = { id?: string; action: string; status: string; updated_at?: number; message?: string | null; reason?: string }
 type Detail = Service & { command?: string; managed: boolean; can_edit_details: boolean; can_unregister: boolean; can_deploy?: boolean;
+  access_links?: AccessLink[];
   deployment?: { source?: string; kind?: string; directory?: string };
   unregister_reason?: string; can_change_mode: boolean; resources?: ServiceResources; operations: Array<Receipt & { id: string; updated_at: number }> }
 
@@ -136,7 +138,8 @@ function ServiceRowActions({ path, name, status, allowed, version, stale, detail
 function ServiceDetail({ target, id, initialTab }: { target: string; id: string; initialTab?: string }) {
   const { session, onUnauthorized, listedNodes, localName } = useConsole()
   const detail = useWorkspace<Detail>(target, session, 'detail', { service_id: id }, onUnauthorized)
-  const [tab, setTab] = useState(initialTab === 'logs' ? 'logs' : initialTab === 'history' ? 'history' : initialTab === 'access' ? 'settings' : 'overview')
+  const [tab, setTab] = useState(initialTab === 'logs' || initialTab === 'history' || initialTab === 'links'
+    ? initialTab : initialTab === 'access' ? 'settings' : 'overview')
   const [confirmation, setConfirmation] = useState<string>()
   const [editing, setEditing] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('')
   const local = target === 'local', nodeName = local ? localName : listedNodes.find(node => node.id === target)?.name || target
@@ -171,7 +174,7 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
       <button className="btn btn-secondary" onClick={detail.reload}>核对状态</button>
     </PageHeading>
     {detail.error && <Notice tone="amber">{detail.error}</Notice>}{error && <Notice tone="amber">{error}</Notice>}
-    <Tabs label="服务工作区" current={tab} onChange={next => { if (allowNavigation()) setTab(next) }} items={[{ id: 'overview', label: '概览' }, { id: 'logs', label: '日志' }, { id: 'history', label: '操作记录' }, { id: 'settings', label: '管理设置' }, ...(canUpdateCode ? [{ id: 'update', label: '代码与更新' }] : [])]} />
+    <Tabs label="服务工作区" current={tab} onChange={next => { if (allowNavigation()) setTab(next) }} items={[{ id: 'overview', label: '概览' }, { id: 'links', label: '访问链接' }, { id: 'logs', label: '日志' }, { id: 'history', label: '操作记录' }, { id: 'settings', label: '管理设置' }, ...(canUpdateCode ? [{ id: 'update', label: '代码与更新' }] : [])]} />
     {!current && !detail.error && <Loading />}
     {current && tab === 'overview' && <div className="stack service-overview">
       <ServiceUsage service={current} unavailable={unavailable} />
@@ -190,6 +193,15 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
       </div>
     </div>}
     {current && tab === 'logs' && <ServiceLogs path={path} serviceId={id} onUnauthorized={onUnauthorized} remote={!local} active={!unavailable && current.logs_available !== false} />}
+    {current && tab === 'links' && <ServiceAccessLinks links={current.access_links} version={current.version ?? 1}
+      canEdit={current.can_edit_details && !detail.error && !busy && !flow.tracking}
+      onSave={async (links, version) => {
+        const updated = await workspace<Detail>(target, session, 'edit',
+          { service_id: id, version, name: current.name, endpoint: current.endpoint, access_links: links })
+        detail.reload()
+        refreshConsole()
+        return { links: updated.access_links ?? links, version: updated.version ?? version }
+      }} />}
     {current && tab === 'history' && <Panel title="此服务的操作记录">{current.operations.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>动作</th><th>结果</th><th>时间</th><th>说明</th></tr></thead><tbody>{current.operations.map(item => <tr key={item.id}><td>{actionNames[item.action as keyof typeof actionNames] || item.action}</td><td><StateBadge state={item.status} /></td><td>{timestamp(item.updated_at)}</td><td>{item.message || receiptReason(item) || '—'}</td></tr>)}</tbody></table></div> : <EmptyState title="此服务暂无操作记录" />}</Panel>}
     {current && tab === 'settings' && <Panel className="service-settings-panel">
       <div className="service-setting-row"><span className="service-setting-label">服务名称</span><strong className="service-setting-value">{current.name}</strong>

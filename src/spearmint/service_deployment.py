@@ -432,6 +432,8 @@ class ServiceDeployments:
             current = get_service(db, service.id)
             if current is None or current.version != service.version:
                 raise StateError('服务登记已变化，停止切换。')
+            if 'access_links' in current.spec:
+                spec = {**spec, 'access_links': current.spec['access_links']}
             db.execute('UPDATE service SET spec=?, target=?, version=version+1 WHERE id=?',
                        (json.dumps(spec, sort_keys=True), target, service.id))
             publish(db, service.id)

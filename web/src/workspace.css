@@ -84,6 +84,17 @@ button.service-action-receipt { border: 0; padding: 0; background: none; color: 
 .service-receipt p { margin: 12px 0 0; overflow-wrap: anywhere; }
 .service-receipt > .button-row { margin-top: 12px; }
 .service-settings-panel { padding: 8px 20px 0; }
+.service-links-list { list-style: none; padding: 0; margin: 0; }
+.service-links-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; }
+.service-links-list li + li { border-top: 1px solid var(--edge); }
+.service-links-list li > div { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.service-links-list small { display: block; color: var(--muted); margin-top: 3px; }
+.service-links-list .btn { flex: none; }
+.service-links-modal { width: min(700px, calc(100vw - 30px)); }
+.service-link-fields { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; gap: 12px; }
+.service-link-fields > .btn { justify-self: start; }
+.service-link-editor-row { display: grid; grid-template-columns: minmax(100px,1fr) minmax(0,2fr) auto; gap: 8px 10px; align-items: end; }
+.service-link-editor-row .icon-button { align-self: end; }
 .service-setting-row { display: grid; grid-template-columns: 100px minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--edge); font-size: 12px; }
 .service-setting-label { color: var(--muted); }
 .service-setting-value { min-width: 0; overflow-wrap: anywhere; }
@@ -103,6 +114,9 @@ button.service-action-receipt { border: 0; padding: 0; background: none; color: 
 .service-advanced-actions > .btn-danger:hover:not(:disabled) { background: #fcf0ef; }
 @media (max-width: 1000px) { .service-overview-content.has-receipt { grid-template-columns: minmax(0,1fr); } }
 @media (max-width: 600px) {
+  .service-link-editor-row { grid-template-columns: minmax(0,1fr) auto; padding-bottom: 10px; border-bottom: 1px solid var(--edge); }
+  .service-link-editor-row .field-label:nth-child(2) { grid-row: 2; }
+  .service-link-editor-row .icon-button { grid-column: 2; grid-row: 1; }
   .service-settings-panel { padding: 4px 14px 0; }
   .service-setting-row { grid-template-columns: 64px minmax(0,1fr) auto; gap: 8px; }
   .service-usage { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px 12px; }

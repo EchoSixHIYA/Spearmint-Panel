@@ -14,7 +14,8 @@ from .state import State, StateError, audit
 
 
 def update_service_details(state: State, service_id: str, actor: auth.Actor | GroveServiceAdmin, *,
-                           name: str, endpoint: str | None, version: int) -> Service:
+                           name: str, endpoint: str | None, version: int,
+                           access_links: list[dict[str, str]] | None = None) -> Service:
     try:
         name = service_name(name)
         validate_endpoint(endpoint or None)
@@ -33,7 +34,8 @@ def update_service_details(state: State, service_id: str, actor: auth.Actor | Gr
         service = get_service(db, service_id)
         if service is None:
             raise ControlError(404, "Unknown service ID")
-        same_details = service.name == name and service.spec.get("endpoint") == endpoint
+        same_details = (service.name == name and service.spec.get("endpoint") == endpoint
+                        and (access_links is None or service.spec.get("access_links", []) == access_links))
         if same_details and service.version in (version, version + 1):
             return service
         if service.version != version:
@@ -43,6 +45,8 @@ def update_service_details(state: State, service_id: str, actor: auth.Actor | Gr
         except StateError as error:
             raise ControlError(409, str(error)) from error
         spec = {**service.spec, "endpoint": endpoint}
+        if access_links is not None:
+            spec["access_links"] = access_links
         try:
             db.execute("UPDATE service SET name=?, spec=?, version=version+1 WHERE id=?",
                        (name, json.dumps(spec, sort_keys=True), service_id))
