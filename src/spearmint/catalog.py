@@ -44,6 +44,9 @@ class Service:
     def actions(self) -> tuple[str, ...]:
         return ACTIONS if self.managed else ()
 
+    def runtime_spec(self) -> dict:
+        return {name: value for name, value in self.spec.items() if name != "access_links"}
+
     @property
     def existing_systemd_unit(self) -> bool:
         return self.driver == "process" and self.spec.get("runtime") == "systemd-system"

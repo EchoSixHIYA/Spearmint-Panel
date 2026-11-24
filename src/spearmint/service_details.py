@@ -44,7 +44,9 @@ def update_service_details(state: State, service_id: str, actor: auth.Actor | Gr
             require_idle(db, service_id)
         except StateError as error:
             raise ControlError(409, str(error)) from error
-        spec = {**service.spec, "endpoint": endpoint}
+        spec = service.spec.copy()
+        if endpoint is not None or "endpoint" in spec:
+            spec["endpoint"] = endpoint
         if access_links is not None:
             spec["access_links"] = access_links
         try:

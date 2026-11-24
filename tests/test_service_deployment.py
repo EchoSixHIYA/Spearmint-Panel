@@ -497,6 +497,11 @@ class DeploymentTest(unittest.TestCase):
             service = self.service(first['service_id'])
             self.assertEqual(native.inspect(service).status, 'running')
             self.assertIn('native-v1', native.logs(service, 10).text)
+            links = [{'label': 'API', 'url': 'http://localhost:8080/api'}]
+            before = native.inspect(service)
+            service = update_service_details(self.state, service.id, self.actor.actor, name=service.name,
+                endpoint=None, version=service.version, access_links=links)
+            self.assertEqual(native.inspect(service), before)
             second = self.launch(self.begin(command=command, service=service, data=code('native-v2')))
             self.assertEqual(second['status'], 'succeeded', second)
             service = self.service(service.id)
@@ -507,6 +512,7 @@ class DeploymentTest(unittest.TestCase):
             service = self.service(service.id)
             self.assertEqual(native.inspect(service).status, 'running')
             self.assertIn('native-v2', native.logs(service, 10).text)
+            self.assertEqual(service.spec['access_links'], links)
         finally:
             if service:
                 current = self.service(service.id)

@@ -70,7 +70,7 @@ class ProcessDriver:
 
     @staticmethod
     def description(service: Service) -> str:
-        digest = hashlib.sha256(json.dumps(service.spec, sort_keys=True).encode()).hexdigest()
+        digest = hashlib.sha256(json.dumps(service.runtime_spec(), sort_keys=True).encode()).hexdigest()
         return f"Spearmint managed {service.id} {digest}"
 
     def unit(self, service: Service) -> dict[str, str]:

@@ -60,7 +60,7 @@ def process_driver(state: State) -> Driver:
 
 
 def signature(service: Service) -> str:
-    return hashlib.sha256(json.dumps(service.spec, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(service.runtime_spec(), sort_keys=True).encode()).hexdigest()
 
 
 def linux_identity(pid=None):
