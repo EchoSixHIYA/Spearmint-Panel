@@ -32,6 +32,22 @@ export function GroveAccessNotice({ info }: { info?: GroveInfo }) {
       {access.offline_until && <> 离线登录有效至 {new Date(access.offline_until * 1000).toLocaleString()}。</>}</>}</Notice>
 }
 
+export function GroveAccessIndicator({ info }: { info?: GroveInfo }) {
+  const mode = info?.access?.mode
+  const [visible, setVisible] = useState(false)
+  useEffect(() => {
+    setVisible(false)
+    if (mode !== 'offline' && mode !== 'synchronizing') return
+    const timer = setTimeout(() => setVisible(true), 10_000)
+    return () => clearTimeout(timer)
+  }, [mode])
+  if (!visible || (mode !== 'offline' && mode !== 'synchronizing')) return null
+  return <span className="sync-label" role="status" title={mode === 'synchronizing'
+    ? '正在核对恢复连接后的权限，后台完成后自动恢复操作。'
+    : '按最后确认的权限管理可达节点。账号和成员变更需等待多数成员恢复连接。'}>
+    <Icon name="clock" size={13} />{mode === 'synchronizing' ? '权限同步中' : '离线运维'}</span>
+}
+
 const directorySources = {
   'issuer-mesh': '已通过 Mesh 向签发节点核对。', 'issuer-https': '已通过 HTTPS 向签发节点核对。',
   'member-https': '已通过成员面板核对签名目录。',

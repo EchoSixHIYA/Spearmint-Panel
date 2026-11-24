@@ -12,8 +12,8 @@ export function directoryQuery(connectionId?: string, generation?: number) {
 }
 
 export function remoteDirectoryCurrent(node: Pick<NodeView, 'status' | 'peer'>,
-  directory?: { stale: boolean; connection_id?: string | null; directory_generation?: number | null }) {
-  return node.status === 'online' && node.peer?.directory_ready !== false && directory?.stale === false
+  directory?: { stale: boolean; catalog_complete?: boolean; connection_id?: string | null; directory_generation?: number | null }) {
+  return node.status === 'online' && node.peer?.directory_ready !== false && directory?.stale === false && directory.catalog_complete !== false
     && node.peer?.connection_id === (directory.connection_id ?? undefined)
     && node.peer?.directory_generation === (directory.directory_generation ?? undefined)
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { timestamp } from './api'
 import { useConsole, refreshConsole } from './console-data'
-import { useRemoteCatalog } from './remote-catalog'
+import { useRemoteCatalog, useRemoteObservationTime } from './remote-catalog'
 import { ServiceLogs } from './service-logs'
 import { FrpMappings } from './frp-mappings'
 import { GroveServiceSetup } from './remote-service-setup'
@@ -72,15 +72,19 @@ export function ServiceWorkspace({ section, segments }: { section?: string; segm
 export function ServiceList({ initialNode, embedded = false }: { initialNode?: string; embedded?: boolean }) {
   const { services, listedNodes, local, localName } = useConsole()
   const { entries, error } = useRemoteCatalog()
+  const now = useRemoteObservationTime(entries.map(entry => entry.service.observation)) / 1000
   const query = new URLSearchParams(location.hash.split('?')[1])
   const [search, setSearch] = useState(query.get('q') || '')
   const [node, setNode] = useState((embedded ? initialNode : query.get('node') || initialNode) || '')
   const [status, setStatus] = useState(query.get('status') || '')
   const rows = [
     ...(services.data || []).map(service => ({ service, node: local.data?.node_id || 'local', name: localName, local: true, stale: !!services.error || service.observation.stale, observation: service.observation })),
-    ...entries.map(entry => ({ service: entry.service, node: entry.node.id, name: entry.node.name, local: false, stale: entry.stale || entry.service.observation?.stale !== false, observation: entry.service.observation })),
-  ]
-  const visible = rows.filter(row => (!node || row.node === node) && (!status || (status === 'stale' ? row.stale : !row.stale && row.observation?.status === status))
+    ...entries.map(entry => ({ service: entry.service, node: entry.node.id, name: entry.node.name, local: false,
+      stale: entry.stale || entry.service.observation?.stale !== false || (entry.service.observation?.valid_until ?? 0) <= now,
+      observation: entry.service.observation })),
+  ].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN') || a.node.localeCompare(b.node)
+    || a.service.name.localeCompare(b.service.name, 'zh-CN') || a.service.id.localeCompare(b.service.id))
+  const visible = rows.filter(row => (!node || row.node === node) && (!status || (status === 'stale' ? row.stale : row.observation?.status === status))
     && `${row.service.name} ${row.name} ${row.service.id}`.toLowerCase().includes(search.toLowerCase()))
   function update(field: 'q' | 'node' | 'status', value: string) {
     if (field === 'q') setSearch(value); else if (field === 'node') setNode(value); else setStatus(value)
@@ -90,12 +94,11 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
   return <>{!embedded && <PageHeading eyebrow="WORKSPACE / SERVICES" title="服务" description="找到程序，控制启停，确认结果。">
     <a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(node || undefined))}><Icon name="plus" size={16} />登记服务</a>
   </PageHeading>}{embedded && <div className="button-row"><a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(initialNode))}>在此节点登记服务</a></div>}
-    <div className="workspace-summary"><strong>{rows.length} 个已登记服务</strong><span>{rows.filter(row => !row.stale && row.observation?.status === 'running').length} 个运行中</span><span>通过 Mesh 在当前面板管理目标节点</span></div>
+    <div className="workspace-summary"><strong>{rows.length} 个已登记服务</strong><span>{rows.filter(row => !row.stale && row.observation?.status === 'running').length} 个运行中</span><span role="status">{services.error || error ? '部分状态暂时无法更新，保留上次目录' : '通过 Mesh 在当前面板管理目标节点'}</span></div>
     <Panel><div className="workspace-filters"><label className="search-box"><Icon name="search" size={16} /><input aria-label="搜索服务" value={search} onChange={e => update('q', e.target.value)} placeholder="搜索服务、节点或程序名称…" /></label>
       <select className="input" aria-label="按节点筛选" value={node} disabled={embedded} onChange={e => update('node', e.target.value)}><option value="">全部节点</option>{listedNodes.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
       <select className="input" aria-label="按状态筛选" value={status} onChange={e => update('status', e.target.value)}><option value="">全部状态</option><option value="running">运行中</option><option value="stopped">已停止</option><option value="failed">失败</option><option value="stale">状态待确认</option></select>
       <button className="btn btn-secondary" onClick={refreshConsole}>刷新</button></div>
-      {(services.error || error) && <Notice tone="amber">部分服务状态暂时无法更新，保留上次目录供查看。</Notice>}
       {!services.data && !services.error ? <Loading /> : visible.length ? <div className="table-wrap"><table className="data-table workspace-service-table"><thead><tr><th>服务</th><th>所属节点</th><th>运行状态</th><th>最近检查</th><th>操作</th></tr></thead><tbody>{visible.map(row => {
         const href = withReturn(row.local ? localServiceHref(row.service.id) : remoteServiceHref(row.node, row.service.id))
         return <tr key={`${row.node}/${row.service.id}`}><td><a className="text-link" href={href}><strong>{row.service.name}</strong></a><small className="table-secondary">{row.service.driver === 'docker' ? 'Docker 容器' : '系统服务 / 程序'}</small></td><td><a href={withReturn(`#/nodes/${row.node}`)}>{row.name}</a><small className="table-secondary">{row.local ? '当前面板 · 本机' : '通过 Mesh 管理'}</small></td>

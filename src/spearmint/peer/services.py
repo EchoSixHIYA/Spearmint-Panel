@@ -1011,6 +1011,7 @@ class PeerServices:
                 raise PeerError('PROTOCOL', 'Invalid Grove role versions')
             for user_id, version in versions.items():
                 if version > roles.get(user_id, 0):
+                    grove_availability.synchronize(self.state, nonce, True)
                     reply = await self.call(node_id, grove_roles.GET_METHOD, {'user_id': user_id}, diagnostic=True)
                     await self.work(grove_roles.apply, self.state, [reply.get('certificate')], node_id)
 
@@ -1021,6 +1022,7 @@ class PeerServices:
                 raise PeerError('PROTOCOL', 'Invalid Grove admissions')
             for member, origin in versions.items():
                 if members.get(member) != origin:
+                    grove_availability.synchronize(self.state, nonce, True)
                     reply = await self.call(node_id, grove_admission.GET, {'node_id': member}, diagnostic=True)
                     pair = self.pair_for(node_id)
                     await self.work(grove_admission.synchronize, self.state, reply.get('certificate'), node_id,
@@ -1046,7 +1048,10 @@ class PeerServices:
                             continue
                         if reply.keys() != {'ballot'} | fields.keys():
                             raise PeerError('PROTOCOL', 'Invalid Grove continuity vote')
-                        grove_availability.synchronize(self.state, nonce, True)
+                        # An unchanged lease renewal must not interrupt ordinary reads
+                        # and controls while we wait for the other voters.
+                        if reply['revocations'] or reply.get('passwords'):
+                            grove_availability.synchronize(self.state, nonce, True)
                         if reply['revocations']:
                             await self.work(grove_revocation.apply, self.state, reply['revocations'], node_id)
                         if reply.get('passwords'):
@@ -1878,19 +1883,20 @@ class PeerServices:
 
     async def grove_directory(self, actor: Actor, directory: dict) -> dict:
         if directory['stale']:
-            return directory
+            return {**directory, 'catalog_complete': False}
         try:
             result = await self.grove_service(directory['node_id'], actor, 'catalog', {},
                                               connection_id=directory['connection_id'],
                                               directory_generation=directory['directory_generation'])
         except PeerError:
-            return directory
+            return {**directory, 'stale': True, 'catalog_complete': False}
         if result is None:
-            return directory
+            return {**directory, 'catalog_complete': not actor.grove, 'stale': directory['stale'] or actor.grove}
         services = {item['id']: item for item in directory['services']}
         for item in result['services']:
             services[item['id']] = item
-        return {**directory, 'services': sorted(services.values(), key=lambda item: (item['name'], item['id']))}
+        return {**directory, 'catalog_complete': True,
+                'services': sorted(services.values(), key=lambda item: (item['name'], item['id']))}
 
     async def visible_directories(self, actor: Actor) -> list[dict]:
         directories = await self.directories()

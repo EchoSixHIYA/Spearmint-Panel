@@ -17,7 +17,7 @@ export type RemoteService = {
   observation: RemoteObservation | null
 }
 
-export type RemoteDirectory = { stale: boolean; connection_id?: string | null; directory_generation?: number | null; services: RemoteService[] }
+export type RemoteDirectory = { stale: boolean; catalog_complete?: boolean; connection_id?: string | null; directory_generation?: number | null; services: RemoteService[] }
 export type NodeDirectory = RemoteDirectory & { node_id: string }
 
 export function useRemoteObservationTime(observations: readonly (RemoteObservation | null | undefined)[]) {
