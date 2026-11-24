@@ -1,7 +1,46 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { api, ApiError, type Session } from './api'
 import type { Peer } from './console-data'
 import type { NodeDirectory } from './remote-catalog'
 import { remoteDirectoryCurrent } from './remote-directory'
+import { resourcePoll } from './node-resource-poll'
+
+export function useRemoteDirectoryReads(peers: Peer[] | undefined, session: Session, onUnauthorized: () => void, scope: string) {
+  const targets = JSON.stringify((peers ?? []).filter(peer => peer.node_id && peer.enabled && peer.status === 'online'
+    && peer.directory_ready !== false).map(peer => peer.node_id!))
+  const ids = useRef<string[]>([]), polling = useRef<ReturnType<typeof resourcePoll> | null>(null)
+  ids.current = JSON.parse(targets)
+  const [snapshot, setSnapshot] = useState<{ scope: string; data: NodeDirectory[]; requestedAt: number }>()
+  useEffect(() => {
+    let stopped = false
+    const poll = resourcePoll(async (id, signal) => {
+      const requestedAt = performance.now()
+      let directory: NodeDirectory
+      try {
+        directory = await api<NodeDirectory>(`/peers/${id}/services`, { signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]) })
+        if (directory.node_id !== id) throw new Error('No matching service directory')
+      } catch (error) {
+        if (stopped || signal.aborted) return 5000
+        if (error instanceof ApiError && error.status === 401) onUnauthorized()
+        setSnapshot(previous => previous?.scope === scope ? { ...previous, data: previous.data.map(entry =>
+          entry.node_id === id ? { ...entry, stale: true, catalog_complete: false } : entry) } : previous)
+        return 5000
+      }
+      if (!stopped && !signal.aborted) setSnapshot(previous => {
+        const entries = new Map((previous?.scope === scope ? previous.data : []).map(entry => [entry.node_id, entry]))
+        entries.set(id, directory)
+        return { scope, data: [...entries.values()], requestedAt }
+      })
+      return 5000
+    }, () => document.visibilityState === 'visible', undefined, 2)
+    polling.current = poll; poll.setTargets(ids.current)
+    document.addEventListener('visibilitychange', poll.resume)
+    return () => { stopped = true; poll.close(); polling.current = null; document.removeEventListener('visibilitychange', poll.resume) }
+  }, [scope, session, onUnauthorized])
+  useEffect(() => { polling.current?.setTargets(ids.current) }, [targets])
+  return { data: snapshot?.scope === scope ? snapshot.data : undefined,
+    requestedAt: snapshot?.scope === scope ? snapshot.requestedAt : undefined, error: '' }
+}
 
 // Keep display rows across path changes. Only a complete, current directory may
 // remove services; retained rows never certify a new session's control rights.

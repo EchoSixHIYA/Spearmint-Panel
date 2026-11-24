@@ -10,7 +10,7 @@ import type { DeploymentHost } from './release-compatibility'
 import { localServiceAlerts, remoteServiceAlerts, type ConsoleAlert } from './service-alerts'
 import { hostResourceAlerts } from './host-resources'
 import { isNodeIcon, isNodeType, type NodeAppearance, type NodeIcon, type NodeProfile, type NodeType } from './node-types'
-import { useServiceCatalog } from './service-catalog'
+import { useRemoteDirectoryReads, useServiceCatalog } from './service-catalog'
 
 export type Platform = { os: string; architecture: string; process_backend: string; docker: string; file_security: string }
 export type NodeInfo = { node_id: string; platform?: Platform; deployment_host?: DeploymentHost; package_checksums_sha256?: string; build?: {
@@ -186,10 +186,11 @@ function useConsoleData(session: Session, onUnauthorized: () => void, preference
     const timer = setTimeout(() => refreshDirectory((value) => value + 1), Math.max(0, directory.directoryExpiresAt - Date.now()))
     return () => clearTimeout(timer)
   }, [directory.directoryExpiresAt])
-  const mesh = usePoll<{ peers: Peer[]; directories: NodeDirectory[] }>(admin ? '/mesh/overview' : null, onUnauthorized)
-  const peers = { data: mesh.data?.peers, requestedAt: mesh.requestedAt, error: mesh.error }
-  const catalog = useServiceCatalog(mesh.data?.directories, mesh.data?.peers, `${session.username}/${realmId ?? ''}`)
-  const remoteCatalog = { data: catalog, requestedAt: mesh.requestedAt, error: mesh.error }
+  // Link health must not wait for every remote service catalog to answer.
+  const peers = usePoll<Peer[]>(admin ? '/peers?watch=true' : null, onUnauthorized)
+  const directories = useRemoteDirectoryReads(admin ? peers.data : undefined, session, onUnauthorized, `${session.username}/${realmId ?? ''}`)
+  const catalog = useServiceCatalog(directories.data, peers.data, `${session.username}/${realmId ?? ''}`)
+  const remoteCatalog = { data: catalog, requestedAt: directories.requestedAt, error: directories.error }
   const peerEvidence = usePeerEvidence(peers)
   const services = usePoll<Service[]>(admin ? '/services' : null, onUnauthorized)
   const metrics = usePoll<Metrics>(admin ? '/metrics' : null, onUnauthorized)

@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError, timestamp } from './api'
 import { useConsole, type Metrics, type NodeView } from './console-data'
 import { hostSampleCurrent } from './host-resources'
 import { workspace, workspaceError } from './workspace-api'
 import { bytes } from './ui'
+import { resourcePoll } from './node-resource-poll'
 
 export type NodeResourceSample = { metrics?: Metrics; error?: string; receivedAt: number }
 
@@ -12,16 +13,16 @@ export function useNodeResources(nodes: NodeView[], enabled: boolean) {
   const { session, onUnauthorized, local, metrics, admin, grove } = useConsole()
   const scope = `${local.data?.node_id}/${grove.data?.realm?.id}/${session.csrf_token}`
   const targets = JSON.stringify(enabled && admin && grove.data?.configured ? nodes.filter(node => !node.local && node.status === 'online').map(node => node.id).sort() : [])
+  const targetIds = useRef<string[]>([])
+  targetIds.current = JSON.parse(targets)
+  const polling = useRef<ReturnType<typeof resourcePoll> | null>(null)
   const [collected, setCollected] = useState<{ scope: string; samples: Record<string, NodeResourceSample> }>({ scope: '', samples: {} })
   useEffect(() => {
-    const ids = JSON.parse(targets) as string[]
-    if (!ids.length) return
-    const controller = new AbortController(), retryAt = new Map<string, number>()
-    let timer: number, flushTimer: number | undefined, running = false
+    let flushTimer: number | undefined, stopped = false
     let pending: Record<string, NodeResourceSample> = {}
     function flush() {
       clearTimeout(flushTimer); flushTimer = undefined
-      if (controller.signal.aborted || !Object.keys(pending).length) return
+      if (stopped || !Object.keys(pending).length) return
       const updates = pending; pending = {}
       setCollected(previous => {
         const samples = previous.scope === scope ? { ...previous.samples } : {}
@@ -30,38 +31,28 @@ export function useNodeResources(nodes: NodeView[], enabled: boolean) {
         return { scope, samples }
       })
     }
-    async function cycle() {
-      if (running || controller.signal.aborted) return
-      clearTimeout(timer)
-      if (document.visibilityState === 'hidden') { timer = window.setTimeout(() => void cycle(), 5000); return }
-      running = true
-      const queue = ids.filter(id => (retryAt.get(id) ?? 0) <= Date.now())
-      async function worker() {
-        while (queue.length && !controller.signal.aborted && document.visibilityState !== 'hidden') {
-          const id = queue.shift()!
-          try {
-            const host = await workspace<{ node_id: string; metrics: Metrics }>(id, session, 'host', {}, controller.signal)
-            if (controller.signal.aborted) return
-            if (host.node_id !== id || !host.metrics) throw new Error('No matching host sample')
-            pending[id] = { metrics: host.metrics, receivedAt: Date.now() }
-            retryAt.set(id, Date.now() + 5000)
-          } catch (error) {
-            if (controller.signal.aborted) return
-            if (error instanceof ApiError && error.status === 401) onUnauthorized()
-            pending[id] = { error: workspaceError(error), receivedAt: Date.now() }
-            retryAt.set(id, Date.now() + 15000)
-          }
-          flushTimer ??= window.setTimeout(flush, 100)
-        }
+    const poll = resourcePoll(async (id, signal) => {
+      let retry = 5000
+      try {
+        const host = await workspace<{ node_id: string; metrics: Metrics }>(id, session, 'host', {}, signal)
+        if (signal.aborted || stopped) return retry
+        if (host.node_id !== id || !host.metrics) throw new Error('No matching host sample')
+        pending[id] = { metrics: host.metrics, receivedAt: Date.now() }
+      } catch (error) {
+        if (signal.aborted || stopped) return retry
+        if (error instanceof ApiError && error.status === 401) onUnauthorized()
+        pending[id] = { error: workspaceError(error), receivedAt: Date.now() }
+        retry = 15000
       }
-      try { await Promise.all(Array.from({ length: Math.min(4, queue.length) }, () => worker())) }
-      finally { running = false; flush(); if (!controller.signal.aborted) timer = window.setTimeout(() => void cycle(), 5000) }
-    }
-    const visible = () => { if (document.visibilityState === 'visible') void cycle() }
-    document.addEventListener('visibilitychange', visible)
-    void cycle()
-    return () => { controller.abort(); clearTimeout(timer); clearTimeout(flushTimer); document.removeEventListener('visibilitychange', visible) }
-  }, [scope, targets, session, onUnauthorized])
+      flushTimer ??= window.setTimeout(flush, 100)
+      return retry
+    }, () => document.visibilityState === 'visible')
+    polling.current = poll
+    poll.setTargets(targetIds.current)
+    document.addEventListener('visibilitychange', poll.resume)
+    return () => { stopped = true; poll.close(); polling.current = null; clearTimeout(flushTimer); document.removeEventListener('visibilitychange', poll.resume) }
+  }, [scope, session, onUnauthorized])
+  useEffect(() => { polling.current?.setTargets(targetIds.current) }, [targets])
   const samples = new Map<string, NodeResourceSample>(collected.scope === scope ? Object.entries(collected.samples) : [])
   if (local.data) samples.set(local.data.node_id, { metrics: metrics.data, error: metrics.error || undefined, receivedAt: Date.now() })
   return samples
