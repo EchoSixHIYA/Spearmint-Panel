@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { ApiError, api, usePoll } from './api'
 import { useConsole, refreshConsole } from './console-data'
-import { Notice, Panel, shortId } from './ui'
+import { Badge, Icon, Panel, shortId } from './ui'
 
 type Candidate = { tag: string; commit: string }
 type NodeProgress = { status: string; reason?: string }
@@ -27,7 +27,7 @@ const reasons: Record<string, string> = {
 }
 
 export function GroveUpdatePanel() {
-  const { session, onUnauthorized, memberNodes, nodes } = useConsole()
+  const { session, onUnauthorized, listedNodes, local, localName, grove } = useConsole()
   const [candidate, setCandidate] = useState<Candidate>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
@@ -35,7 +35,17 @@ export function GroveUpdatePanel() {
   const status = usePoll<Update>('/grove/updates', onUnauthorized, 4000)
   const batch = status.data?.job ? status.data : undefined
   const active = batch && Object.values(batch.nodes).some(row => !['succeeded', 'failed', 'unsupported', 'expired'].includes(row.status))
-  const names = new Map((memberNodes ?? nodes).map(node => [node.id, node.name]))
+  const names = new Map(listedNodes.map(node => [node.id, node.name]))
+  const rows = Object.entries(batch?.nodes ?? {}).sort(([a], [b]) =>
+    (names.get(a) ?? a).localeCompare(names.get(b) ?? b, 'zh-CN') || a.localeCompare(b))
+  const completed = rows.filter(([, row]) => row.status === 'succeeded').length
+  const failed = rows.filter(([, row]) => ['failed', 'unsupported', 'expired'].includes(row.status)).length
+  const currentCommit = local.data?.build?.commit
+  const currentVersion = candidate && candidate.commit === currentCommit ? candidate.tag
+    : batch && batch.release.commit === currentCommit ? batch.release.tag
+      : local.data?.build?.version ? `v${local.data.build.version}` : '—'
+  const configured = !!grove.data?.realm
+  const offered = candidate && (!active || candidate.commit !== batch?.release.commit)
 
   async function perform(action: () => Promise<void>) {
     if (busy) return
@@ -55,16 +65,18 @@ export function GroveUpdatePanel() {
     }
   }
 
-  return <Panel title="Grove 群组更新" action={<button type="button" className="btn btn-secondary" disabled={busy}
+  return <Panel className="maintenance-update" title="Grove 群组更新" action={<button type="button" className="btn btn-secondary" disabled={busy || !configured}
     onClick={() => void perform(async () => {
       setCandidate(undefined)
       const result = await api<{ release: Candidate | null }>('/grove/updates/release', { signal: AbortSignal.timeout(90_000) })
       if (result.release) setCandidate({ tag: result.release.tag, commit: result.release.commit })
       else setMessage('暂未找到可用的已签名发布。可稍后重试。')
-    })}>{busy ? '处理中…' : '检查更新'}</button>}>
-    {message && <Notice tone={error ? 'amber' : undefined}>{message}</Notice>}
-    {candidate && <div className="stack">
-      <p>可用发布 {candidate.tag} · {candidate.commit.slice(0, 8)}</p>
+    })}><Icon name="refresh" size={14} />{busy ? '处理中…' : '检查更新'}</button>}>
+    <div className="maintenance-installed"><span>当前面板 <strong>{localName}</strong></span><span>已安装 <strong>{currentVersion}</strong></span></div>
+    {!configured && <p className="maintenance-feedback">加入或创建 Grove 后可使用群组更新。</p>}
+    {message && <p className={`maintenance-feedback ${error ? 'error' : 'muted'}`} role={error ? 'alert' : 'status'}>{message}</p>}
+    {offered && <div className="maintenance-offer">
+      <div><strong>{candidate.tag}</strong><span className="muted">{candidate.commit === currentCommit ? '本机已是此版本，可继续更新其他节点' : '可用更新'}</span></div>
       <button type="button" className="btn btn-primary" disabled={busy || !!active} onClick={() => void perform(async () => {
         await api<Update>('/grove/updates', {
           method: 'POST',
@@ -73,16 +85,20 @@ export function GroveUpdatePanel() {
         })
         setCandidate(undefined)
         refreshConsole()
-      })}>更新当前 Grove 节点</button>
+      })}><Icon name="download" size={14} />更新 Grove 节点</button>
     </div>}
-    {batch && <div className="stack">
-      <p>更新目标 {batch.release.tag} · {batch.release.commit.slice(0, 8)}</p>
-      <dl className="facts">{Object.entries(batch.nodes).map(([node, row]) => <div key={node}>
-        <dt>{names.get(node) ?? shortId(node)}</dt>
-        <dd>{row.reason && ['already_current', 'already_current_unmanaged'].includes(row.reason) ? '已是此版本' : statusLabels[row.status] ?? row.status}
-          {row.reason && reasons[row.reason] ? ' · ' + reasons[row.reason] : ''}</dd>
-      </div>)}</dl>
+    {batch && <div className="maintenance-progress">
+      <div className="maintenance-batch"><strong>{active ? '正在更新' : '最近更新'} <span>{batch.release.tag}</span></strong>
+        <span className="muted">{completed} / {rows.length} 已完成{failed > 0 && ` · ${failed} 项需处理`}</span></div>
+      <div className="table-wrap"><table className="data-table maintenance-table"><thead><tr><th>节点</th><th>更新状态</th></tr></thead>
+        <tbody>{rows.map(([node, row]) => <tr key={node}>
+          <td><a className="text-link" href={`#/nodes/${node}`}>{names.get(node) ?? shortId(node)}</a>{node === local.data?.node_id && <span className="maintenance-local">本机</span>}</td>
+          <td><Badge tone={row.status === 'succeeded' ? 'green' : ['failed', 'unsupported', 'expired'].includes(row.status) ? 'red' : 'amber'}>
+            {row.reason && ['already_current', 'already_current_unmanaged'].includes(row.reason) ? '已是此版本' : statusLabels[row.status] ?? '等待确认'}</Badge>
+            {row.reason && reasons[row.reason] && <span className="maintenance-reason">{reasons[row.reason]}</span>}</td>
+        </tr>)}</tbody></table></div>
     </div>}
-    {status.error && <Notice tone="amber">正在等待面板恢复连接。</Notice>}
+    {!batch && !offered && configured && !message && <p className="maintenance-feedback muted">{status.error ? '暂时无法读取更新记录，正在自动重试。'
+      : status.data ? '检查可用版本后，即可向 Grove 节点发起更新。' : '正在读取更新记录…'}</p>}
   </Panel>
 }

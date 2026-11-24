@@ -182,7 +182,7 @@ function MemberDirectoryNotice() {
     {(syncRealmId || canCompare) && <div className="button-row">
       {syncRealmId && <button type="button" className="btn btn-secondary btn-small" disabled={checking}
         onClick={() => void sync()}><Icon name="refresh" size={14} />{checking ? '正在同步成员目录…' : '同步成员目录'}</button>}
-      {canCompare && <a className="text-link" href="#/deployments">核对各面板版本与成员目录<Icon name="arrow-right" size={14} /></a>}
+      {canCompare && <a className="text-link" href="#/maintenance">查看平台更新<Icon name="arrow-right" size={14} /></a>}
     </div>}
     {message && <p className={message.error ? 'error' : 'muted'} role="status">{message.text}</p>}
   </div>

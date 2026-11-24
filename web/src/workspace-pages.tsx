@@ -58,7 +58,7 @@ export function NodeInspector({ nodeId, onSave, embedded = false, initialTab }: 
     {tab === 'services' && <ServiceList key={selected.id} initialNode={selected.id} embedded />}
     {tab === 'network' && <Panel title="网络路径">{selected.local ? <p className="muted">这是当前节点，可在拓扑中选择其他节点查看连接路径。</p> : <TopologyPaths key={selected.id} node={selected} />}</Panel>}
     {tab === 'resources' && (online ? <NodeSample target={selected.local ? 'local' : selected.id} full /> : <Notice tone="amber">目标节点当前不可达，等待连接恢复后读取真实采样。</Notice>)}
-    {tab === 'version' && <Panel title="版本与资源核对"><p>通过 Mesh 在当前面板核对目标节点版本。</p><a className="btn btn-primary" href={`#/maintenance/${selected.id}`}>核对节点版本</a></Panel>}
+    {tab === 'version' && <Panel title="版本与更新"><p>查看目标节点版本和群组更新结果。</p><a className="btn btn-primary" href={`#/maintenance/${selected.id}`}>查看版本与更新</a></Panel>}
   </>
 }
 

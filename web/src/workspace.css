@@ -21,6 +21,35 @@
 .console-page-content{flex:1;min-width:0}
 .topbar,.app-footer{flex-shrink:0}
 .workspace-service-table th { text-align: center; }
+.maintenance-update .panel-head .btn { min-height: 32px; padding: 7px 12px; }
+.maintenance-installed { display: flex; flex-wrap: wrap; gap: 8px 28px; color: var(--muted); font-size: 12px; }
+.maintenance-installed strong { margin-left: 6px; color: var(--ink); font-weight: 600; }
+.maintenance-feedback { margin: 14px 0 0; font-size: 12px; }
+.maintenance-offer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-top: 16px; padding: 12px 14px; border: 1px solid var(--edge); border-radius: 9px; background: #f4f8f3; }
+.maintenance-offer > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 14px; font-size: 12px; }
+.maintenance-progress { margin-top: 20px; }
+.maintenance-batch { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; font-size: 12px; }
+.maintenance-batch strong { font-weight: 600; }
+.maintenance-batch strong span { margin-left: 7px; }
+.maintenance-table th { text-align: center; }
+.maintenance-table th:first-child { width: 40%; }
+.maintenance-table th:nth-child(2) { width: 60%; }
+.maintenance-table td { padding-top: 10px; padding-bottom: 10px; }
+.maintenance-table td:nth-child(2) { text-align: center; }
+.maintenance-reason { margin-left: 12px; font-size: 11px; color: var(--muted); }
+.maintenance-local { margin-left: 8px; color: var(--muted); font-size: 10px; }
+.maintenance-target { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; padding-top: 14px; padding-bottom: 14px; font-size: 12px; }
+.maintenance-target > .icon { color: var(--green); }
+.maintenance-target-version { color: var(--muted); }
+.maintenance-target > .text-link { margin-left: auto; }
+@media (max-width: 600px) {
+  .maintenance-update { padding: 16px; }
+  .maintenance-installed { flex-direction: column; gap: 6px; overflow-wrap: anywhere; }
+  .maintenance-table { min-width: 0; table-layout: fixed; white-space: normal; overflow-wrap: anywhere; }
+  .maintenance-table td, .maintenance-table th { padding-left: 8px; padding-right: 8px; }
+  .maintenance-reason { display: block; margin: 5px 0 0; }
+  .maintenance-offer .btn { width: 100%; }
+}
 .service-row-actions { display: flex; flex-direction: column; align-items: center; gap: 5px; }
 .service-action-icons { display: inline-flex; align-items: center; gap: 6px; }
 .service-action-icons .icon-button { width: 32px; min-width: 32px; height: 32px; border: 1px solid var(--edge); background: #fff; }
