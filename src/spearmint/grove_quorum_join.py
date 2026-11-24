@@ -5,7 +5,7 @@ import socket
 import time
 from urllib.parse import urlsplit
 
-from . import auth, grove, grove_admission, grove_continuity, grove_login, grove_web_join, mesh_enrollment, onboarding
+from . import auth, grove, grove_admission, grove_continuity, grove_login, grove_voters, grove_web_join, mesh_enrollment, onboarding
 from .peer import quarantine
 from .peer.mesh_policy import member_allowed
 from .peer.protocol import PeerError, decode_json, parse_b64, wire_b64
@@ -35,6 +35,8 @@ def invitation(state, policy):
             return None
         contents = {'realm':grove.realm_data(realm), 'anchor':envelope,
                     'manifest':json.loads(realm['manifest']), 'mesh':policy.core}
+        if governance := grove_voters.history(db):
+            contents['governance'] = governance
     code = PREFIX + wire_b64(grove.encoded(contents))
     if len(code) > LIMIT:
         raise PeerError('LIMIT', 'Grove invitation exceeds the panel limit')
@@ -46,14 +48,19 @@ def read_invitation(code):
         if not code.startswith(PREFIX) or len(code) > LIMIT:
             raise ValueError
         data = decode_json(parse_b64(code[len(PREFIX):], LIMIT))
-        if data.keys() != {'realm', 'anchor', 'manifest', 'mesh'}:
+        if data.keys() not in ({'realm', 'anchor', 'manifest', 'mesh'}, {'realm', 'anchor', 'manifest', 'mesh', 'governance'}):
             raise ValueError
         realm = grove.invitation(data['realm'])
         key = parse_b64(realm['public_key'], 32)
         directory = grove.directory_data(data['manifest'], realm, allow_expired=True)
         anchor = grove_continuity.snapshot_authorization(realm | {'public_key':key}, directory, data['anchor'], 'login-continuity')
+        anchor = grove_voters.history_anchor(anchor, data.get('governance'))
         policy = mesh_enrollment.read_policy({'policy':data['mesh'], 'bind_ip':None, 'trusted_proxy':False})
         origins = {member['node_id']:member['origin'] for member in directory['members'] if member['enabled']}
+        if anchor.get('_version'):
+            if policy.core != anchor['_policy']:
+                raise ValueError
+            origins.update({entry['node_id']:entry['origin'] for entry in anchor['_policy']['voters']})
         if (policy.realm != realm['id'] or policy.voters.keys() != set(anchor['voters']) or any(
             voter.origin != origins.get(voter.node) or not grove_web_join.browser_origin(voter.origin)
             for voter in policy.voters.values()

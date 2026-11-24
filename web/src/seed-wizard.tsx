@@ -1,16 +1,18 @@
 import { useEffect, useEffectEvent, useRef, useState, type FormEvent } from 'react'
-import { ApiError, api } from './api'
+import { ApiError, api, usePoll } from './api'
 import { useConsole } from './console-data'
 import { NetworkMap } from './network-map'
 import { Icon, Loading, Notice, Panel } from './ui'
 import './seed-wizard.css'
+import type { VoterStatus } from './grove-voters'
 
 type Job = { source: string; id: string }
 type Directory = { parent: string | null; writable: boolean; free: number | null; truncated: boolean;
   items: Array<{ name: string; path: string }> }
 type SeedView = { status: string; fingerprint?: string; platform?: string; package?: { name: string; size: number; commit: string; host_services?: number };
   path?: string; directory?: Directory; install?: string; state?: string; origin?: string; node_id?: string; error?: string
-  failed_stage?: string; failure_detail?: string; failure_phase?: string; failure_exit?: number; host_services_supported?: boolean }
+  failed_stage?: string; failure_detail?: string; failure_phase?: string; failure_exit?: number; host_services_supported?: boolean;
+  voting_supported?: boolean; voting_requested?: boolean; voter_job?: string; voter_status?: string; voter_reason?: string }
 
 const progress: Record<string, string> = {
   'host-check': '正在核对 SSH 主机身份…', 'ssh-login': '正在测试 SSH 登录并读取系统信息…',
@@ -76,6 +78,8 @@ export function SeedWizard({ follow, sourceId }: { follow: (origin: string, node
   const [key, setKey] = useState(false)
   const [hostServices, setHostServices] = useState(true)
   const [hostPassword, setHostPassword] = useState('')
+  const [voting, setVoting] = useState(false)
+  const voters = usePoll<VoterStatus>('/grove/voters', onUnauthorized)
   const polling = useRef(false)
 
   async function request(target: Job, action: string, body: object = {}) {
@@ -98,7 +102,7 @@ export function SeedWizard({ follow, sourceId }: { follow: (origin: string, node
     finally { polling.current = false }
   })
   useEffect(() => {
-    if (!job || busy || view && !progress[view.status] && !error) return
+    if (!job || busy || view && !progress[view.status] && view.voter_status !== 'pending' && !error) return
     const timer = window.setInterval(() => void poll(job), 1800)
     return () => window.clearInterval(timer)
   }, [job, view, busy, error])
@@ -183,8 +187,12 @@ export function SeedWizard({ follow, sourceId }: { follow: (origin: string, node
           {hostServices && view.host_services_supported && view.package?.host_services !== 1 && <Notice tone="amber">当前部署包尚不包含主机服务管理，需要包含此能力的新版发布。关闭此选项仍可播种普通面板。</Notice>}
           {hostServices && view.host_services_supported && <details><summary>使用不同的主机管理员密码</summary><label className="field-label">sudo 密码<input type="password" className="input" autoComplete="new-password" value={hostPassword} onChange={event => setHostPassword(event.target.value)} /></label></details>}
         </div>}
+        <label className="checkbox-row"><input type="checkbox" checked={voting} disabled={!view.voting_supported || busy}
+          onChange={event => setVoting(event.target.checked)} />加入后参与 Grove 投票</label>
+        {voting && <p className="muted tiny">先同步权限，再自动取得新旧多数成员确认。适合长期在线的节点；关闭页面后仍会继续。</p>}
+        {!view.voting_supported && <p className="muted tiny">升级发起节点后，可在播种时设置投票资格。</p>}
         <div><button className="btn btn-primary" type="button" disabled={busy || view.status !== 'choose' || !directory.writable || !!(view.platform?.startsWith('linux') && hostServices && (!view.host_services_supported || view.package?.host_services !== 1))}
-          onClick={() => { const options = view.platform?.startsWith('linux') ? { host_services: hostServices, host_password: hostPassword } : {}; setHostPassword(''); void send(job, 'install', { path: view.path, ...options }) }}>安装到此位置</button></div>
+          onClick={() => { const options = view.platform?.startsWith('linux') ? { host_services: hostServices, host_password: hostPassword } : {}; setHostPassword(''); void send(job, 'install', { path: view.path, voting, ...options }) }}>安装到此位置</button></div>
       </div>}
       {view?.error && <div className="error" role="alert">
         <p>{problems[view.error] || '播种操作尚未完成。'}{view.node_id && ` 节点 ID · ${view.node_id}`}</p>
@@ -199,6 +207,7 @@ export function SeedWizard({ follow, sourceId }: { follow: (origin: string, node
       </Notice>}
       {error && <p className="error" role="alert">{error}</p>}
       {view?.status === 'joined' && <Notice title="Spearmint 已启动并加入 Grove">
+        {view.voting_requested && <p>{voters.data?.voters.includes(view.node_id || '') ? '已成为投票节点。' : view.voter_reason || '正在同步权限并申请投票资格；完成后会自动更新，无需手动配对。'}</p>}
         {view.origin && <button className="btn btn-secondary" onClick={() => follow(view.origin!, view.node_id)}>查看 Mesh 接入状态</button>}
       </Notice>}
       {job && !busy && (!view || !['installing', 'admitting'].includes(view.status)) &&

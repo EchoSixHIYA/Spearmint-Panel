@@ -5,7 +5,7 @@ import time
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from . import auth, grove, grove_revocation
+from . import auth, grove, grove_revocation, grove_voters
 from .peer.credentials import node_id
 from .peer.protocol import PeerError, parse_b64, wire_b64
 from .state import State, audit
@@ -43,6 +43,7 @@ def approve(state: State, actor: auth.Actor, subject: str, role: str) -> tuple[d
     with state.connect(write=True) as db:
         from . import grove_availability
         grove_availability.require_current(db)
+        grove_voters.require_unlocked(db)
         now = int(time.time())
         session = auth.active_session(db, actor.token_hash, now)
         if (session is None or session['id'] != actor.account_id or not session['grove_replica'] or session['role'] != ADMIN):
@@ -61,7 +62,7 @@ def approve(state: State, actor: auth.Actor, subject: str, role: str) -> tuple[d
             raise PeerError('CONFLICT', 'Choose a different role. Grove administrators require MFA')
         key = state.signing_key()
         payload = {'anchor': digest, 'user_id': subject, 'generation': generation, 'role': role,
-                   'public_key': wire_b64(key.public_key().public_bytes_raw())}
+                   'public_key': wire_b64(key.public_key().public_bytes_raw()), **grove_voters.stamp(anchor)}
         vote = grove.signed(KIND, payload, key)
         db.execute('''INSERT INTO grove_login_role_vote VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET
                       generation=excluded.generation,ballot=excluded.ballot''', (subject, generation, json.dumps(vote)))
@@ -95,6 +96,8 @@ def validate(vote: dict, digest: str, anchor: dict, users: list[dict]) -> tuple[
         public = parse_b64(raw['public_key'], 32)
         voter = node_id(Ed25519PublicKey.from_public_bytes(public))
         data = grove.verified(KIND, vote, public, 1024)
+        anchor = grove_voters.verification(anchor, [vote])
+        data = grove_voters.unstamp(data)
         subject, generation, role = data['user_id'], data['generation'], data['role']
         profile = subject_profile(users, subject)
         if (voter not in anchor['voters'] or data.keys() != {'anchor', 'user_id', 'generation', 'role', 'public_key'}
@@ -107,6 +110,7 @@ def validate(vote: dict, digest: str, anchor: dict, users: list[dict]) -> tuple[
 
 
 def install(db, certificate: list[dict], digest: str, anchor: dict, users: list[dict], source: str) -> bool:
+    anchor = grove_voters.verification(anchor, certificate, certificate=certificate)
     if not isinstance(certificate, list) or not len(anchor['voters']) // 2 < len(certificate) <= len(anchor['voters']):
         raise PeerError('DENIED', 'A majority of Grove members must approve this role')
     ballots = [validate(vote, digest, anchor, users) for vote in certificate]
@@ -115,6 +119,9 @@ def install(db, certificate: list[dict], digest: str, anchor: dict, users: list[
     if len(approvals) != len(ballots) or len(proposals) != 1:
         raise PeerError('DENIED', 'Grove role approvals refer to different changes')
     subject, generation, role = proposals.pop()
+    previous = db.execute('SELECT generation FROM grove_login_role WHERE user_id=?', (subject,)).fetchone()
+    if previous is None or previous['generation'] < generation:
+        grove_voters.require_unlocked(db)
     changed = db.execute('''INSERT INTO grove_login_role VALUES (?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET
                             generation=excluded.generation,role=excluded.role,certificate=excluded.certificate
                             WHERE excluded.generation>grove_login_role.generation''',
@@ -137,6 +144,7 @@ def apply(state: State, certificates: list, source: str, authorize=None) -> int:
 
 def collect(state: State, proposal: dict, replies: list[dict]) -> tuple[dict, list[dict]]:
     with state.connect(write=True) as db:
+        grove_voters.require_unlocked(db)
         digest, anchor, users = grove_revocation.current_context(db)
         own, subject, generation, role = validate(proposal, digest, anchor, users)
         current = db.execute('SELECT generation FROM grove_login_role WHERE user_id=?', (subject,)).fetchone()

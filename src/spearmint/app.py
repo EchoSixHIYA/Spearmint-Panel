@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, grove, grove_updates, grove_admission, grove_login, grove_metadata, grove_password, grove_quorum_join, grove_web_join, mesh_enrollment, onboarding, passkeys, seed_admission, seed_wizard
+from . import auth, grove, grove_updates, grove_admission, grove_login, grove_metadata, grove_password, grove_quorum_join, grove_voters, grove_voter_service, grove_web_join, mesh_enrollment, onboarding, passkeys, seed_admission, seed_wizard
 from .build_info import deployment_host, deployment_web, running_build
 from .catalog import RegistrationError, TargetAlreadyRegistered, get_service, list_services
 from .config import Config
@@ -177,6 +177,12 @@ class PasskeyResponse(FactorFlow):
 class LocalQuarantine(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     reason: str = Field(min_length=1, max_length=160)
+
+
+class VoterChange(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    voting: bool
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
 
 
 class FrpStart(BaseModel):
@@ -377,6 +383,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                           advertise_port=config.mesh_advertise_port)
     peers = remote.manager
     remote.grove_config = config
+    voter_service = grove_voter_service.VoterService(store, remote, config)
+    remote.voter_service = voter_service
     remote.seed_deployments = seeds
     wizard = seed_wizard.SeedWizard(store, remote)
     remote.seed_wizard = wizard
@@ -408,9 +416,10 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                 if pending_seed is not None:
                     await seed_admission.finish(store, config, remote, pending_seed)
                 else:
-                    policy = enrollment_policy or await run_in_threadpool(mesh_enrollment.load_policy, store)
+                    policy = await run_in_threadpool(mesh_enrollment.load_policy, store)
                     if policy and policy.bind_ip:
                         remote.manager.use_system_egress = True
+                        await run_in_threadpool(mesh_enrollment.activate_voter, store, policy)
                         await run_in_threadpool(mesh_enrollment.enroll, store, config, policy)
             except (PeerError, StateError, OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
                 logging.getLogger(__name__).debug('Mesh enrollment deferred: %s', error)
@@ -423,12 +432,14 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             async with remote.running():
                 task = asyncio.create_task(synchronize_enrollment())
                 rollout = asyncio.create_task(updates.run())
+                voter_jobs = asyncio.create_task(voter_service.run())
                 try:
                     yield
                 finally:
                     task.cancel()
                     rollout.cancel()
-                    await asyncio.gather(task, rollout, return_exceptions=True)
+                    voter_jobs.cancel()
+                    await asyncio.gather(task, rollout, voter_jobs, return_exceptions=True)
                     wizard.shutdown()
                     await run_in_threadpool(remote.service_setup.host_authorization.shutdown)
                     await run_in_threadpool(deployments.shutdown)
@@ -508,7 +519,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
 
     @app.post('/api/v1/mesh/enrollment/{action}')
     def mesh_enroll(action: Literal['vote','issue','register'], request: Request, body: dict = Depends(grove_body)):
-        policy = enrollment_policy
+        policy = mesh_enrollment.load_policy(store)
         if policy is None or node_id not in policy.voters:
             raise PeerError('NOT_FOUND', 'This panel does not issue Mesh certificates')
         fields = {'request'}
@@ -601,6 +612,16 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         return await remote.retire_grove_issuer(actor, config.grove_continuity_voters or config.grove_login_replicas,
                                                selected=bool(config.grove_continuity_voters))
 
+    @app.get('/api/v1/grove/voters')
+    def grove_voter_status(_actor: auth.Actor = Depends(require_actor)):
+        return grove_voters.status(store)
+
+    @app.post('/api/v1/grove/voters/{member_id}')
+    async def change_grove_voter(member_id: str, body: VoterChange, actor: auth.Actor = Depends(require_admin_write)):
+        if not re.fullmatch(r'spm1-[a-f0-9]{64}', member_id):
+            raise PeerError('INVALID_REQUEST', 'Invalid Grove member')
+        return await voter_service.request(actor, member_id, body.voting, body.request_id)
+
     @app.get('/api/v1/grove/node-notes')
     def grove_node_notes(_actor: auth.Actor = Depends(require_actor)):
         return grove_metadata.notes(store)
@@ -661,6 +682,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
 
     @app.post('/api/v1/auth/grove/quorum-join/{action}')
     def grove_quorum_join_action(action: str, request: Request, data: dict = Depends(grove_body)):
+        enrollment_policy = mesh_enrollment.load_policy(store)
         if enrollment_policy is None:
             raise PeerError('OFFLINE', 'Grove quorum admission is unavailable')
         if action == 'vote' and data.keys() == {'request', 'credentials'}:
@@ -702,7 +724,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             raise PeerError('INVALID_REQUEST', 'Invalid seed wizard request')
         body = await read_grove_body(request, 13 * 1024)
         fields = {'start': {'connection'}, 'verify': {'fingerprint'}, 'directory': {'path'}, 'install': {'path'}, 'status': set()}
-        if body.keys() != fields[action]:
+        optional = {'host_services', 'host_password', 'voting'} if action == 'install' else set()
+        if not fields[action] <= body.keys() or body.keys() - fields[action] - optional:
             raise PeerError('INVALID_REQUEST', 'Invalid seed wizard request body')
         pair = None if source == node_id else remote.pair_for(source)
         try:
@@ -817,8 +840,9 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         if not info['configured'] or info['frozen'] or info['issuer_paused']:
             raise PeerError('OFFLINE', 'Grove browser invitations are unavailable')
         if info.get('issuer_retired'):
-            if enrollment_policy is not None and node_id in enrollment_policy.voters:
-                code = await run_in_threadpool(grove_quorum_join.invitation, store, enrollment_policy)
+            current_policy = await run_in_threadpool(mesh_enrollment.load_policy, store)
+            if current_policy is not None and node_id in current_policy.voters:
+                code = await run_in_threadpool(grove_quorum_join.invitation, store, current_policy)
                 if code is not None:
                     return {'code': code}
             return {'code': await run_in_threadpool(grove_admission.invitation_code, store)}

@@ -72,35 +72,48 @@ def load_policy(state: State) -> Policy | None:
         return None
     if path.stat().st_size > 32768:
         raise ValueError('Mesh enrollment policy is too large')
-    return read_policy(decode_json(path.read_bytes()))
+    settings = decode_json(path.read_bytes())
+    # The on-disk bootstrap is immutable; committed membership overrides it
+    # transactionally, so a crash cannot leave identity and Mesh rosters apart.
+    with state.connect(read_only=True) as db:
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='grove_voter_configuration'").fetchone():
+            latest = db.execute('SELECT document FROM grove_voter_configuration ORDER BY version DESC LIMIT 1').fetchone()
+            if latest:
+                import json
+                settings['policy'] = json.loads(latest[0])['certificate']['proposal']['policy']
+    return read_policy(settings)
 
 
 def read_policy(data: dict) -> Policy:
     if data.keys() != {'policy','bind_ip','trusted_proxy'} or type(data['trusted_proxy']) is not bool:
         raise ValueError('Invalid Mesh enrollment policy settings')
     core = data['policy']
-    if (not isinstance(core, dict) or core.keys() != POLICY_FIELDS or not RANDOM_ID.fullmatch(core['mesh_id'])
+    if (not isinstance(core, dict) or core.keys() not in (POLICY_FIELDS, POLICY_FIELDS | {'retired_ca'}) or not RANDOM_ID.fullmatch(core['mesh_id'])
             or not core['realm_id'].startswith('grv1-') or not RANDOM_ID.fullmatch(core['realm_id'][5:])
             or not isinstance(core['voters'], list) or not 3 <= len(core['voters']) <= 7):
         raise ValueError('Invalid Mesh enrollment policy')
     old_ca = certificate(core['legacy_ca'].encode())
     validate_ca(old_ca)
+    retired = tuple(certificate(pem.encode()) for pem in core.get('retired_ca', []))
+    for root in retired:
+        validate_ca(root)
+    authorities = tuple(certificate(entry['ca'].encode()) for entry in core['voters'])
+    roots = (old_ca, *retired, *authorities)
+    if len({fingerprint(root) for root in roots}) != len(roots):
+        raise ValueError('Each Mesh authority must be unique')
     voters = {}
     for entry in core['voters']:
         if (entry.keys() != {'node_id','origin','host','address','port','leaf','ca'} or
                 not NODE_ID.fullmatch(entry['node_id']) or not 1024 <= entry['port'] <= 65535):
             raise ValueError('Invalid Mesh voter')
         leaf, authority = (certificate(entry[key].encode()) for key in ('leaf','ca'))
-        validate_leaf(leaf, old_ca, entry['node_id'], entry['host'])
+        validate_mesh_leaf(leaf, roots, entry['node_id'], entry['host'])
         validate_ca(authority)
         voter = Voter(entry['node_id'], grove.origin(entry['origin']), entry['host'],
                       fixed_mesh_ip(entry['address']), entry['port'], leaf, authority)
         if voter.node in voters or any(other.origin == voter.origin for other in voters.values()):
             raise ValueError('Duplicate Mesh voter')
         voters[voter.node] = voter
-    roots = (old_ca, *(voter.authority for voter in voters.values()))
-    if len({fingerprint(root) for root in roots}) != len(roots):
-        raise ValueError('Each Mesh voter requires an independent signing authority')
     bind = fixed_mesh_ip(data['bind_ip']) if data['bind_ip'] else None
     return Policy(sha256(grove.encoded(core)).hexdigest(), core['realm_id'], core['mesh_id'], roots, voters, bind,
                   data['trusted_proxy'], core)

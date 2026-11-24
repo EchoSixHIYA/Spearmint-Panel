@@ -4,7 +4,7 @@ import json
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from . import grove, grove_availability, grove_revocation
+from . import grove, grove_availability, grove_revocation, grove_voters
 from .peer.credentials import node_id
 from .peer.protocol import PeerError, parse_b64, wire_b64
 
@@ -41,6 +41,7 @@ def ballot(state, kind, document, actor: str, requester: str | None = None):
     with state.connect(read_only=True) as db:
         db.execute('BEGIN')
         grove_availability.require_current(db)
+        grove_voters.require_unlocked(db)
         digest, anchor, users = grove_revocation.current_context(db, requester)
         local = state.identity()[0]
         if local not in anchor['voters']:
@@ -71,12 +72,13 @@ def ballot(state, kind, document, actor: str, requester: str | None = None):
             if record['generation'] != (current['generation'] if current else 0) + 1:
                 raise PeerError('CONFLICT', 'The Grove role revision changed')
             return grove.signed(grove_roles.KIND, {'anchor': digest, **record,
-                'public_key': wire_b64(key.public_key().public_bytes_raw())}, key)
+                'public_key': wire_b64(key.public_key().public_bytes_raw()), **grove_voters.stamp(anchor)}, key)
         return grove.signed(KIND, {'anchor': digest, 'kind': kind, 'document': document_digest(document),
-            'actor': actor, 'public_key': wire_b64(key.public_key().public_bytes_raw())}, key)
+            'actor': actor, 'public_key': wire_b64(key.public_key().public_bytes_raw()), **grove_voters.stamp(anchor)}, key)
 
 
 def verify(kind, document, digest, anchor, users):
+    anchor = grove_voters.verification(anchor, [envelope(document)], certificate=document)
     validate_change(kind, document, digest, anchor, users)
     approvals = document.get('approvals')
     if not isinstance(approvals, list) or not len(anchor['voters']) // 2 < len(approvals) <= len(anchor['voters']):
@@ -87,6 +89,9 @@ def verify(kind, document, digest, anchor, users):
         public = parse_b64(raw['public_key'], 32)
         voter = node_id(Ed25519PublicKey.from_public_bytes(public))
         data = grove.verified(KIND, approval, public, 1024)
+        if data.get('configuration') != json.loads(parse_b64(document['record'], 2048)).get('configuration'):
+            raise PeerError('CONFLICT', 'Grove identity confirmations use different voter configurations')
+        data = grove_voters.unstamp(data)
         if (voter not in anchor['voters'] or data != {'anchor': digest, 'kind': kind,
                 'document': document_digest(document), 'actor': data.get('actor'), 'public_key': raw['public_key']}):
             raise PeerError('DENIED', 'The Grove identity approval does not match this change')
@@ -100,6 +105,7 @@ def certify(state, kind, document, approvals):
     certified = envelope(document) | {'approvals': approvals}
     with state.connect(read_only=True) as db:
         grove_availability.require_current(db)
+        grove_voters.require_unlocked(db)
         digest, anchor, users = grove_revocation.current_context(db)
         verify(kind, certified, digest, anchor, users)
     return certified

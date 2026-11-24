@@ -78,13 +78,15 @@ def _write_backup(state: State, bundle: State, node_id: str) -> None:
     }
     extra_paths = []
     from .grove import KEY_FILE
-    if (state.directory / KEY_FILE).exists():
-        private_path(state.directory / KEY_FILE, 0o600)
-        extra = bundle.directory / KEY_FILE
-        extra.write_bytes((state.directory / KEY_FILE).read_bytes())
-        secure_private(extra)
-        manifest['extra_files'] = {KEY_FILE: file_digest(extra)}
-        extra_paths.append(extra)
+    from .mesh_enrollment import POLICY_FILE, SIGNING_KEY, SIGNING_CA
+    for name in (KEY_FILE, POLICY_FILE, SIGNING_KEY, SIGNING_CA):
+        if (state.directory / name).exists():
+            private_path(state.directory / name, 0o600)
+            extra = bundle.directory / name
+            extra.write_bytes((state.directory / name).read_bytes())
+            secure_private(extra)
+            manifest.setdefault('extra_files', {})[name] = file_digest(extra)
+            extra_paths.append(extra)
     manifest_path = bundle.directory / "manifest.json"
     fd = os.open(manifest_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -160,7 +162,8 @@ def read_backup(source: Path, *, allow_older: bool = False) -> tuple[State, dict
         raise StateError("Backup schema does not match the manifest")
     from .grove import KEY_FILE
     extras = manifest.get('extra_files', {})
-    if not isinstance(extras, dict) or set(extras) - {KEY_FILE}:
+    from .mesh_enrollment import POLICY_FILE, SIGNING_KEY, SIGNING_CA
+    if not isinstance(extras, dict) or set(extras) - {KEY_FILE, POLICY_FILE, SIGNING_KEY, SIGNING_CA}:
         raise StateError('Unknown backup identity file')
     for name, digest in extras.items():
         private_path(bundle.directory / name, 0o600)
@@ -290,6 +293,8 @@ def restore(state: State, source: Path, save_current: Path | None) -> str:
                 grove_checkpoint['role_votes'] = [tuple(row) for row in db.execute('SELECT * FROM grove_login_role_vote')]
                 grove_checkpoint['admissions'] = [tuple(row) for row in db.execute('SELECT * FROM grove_member_admission')]
                 grove_checkpoint['admission_votes'] = [tuple(row) for row in db.execute('SELECT * FROM grove_member_admission_vote')]
+                from . import grove_voters
+                grove_checkpoint['voters'] = grove_voters.recovery_checkpoint(db)
             protected_services = [(row["service_id"],) for row in db.execute("SELECT service_id FROM service_protection")]
             quarantines = quarantine_entries(db)
         backup(state, save_current)
@@ -361,6 +366,10 @@ def restore(state: State, source: Path, save_current: Path | None) -> str:
                                   WHERE EXISTS (SELECT 1 FROM grove_realm WHERE id=? AND public_key=?)''',
                                (values + (grove_checkpoint['id'], grove_checkpoint['public_key'])
                                 for values in grove_checkpoint['admission_votes']))
+                if db.execute('SELECT 1 FROM grove_realm WHERE id=? AND public_key=?',
+                              (grove_checkpoint['id'], grove_checkpoint['public_key'])).fetchone():
+                    from . import grove_voters
+                    grove_voters.restore_checkpoint(db, grove_checkpoint['voters'])
             db.execute("DELETE FROM login_attempt")
             db.execute("DELETE FROM panel_auth_flow")
             db.execute("DELETE FROM panel_factor_enrollment")

@@ -29,11 +29,15 @@ The console has six areas: overview, services, nodes, operations, identity, and 
 
 ## Partitions and offline operation
 
-Existing Grove accounts can sign in and manage reachable nodes using their last confirmed permissions for up to 12 hours after the last valid identity confirmation. Sign-ins and ordinary operations do not extend this deadline; sessions retain their own idle and maximum lifetimes. The console shows the offline deadline. Account suspension, password and role changes, and member admission require a majority of the original voter roster, never a majority recalculated from nodes visible in one partition.
+Existing Grove accounts can sign in and manage reachable nodes using their last confirmed permissions for up to 12 hours after the last valid identity confirmation. Sign-ins and ordinary operations do not extend this deadline; sessions retain their own idle and maximum lifetimes. The console shows the offline deadline. Account suspension, password and role changes, and member admission require a majority of the last confirmed voter roster, never a majority recalculated from nodes visible in one partition.
 
 After reconnecting, members synchronize accounts and permissions before returning to normal operation. Suspended accounts lose their sessions. Identity synchronization does not replay failed service requests. A majority of voters must run the new protocol before new identity changes can be committed.
 
 Linux seeding over root SSH prepares a dedicated ordinary runtime account, a systemd user manager and boot persistence, then installs and runs the panel as that account. Directory selection starts at /opt; private parent directories such as /root are not made accessible. Seeding with an existing ordinary account remains available.
+
+Select “Participate in Grove voting after joining” during seeding, or open “Voting membership” from a node's topology context menu. New voters first synchronize identity, permissions and membership, then both the old and new rosters automatically confirm the change with a majority. No separate panel approvals or original issuer are needed. Three to seven voters are supported; three or five always-on devices are recommended. Demotion preserves ordinary membership, services and existing connections. Public trust for existing certificates is retained; only current voters approve new enrollment.
+
+Membership requests and certificates are stored in the node database. Another accepting member can resume an interrupted change, and returning members synchronize the history. Ordinary service operations remain available while identity mutations wait for membership confirmation. This release adds database tables: the installer backs up state before upgrading, and rolling back the executable requires restoring that backup as well. Upgrade a majority of existing voters and the intended new voter through Grove group updates first.
 
 ## Downloads
 

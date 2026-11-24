@@ -5,7 +5,7 @@ from time import time
 
 from cryptography.hazmat.primitives.serialization import Encoding
 
-from .. import grove, grove_continuity, grove_login
+from .. import grove, grove_continuity, grove_login, grove_voters
 from ..state import audit
 from . import quarantine
 from .credentials import NODE_ID, RANDOM_ID, certificate, fingerprint, mesh_authorities, validate_mesh_leaf
@@ -37,6 +37,7 @@ def authority(db):
     anchor = grove_continuity.snapshot_authorization(realm,directory,envelope,kind)
     if record['recovery_proof'] is not None:
         grove_continuity.verify_recovery_votes(envelope,anchor,json.loads(record['recovery_proof']))
+    anchor = grove_voters.extend(db, anchor)
     return anchor['realm_id'], grove_continuity.anchor_digest(envelope), frozenset(anchor['voters'])
 
 

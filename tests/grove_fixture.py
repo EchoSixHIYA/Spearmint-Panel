@@ -21,7 +21,7 @@ class GroveFixture:
         self.states = [State(root / ('voter-' + str(i))) for i in range(3)]
         self.voters = sorted(state.initialize(lambda: self.password_hash) for state in self.states)
         owner_id, owner_key = self.owner.identity()
-        self.realm = {'version': 1, 'id': 'grv1-' + 'a' * 64, 'name': 'Partition fixture',
+        self.realm = {'version': 1, 'id': 'grv1-' + 'a' * 32, 'name': 'Partition fixture',
             'public_key': wire_b64(owner_key), 'issuer_node': owner_id, 'issuer_origin': 'https://issuer.example:18443'}
         self.users = [{'id': 'usr1-' + value * 32, 'name': name, 'role': role,
             'enabled': True, 'epoch': 1, 'require_mfa': True} for value, name, role in

@@ -112,7 +112,8 @@ def verified_anchor(db, envelope: dict, *, kind: str = 'login-continuity') -> di
 
 
 def admitted(db, anchor: dict, node: str) -> bool:
-    return node in anchor['voters'] or db.execute('''SELECT 1 FROM grove_member_admission a
+    historical = any(node in context['voters'] for context in anchor.get('_contexts', {}).values())
+    return historical or node in anchor.get('_base_voters', anchor['voters']) or node in anchor['voters'] or db.execute('''SELECT 1 FROM grove_member_admission a
         WHERE a.node_id=? AND NOT EXISTS (SELECT 1 FROM grove_member_departure d WHERE d.node_id=a.node_id)''',
         (node,)).fetchone() is not None
 
@@ -269,9 +270,21 @@ def install_recovery(state: State, document: dict) -> dict:
 
 
 def install_document(state: State, document: dict) -> dict:
+    document, governance = split_document(document)
     if isinstance(document, dict) and 'votes' in document:
-        return install_recovery(state, document)
-    return install_anchor(state, document)
+        result = install_recovery(state, document)
+    else:
+        result = install_anchor(state, document)
+    if governance is not None:
+        from . import grove_voters
+        grove_voters.apply(state, governance, 'grove-continuity')
+    return result
+
+
+def split_document(document):
+    if isinstance(document, dict) and document.keys() == {'authorization', 'governance'}:
+        return document['authorization'], document['governance']
+    return document, None
 
 
 def retirement_document(db, realm_id: str, recipient: str) -> dict:
@@ -283,9 +296,14 @@ def retirement_document(db, realm_id: str, recipient: str) -> dict:
     envelope = json.loads(record['anchor'])
     proof = record['recovery_proof']
     anchor = grove.verified('login-continuity' if proof is None else 'login-recovery', envelope, realm['public_key'])
+    from . import grove_voters
+    anchor = grove_voters.extend(db, anchor)
     if not admitted(db, anchor, recipient):
         raise PeerError('DENIED', 'This member is outside the Grove retirement authorization')
-    return envelope if proof is None else {'authorization': envelope, 'votes': json.loads(proof)}
+    document = envelope if proof is None else {'authorization': envelope, 'votes': json.loads(proof)}
+    from . import grove_voters
+    governance = grove_voters.history(db)
+    return {'authorization': document, 'governance': governance} if governance else document
 
 
 def snapshot(state: State, db, realm_id: str, recipient: str) -> dict:
@@ -314,7 +332,7 @@ def import_snapshot(state: State, bundle: dict, source: str, origin: str, author
 
     if not isinstance(bundle, dict) or bundle.keys() != {'authorization', 'manifest', 'records'}:
         raise PeerError('PROTOCOL', 'Invalid Grove recovery snapshot')
-    document = bundle['authorization']
+    document, governance = split_document(bundle['authorization'])
     recovered = isinstance(document, dict) and document.keys() == {'authorization', 'votes'}
     envelope = document['authorization'] if recovered else document
     local = state.identity()[0]
@@ -325,6 +343,9 @@ def import_snapshot(state: State, bundle: dict, source: str, origin: str, author
             raise PeerError('DENIED', 'This node has no recoverable Grove membership')
         directory = grove.directory_data(bundle['manifest'], grove.realm_data(realm), allow_expired=True)
         anchor = snapshot_authorization(realm, directory, envelope, 'login-recovery' if recovered else 'login-continuity')
+        from . import grove_voters
+        base = anchor
+        anchor = grove_voters.history_anchor(anchor, governance)
         baseline_match = any(member['enabled'] and member['node_id'] == local and member['origin'] == origin
                              for member in directory['members'])
         pending_admission = False
@@ -375,6 +396,7 @@ def import_snapshot(state: State, bundle: dict, source: str, origin: str, author
                       ON CONFLICT(singleton) DO UPDATE SET sequence=excluded.sequence,anchor=excluded.anchor,
                       recovery_proof=excluded.recovery_proof,lease_until=0''',
                    (anchor['sequence'], json.dumps(envelope), json.dumps(document['votes']) if recovered else None))
+        grove_voters.install_history(db, base, governance, source)
         audit(db, 'grove', source, 'grove.snapshot_recovered', realm['id'])
 
 
@@ -398,7 +420,8 @@ def read_anchor(db):
         return None
     envelope = json.loads(current['anchor'])
     kind = 'login-continuity' if current['recovery_proof'] is None else 'login-recovery'
-    return envelope, verified_anchor(db, envelope, kind=kind)
+    from . import grove_voters
+    return envelope, grove_voters.extend(db, verified_anchor(db, envelope, kind=kind))
 
 
 def vote(state: State, requester: str, nonce: str, digest: str, known_revocations: str | None = None,
@@ -410,12 +433,17 @@ def vote(state: State, requester: str, nonce: str, digest: str, known_revocation
             current = read_standby(db, int(time.time()))
         if current is None:
             raise PeerError('DENIED', 'Grove login continuity is disabled on this member')
+        if 'not_after' not in current[1]:
+            from . import grove_voters
+            grove_voters.require_unlocked(db)
         envelope, anchor = current
         if state.identity()[0] not in anchor['voters'] or not admitted(db, anchor, requester) or digest != anchor_digest(envelope):
             raise PeerError('DENIED', 'The requester is outside the installed Grove continuity authorization')
         key = state.signing_key()
         payload = {'requester': requester, 'nonce': nonce, 'anchor': digest, 'issued_at': int(time.time()),
                    'public_key': wire_b64(key.public_key().public_bytes_raw())}
+        from . import grove_voters
+        payload.update(grove_voters.stamp(anchor))
         response = {}
         if 'not_after' not in anchor:
             revocations = revocation_digest(db, digest)
@@ -519,7 +547,8 @@ def renew(state: State, envelope: dict, nonce: str, votes: dict[str, dict], *, s
             if record is None or json.loads(record['anchor']) != envelope:
                 return False
             kind = 'login-continuity' if record['recovery_proof'] is None else 'login-recovery'
-            anchor = verified_anchor(db, envelope, kind=kind)
+            from . import grove_voters
+            anchor = grove_voters.extend(db, verified_anchor(db, envelope, kind=kind))
         dates = [now] if local in anchor['voters'] else []
         admissions = admission_digest(admission_versions(db)) if not standby else None
         revocations = revocation_digest(db, digest) if not standby else None
@@ -535,6 +564,10 @@ def renew(state: State, envelope: dict, nonce: str, votes: dict[str, dict], *, s
                 if node_id(Ed25519PublicKey.from_public_bytes(public)) != voter:
                     continue
                 data = grove.verified('login-continuity-vote', reply, public, 2048)
+                from . import grove_voters
+                if data.get('configuration') != grove_voters.stamp(anchor).get('configuration'):
+                    continue
+                data = grove_voters.unstamp(data)
                 issued = data['issued_at']
                 correct_state = data.keys() == VOTE_FIELDS if standby else (
                     data.keys() <= VOTE_FIELDS | {'revocations', 'passwords', 'roles', 'members'} and VOTE_FIELDS <= data.keys()

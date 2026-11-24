@@ -15,7 +15,7 @@ from time import monotonic, sleep
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from paramiko import SSHException
 
-from . import grove, grove_admission, grove_continuity, grove_quorum_join, mesh_enrollment, seed_admission, seed_packages, seed_ssh, seed_transport
+from . import grove, grove_admission, grove_continuity, grove_quorum_join, grove_voters, mesh_enrollment, seed_admission, seed_packages, seed_ssh, seed_transport
 from .peer.credentials import NODE_ID, RANDOM_ID
 from .peer.grove_service_admin import require_admin_identity
 from .peer.pairing import configured
@@ -92,6 +92,10 @@ class Job:
     failure_exit: int | None = None
     username: str = ''
     host_password: str = field(default='', repr=False)
+    voting_requested: bool = False
+    voter_job: str | None = None
+    voter_status: str | None = None
+    voter_reason: str | None = None
 
     @property
     def actor(self) -> str:
@@ -107,7 +111,9 @@ class Job:
                 'path': self.current, 'directory': self.directory,
                 'install': self.install, 'state': self.state, 'origin': self.origin, 'node_id': self.node,
                 'error': self.error, 'failed_stage': self.failed_stage, 'failure_detail': self.failure_detail,
-                'failure_phase': self.failure_phase, 'failure_exit': self.failure_exit, 'host_services_supported': True}
+                'failure_phase': self.failure_phase, 'failure_exit': self.failure_exit, 'host_services_supported': True,
+                'voting_supported': True, 'voting_requested': self.voting_requested, 'voter_job': self.voter_job,
+                'voter_status': self.voter_status, 'voter_reason': self.voter_reason}
 
     def close(self):
         self.login = None
@@ -144,7 +150,7 @@ class SeedWizard:
             try:
                 kind = 'login-continuity' if current['recovery_proof'] is None else 'login-recovery'
                 directory = grove.directory_data(json.loads(realm['manifest']), grove.realm_data(realm), allow_expired=True)
-                return grove_continuity.snapshot_authorization(realm, directory, json.loads(current['anchor']), kind)
+                return grove_voters.extend(db, grove_continuity.snapshot_authorization(realm, directory, json.loads(current['anchor']), kind))
             except (KeyError, ValueError, TypeError, PeerError) as error:
                 raise PeerError('SEED_GROVE_STATE', 'The executor is waiting for its Grove quorum authorization') from error
 
@@ -196,6 +202,12 @@ class SeedWizard:
                     job.status, job.error = 'reading', None
                     self.schedule(job, self.browse, path)
             elif action == 'install' and job.status == 'choose':
+                voting = params.get('voting', False)
+                if type(voting) is not bool:
+                    raise PeerError('INVALID_REQUEST', 'Invalid voter membership option')
+                if voting and self.remote.voter_service is None:
+                    raise PeerError('UNSUPPORTED_METHOD', '请先升级发起节点再申请投票资格。')
+                job.voting_requested = voting
                 host_services = params.get('host_services', False)
                 host_password = params.get('host_password', '')
                 if type(host_services) is not bool or not isinstance(host_password, str) or len(host_password) > 1024:
@@ -210,6 +222,11 @@ class SeedWizard:
             elif action not in {'status', 'start', 'verify', 'directory', 'install'}:
                 raise PeerError('INVALID_REQUEST', 'Unknown SSH seed action')
             job.expire = monotonic() + 900
+            if job.voter_job:
+                with self.state.connect(read_only=True) as db:
+                    result = db.execute('SELECT status,reason FROM grove_voter_job WHERE id=?', (job.voter_job,)).fetchone()
+                if result:
+                    job.voter_status, job.voter_reason = result['status'], result['reason']
             return job.view()
 
     def reap(self):
@@ -464,6 +481,9 @@ class SeedWizard:
             else:
                 raise PeerError('SEED_QUORUM', 'The installed node is waiting to synchronize Grove membership')
         self.audit(job, job_id, 'joined')
+        if job.voting_requested:
+            job.voter_job = self.remote.voter_service.enqueue(job.node, True, job.identity, job_id)
+            job.voter_status = 'pending'
         with self.lock:
             job.close()
             job.status = 'joined'

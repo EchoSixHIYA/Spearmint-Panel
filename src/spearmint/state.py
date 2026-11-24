@@ -664,6 +664,28 @@ MIGRATIONS = (
         envelope TEXT NOT NULL
     );
     """,
+    """
+    CREATE TABLE grove_voter_configuration (
+        version INTEGER PRIMARY KEY,
+        digest TEXT NOT NULL UNIQUE,
+        document TEXT NOT NULL
+    );
+    CREATE TABLE grove_voter_ballot (
+        version INTEGER PRIMARY KEY,
+        promised TEXT NOT NULL,
+        accepted_term TEXT,
+        proposal TEXT
+    );
+    CREATE TABLE grove_voter_job (
+        id TEXT PRIMARY KEY,
+        node_id TEXT NOT NULL,
+        desired INTEGER NOT NULL CHECK (desired IN (0,1)),
+        identity TEXT NOT NULL,
+        status TEXT NOT NULL,
+        reason TEXT,
+        updated_at INTEGER NOT NULL
+    );
+    """,
 )
 
 

@@ -102,7 +102,7 @@ def validate_frame(frame: dict, size: int, *, mesh: bool = False, relay: bool = 
         case "ping" | "pong":
             valid = frame.keys() == {"type", "nonce"} and matches(RANDOM_ID, frame["nonce"])
         case "request":
-            limit = DEPLOY_UPLOAD if frame.get('method') == 'grove.deploy.upload' else DEPLOY_REQUEST if frame.get('method') == 'grove.deploy.v2' else REQUEST
+            limit = DEPLOY_UPLOAD if frame.get('method') in {'grove.deploy.upload', 'grove.voters.v1'} else DEPLOY_REQUEST if frame.get('method') == 'grove.deploy.v2' else REQUEST
             valid = (frame.keys() == {"type", "id", "method", "params"} and size <= limit
                      and matches(RANDOM_ID, frame["id"]) and matches(METHOD, frame["method"])
                      and isinstance(frame["params"], dict))

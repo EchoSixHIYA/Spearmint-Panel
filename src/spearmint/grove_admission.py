@@ -4,7 +4,7 @@ import time
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from . import auth, grove, grove_continuity, grove_login
+from . import auth, grove, grove_continuity, grove_login, grove_voters
 from .peer.credentials import NODE_ID, node_id
 from .peer import quarantine
 from .peer.pairing import configured
@@ -57,6 +57,8 @@ def validate_ballot(document: dict, anchor: dict, digest: str) -> tuple[str, str
         public = parse_b64(raw['public_key'], 32)
         voter = node_id(Ed25519PublicKey.from_public_bytes(public))
         ballot = grove.verified(KIND, document, public, 2048)
+        anchor = grove_voters.verification(anchor, [document])
+        ballot = grove_voters.unstamp(ballot)
         subject, origin = ballot['node_id'], grove.origin(ballot['origin'])
         if (voter not in anchor['voters'] or NODE_ID.fullmatch(subject) is None or subject in anchor['voters'] or len(origin) > MAX_ORIGIN_LENGTH
                 or ballot != {'anchor': digest, 'node_id': subject, 'origin': origin, 'public_key': raw['public_key']}):
@@ -67,6 +69,7 @@ def validate_ballot(document: dict, anchor: dict, digest: str) -> tuple[str, str
 
 
 def validate_certificate(certificate: list, anchor: dict, digest: str) -> tuple[str, str]:
+    anchor = grove_voters.verification(anchor, certificate, certificate=certificate)
     if not isinstance(certificate, list) or not len(anchor['voters']) // 2 < len(certificate) <= len(anchor['voters']):
         raise PeerError('DENIED', 'Grove admission requires approval from a majority of identity members')
     ballots = [validate_ballot(ballot, anchor, digest) for ballot in certificate]
@@ -98,6 +101,8 @@ def _check_member(db, subject: str, origin: str) -> None:
 def admit(db, certificate: list, anchor: dict, envelope: dict, source: str) -> bool:
     subject, origin = validate_certificate(certificate, anchor, grove_continuity.anchor_digest(envelope))
     _check_member(db, subject, origin)
+    if not db.execute('SELECT 1 FROM grove_member_admission WHERE node_id=?', (subject,)).fetchone():
+        grove_voters.require_unlocked(db)
     inserted = db.execute('INSERT OR IGNORE INTO grove_member_admission VALUES (?,?,?)',
                           (subject, origin, json.dumps(certificate))).rowcount
     if inserted:
@@ -131,6 +136,7 @@ def approve(state: State, actor: auth.Actor, subject: str, origin: str, *, befor
 
 
 def record_ballot(db, state, subject, origin, envelope, anchor, actor, source):
+    grove_voters.require_unlocked(db)
     from . import grove_availability
     grove_availability.require_current(db)
     eligible(db, subject, origin)
@@ -142,10 +148,13 @@ def record_ballot(db, state, subject, origin, envelope, anchor, actor, source):
             raise PeerError('CONFLICT', 'This member has already approved a different node or HTTPS origin')
         ballot = json.loads(prior[0]['ballot'])
         validate_ballot(ballot, anchor, digest)
-        return ballot
+        raw = json.loads(parse_b64(ballot['record'], 2048))
+        if raw.get('configuration') == grove_voters.stamp(anchor).get('configuration'):
+            return ballot
+        db.execute('DELETE FROM grove_member_admission_vote WHERE node_id=?', (subject,))
     key = state.signing_key()
     ballot = grove.signed(KIND, {'anchor': digest, 'node_id': subject, 'origin': origin,
-                                'public_key': wire_b64(key.public_key().public_bytes_raw())}, key)
+                                'public_key': wire_b64(key.public_key().public_bytes_raw()), **grove_voters.stamp(anchor)}, key)
     validate_ballot(ballot, anchor, digest)
     db.execute('INSERT INTO grove_member_admission_vote VALUES (?,?,?)', (subject, origin, json.dumps(ballot)))
     audit(db, actor, source, 'grove.member_admission_approved', subject)
@@ -272,7 +281,7 @@ def join(state: State, actor: auth.Actor | None, origin: str, bundle: dict, sour
     snapshot = bundle['snapshot']
     if not isinstance(snapshot, dict) or snapshot.keys() != {'authorization', 'manifest', 'records'}:
         raise PeerError('PROTOCOL', 'Invalid Grove admission snapshot')
-    document = snapshot['authorization']
+    document, governance = grove_continuity.split_document(snapshot['authorization'])
     recovered = isinstance(document, dict) and document.keys() == {'authorization', 'votes'}
     envelope = document['authorization'] if recovered else document
     local = state.identity()[0]
@@ -285,6 +294,8 @@ def join(state: State, actor: auth.Actor | None, origin: str, bundle: dict, sour
         realm = realm_data | {'public_key': parse_b64(realm_data['public_key'], 32)}
         directory = grove.directory_data(snapshot['manifest'], realm_data, allow_expired=True)
         anchor = grove_continuity.snapshot_authorization(realm, directory, envelope, 'login-recovery' if recovered else 'login-continuity')
+        base = anchor
+        anchor = grove_voters.history_anchor(anchor, governance)
         if recovered:
             grove_continuity.verify_recovery_votes(envelope, anchor, document['votes'])
             if int(time.time()) < directory['issued_at'] + grove_login.STANDBY_TTL:
@@ -303,4 +314,5 @@ def join(state: State, actor: auth.Actor | None, origin: str, bundle: dict, sour
         grove_login.import_snapshot(state, db, directory, snapshot['records'], anchor['verifiers_sha256'])
         db.execute('INSERT INTO grove_login_continuity(singleton,sequence,anchor,recovery_proof) VALUES (1,?,?,?)',
                    (anchor['sequence'], json.dumps(envelope), json.dumps(document['votes']) if recovered else None))
+        grove_voters.install_history(db, base, governance, source)
     return realm_data

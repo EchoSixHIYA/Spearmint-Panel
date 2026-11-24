@@ -6,6 +6,7 @@ import { NodeInspector } from './workspace-pages'
 import { GroveCard } from './grove-auth'
 import { SeedsPage } from './console-pages'
 import { savedSeedSource } from './seed-wizard'
+import { VoterDialog } from './grove-voters'
 import { groveServiceRegistrationHref, nodeResourcesTarget, seedProgressTarget } from './grove-navigation'
 import { returnRoute, withReturn } from './workspace-api'
 import { Badge, Icon, Loading, Modal, shortId } from './ui'
@@ -16,7 +17,7 @@ const validNode = (value?: string | null) => !!value && /^spm1-[a-f0-9]{64}$/.te
 const modeNames: Record<string, string> = { terminal: '终端与文件', network: '路径诊断', detail: '节点详情', seed: '播种新节点' }
 type Menu = { node: NodeView; anchor: NodeMenuAnchor }
 
-function NodeMenu({ node, anchor, close }: Menu & { close: (restore?: boolean) => void }) {
+function NodeMenu({ node, anchor, close, voting }: Menu & { close: (restore?: boolean) => void; voting: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   const items = [
     { label: '节点资料与备注', icon: 'info', route: `#/nodes/${node.id}` },
@@ -60,6 +61,7 @@ function NodeMenu({ node, anchor, close }: Menu & { close: (restore?: boolean) =
         : (index + (event.key === 'ArrowDown' ? 1 : -1) + controls.length) % controls.length]?.focus()
     }}>
     <div className="node-context-title" title={node.name}>{node.name}<small>{node.local ? '当前节点' : 'Grove 成员'}</small></div>
+    <a href="#/nodes" role="menuitem" onClick={event => { event.preventDefault(); close(); voting() }}><Icon name="shield" size={16} /><span>投票资格</span></a>
     {items.map(item => <a key={item.label} role="menuitem" className={item.section ? 'node-menu-section' : undefined}
       href={withReturn(item.route, '#/nodes')} onClick={event => {
         if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return
@@ -74,6 +76,7 @@ export function NodesWorkspace({ page, nodeId, onSave }: {
   const { listedNodes, local, session, onUnauthorized, groveDetails, groveError, directoryCurrent } = useConsole()
   const [nodeAccess, setNodeAccess] = useState(() => new URLSearchParams(location.hash.split('?')[1]).get('join') === '1')
   const [menu, setMenu] = useState<Menu>()
+  const [voterNode, setVoterNode] = useState<NodeView>()
   const [query, setQuery] = useState('')
   const [searchError, setSearchError] = useState('')
   const search = useRef<HTMLInputElement>(null)
@@ -119,7 +122,8 @@ export function NodesWorkspace({ page, nodeId, onSave }: {
       {searchError && <p className="nodes-search-error" role="status">{searchError}</p>}
       <div className="overview-network-main nodes-network-canvas"><NetworkMap compact target={target} onNodeMenu={(node, anchor) => setMenu({ node, anchor })} /></div>
     </section>
-    {menu && <NodeMenu {...menu} close={closeMenu} />}
+    {menu && <NodeMenu {...menu} close={closeMenu} voting={() => setVoterNode(menu.node)} />}
+    {voterNode && <VoterDialog node={voterNode} close={() => setVoterNode(undefined)} />}
     {nodeAccess && <Modal title={groveDetails?.configured ? '邀请节点加入 Grove' : '创建或加入 Grove'} onClose={() => setNodeAccess(false)}>
       <GroveCard data={groveDetails} error={groveError} session={session} onUnauthorized={onUnauthorized} directoryCurrent={directoryCurrent} mode="nodes" openJoin={!groveDetails?.configured} />
     </Modal>}

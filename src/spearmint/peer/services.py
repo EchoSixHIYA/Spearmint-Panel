@@ -132,6 +132,7 @@ class PeerServices:
         self.grove_refresh: asyncio.Task[tuple[str, dict | None]] | None = None
         self.grove_sync_requested = asyncio.Event()
         self.mesh_enrollment_policy = None
+        self.voter_service = None
         self.seed_wizard = None
         self.grove_updates = None
         self.service_setup = None
@@ -174,6 +175,15 @@ class PeerServices:
             self.manager.scheduler = Neighbors(self.manager, minimum=neighbor_minimum, target=neighbor_target,
                 protected=self.protected_neighbors, coverage=self.neighbor_coverage,
                 demand=lambda: {node for node in self.neighbor_demand() if self.connection_for(node) is None})
+
+    @property
+    def mesh_enrollment_policy(self):
+        from .. import mesh_enrollment
+        return mesh_enrollment.load_policy(self.state) or getattr(self, '_bootstrap_enrollment_policy', None)
+
+    @mesh_enrollment_policy.setter
+    def mesh_enrollment_policy(self, value):
+        self._bootstrap_enrollment_policy = value
 
     def neighbor_demand(self) -> set[str]:
         return set(self.adaptive.used) | self.adaptive.pending_targets if self.adaptive else set()
@@ -408,6 +418,10 @@ class PeerServices:
             raise PeerError('UNAVAILABLE', 'The local Mesh catalog could not be updated') from error
 
     async def handle(self, pair: Pair, method: str, params: dict) -> dict:
+        if self.voter_service is not None:
+            from .. import grove_voters
+            if method == grove_voters.METHOD:
+                return await self.work(self.voter_service.handle, pair, params, rpc=True)
         node = pair.node_id
         group = OPTIONAL_RPC.get(method)
         current = pair.enabled and self.manager.pairs.get(node) == pair
@@ -1300,6 +1314,8 @@ class PeerServices:
         while True:
             self.grove_sync_requested.clear()
             try:
+                if self.voter_service is not None:
+                    await self.voter_service.synchronize()
                 await self.refresh_grove()
             except (PeerError, ValueError, OSError, sqlite3.Error) as error:
                 logger.debug('Grove identity synchronization is waiting: %s', error)

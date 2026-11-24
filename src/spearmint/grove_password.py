@@ -7,7 +7,7 @@ import time
 from argon2.exceptions import VerificationError
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from . import auth, factors, grove, grove_login, grove_revocation
+from . import auth, factors, grove, grove_login, grove_revocation, grove_voters
 from .peer.credentials import node_id
 from .peer.protocol import PeerError, parse_b64, wire_b64
 from .state import State, audit
@@ -20,12 +20,13 @@ KIND = 'login-password'
 def verifier_for_session(db, actor: auth.Actor, now: int):
     from . import grove_availability
     grove_availability.require_current(db)
+    grove_voters.require_unlocked(db)
     session = auth.active_session(db, actor.token_hash, now)
     if session is None or not session['grove_replica'] or session['id'] != actor.account_id:
         raise PeerError('DENIED', 'Sign in directly with the Grove account to change its password')
     if db.execute('SELECT 1 FROM grove_login_continuity').fetchone() is None:
         raise PeerError('CONFLICT', 'This Grove has not handed off its original identity role')
-    if db.execute('SELECT 1 FROM grove_member_admission m JOIN node n ON n.node_id=m.node_id').fetchone():
+    if state_voter_missing(db):
         raise PeerError('DENIED', 'Use a Grove identity voter to change the password')
     record = db.execute('''SELECT v.*,p.generation,p.change_digest,p.document FROM grove_login_verifier v
                            LEFT JOIN grove_login_password p ON p.user_id=v.user_id WHERE v.user_id=?''',
@@ -33,6 +34,12 @@ def verifier_for_session(db, actor: auth.Actor, now: int):
     if record is None:
         raise PeerError('DENIED', 'This Grove account has no active password')
     return session, record
+
+
+def state_voter_missing(db):
+    from . import grove_continuity
+    current = grove_continuity.read_anchor(db)
+    return current is None or db.execute('SELECT node_id FROM node').fetchone()[0] not in current[1]['voters']
 
 
 def available(state: State, actor: auth.Actor) -> bool:
@@ -52,6 +59,8 @@ def data_for(document: dict, digest: str, anchor: dict, users: list[dict]) -> di
         raw = json.loads(parse_b64(document['record'], 2048))
         public = parse_b64(raw['public_key'], 32)
         record = grove.verified(KIND, document, public, 2048)
+        anchor = grove_voters.verification(anchor, [document])
+        record = grove_voters.unstamp(record)
         if (node_id(Ed25519PublicKey.from_public_bytes(public)) not in anchor['voters']
                 or record.keys() != {'anchor', 'user_id', 'generation', 'password_hash', 'public_key'}
                 or record['anchor'] != digest or type(record['generation']) is not int
@@ -70,6 +79,7 @@ def store(state: State, db, document: dict, record: dict, actor: str, source: st
     previous = db.execute('SELECT generation,change_digest FROM grove_login_password WHERE user_id=?', (user_id,)).fetchone()
     if previous and (record['generation'], change_digest) <= (previous['generation'], previous['change_digest']):
         return False
+    grove_voters.require_unlocked(db)
     sealed = factors.seal(state, user_id, json.dumps(document))
     db.execute('''INSERT INTO grove_login_password VALUES (?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET
                   anchor_digest=excluded.anchor_digest,generation=excluded.generation,
@@ -112,7 +122,7 @@ def issue(state: State, actor: auth.Actor, current_password: str, new_password: 
             raise PeerError('DENIED', 'Use a Grove identity voter to change the password')
         key = state.signing_key()
         record = {'anchor': digest, 'user_id': verifier['user_id'], 'generation': (verifier['generation'] or 0) + 1,
-                  'password_hash': replacement, 'public_key': wire_b64(key.public_key().public_bytes_raw())}
+                  'password_hash': replacement, 'public_key': wire_b64(key.public_key().public_bytes_raw()), **grove_voters.stamp(anchor)}
         document = grove.signed(KIND, record, key)
         return document, anchor['voters']
 
