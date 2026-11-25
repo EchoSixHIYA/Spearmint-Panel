@@ -192,20 +192,30 @@ export function ServiceDeployment({ target, service, onChanged, onOpen }: { targ
     {hashProgress !== undefined && <small className="muted" role="status">正在校验服务包 · {bytes(hashProgress)} / {bytes(file?.size || 0)}</small>}
     {capable && !jobId && recoverable.length > 0 && <div className="button-row"><small className="muted">目标节点有未完成任务：</small>{recoverable.map(item => <button key={item.id} className="btn btn-secondary" onClick={() => { remember(item.id); setJob(undefined) }}>{item.name} · {item.phase}</button>)}</div>}
     {capable && !jobId && <form className="stack" onSubmit={event => void start(event)} onChange={() => setDirty(true)}>
-      {!service && <Tabs label="部署方式" current={kind} onChange={value => { setKind(value); setFile(undefined); setDirty(true) }}
-        items={[{ id: 'package', label: '程序包' }, { id: 'docker', label: 'Docker 单容器' }]} />}
-      {!service && <label>服务名称（可选）<input className="input" maxLength={80} value={name} onChange={event => setName(event.target.value)} /></label>}
-      {kind !== 'docker' && <label>{service ? '新版服务包（只修改命令时可留空）' : '服务压缩包（可选）'}
-        <input type="file" accept=".zip,.tar,.tar.gz,.tgz,.tar.xz,.tar.bz2" onChange={event => setFile(event.target.files?.[0])} />
-        {file && <small className="muted">{file.name} · {bytes(file.size)}</small>}</label>}
-      <label>{kind === 'docker' ? 'Docker 启动命令' : '启动命令'}<textarea aria-label={kind === 'docker' ? 'Docker 启动命令' : '启动命令'} className="input deploy-command" required rows={5} maxLength={8192} value={command}
+      {!service && <Tabs label="部署方式" current={kind} onChange={value => {
+        if (value !== kind) { setKind(value); setFile(undefined) }
+      }} items={[{ id: 'package', label: '程序包', icon: 'package' }, { id: 'docker', label: 'Docker 单容器', icon: 'layers' }]} />}
+      {!service && <label><span>服务名称 <small className="registration-optional">可选</small></span>
+        <input className="input" placeholder="例如 Web 应用" maxLength={80} value={name} onChange={event => setName(event.target.value)} /></label>}
+      {kind !== 'docker' && <label>{service ? '新版服务包（只修改命令时可留空）' : <span>服务压缩包 <small className="registration-optional">可选</small></span>}
+        <span className="deployment-package-picker">
+          <Icon name={file ? 'file-text' : 'package'} size={21} />
+          <span className="deployment-package-description">
+            {file && <strong>{file.name}</strong>}
+            <small>{file ? bytes(file.size) : '支持 ZIP、TAR 及其压缩格式'}</small>
+          </span>
+          <span className="btn btn-secondary btn-small" aria-hidden="true">{file ? '更换文件' : '选择文件'}</span>
+          <input type="file" aria-label={service ? '新版服务包' : '服务压缩包'} accept=".zip,.tar,.tar.gz,.tgz,.tar.xz,.tar.bz2"
+            onChange={event => setFile(event.target.files?.[0])} />
+        </span></label>}
+      <label><span className="registration-command-label"><Icon name="terminal" size={15} />{kind === 'docker' ? 'Docker 启动命令' : '启动命令'}</span><textarea aria-label={kind === 'docker' ? 'Docker 启动命令' : '启动命令'} className="input deploy-command" required rows={service ? 5 : 4} maxLength={8192} value={command}
         placeholder={kind === 'docker' ? 'docker run -d --name my-app -p 8080:8080 my-image:latest' : 'python hello.py --port 8080'} onChange={event => setCommand(event.target.value)} /></label>
       <p className="muted tiny">{kind === 'docker' ? '自动拉取镜像并按容器 ID 托管；后台运行和自动删除参数由 Spearmint 统一处理。' : 'Spearmint 自动进入本次部署的代码目录后执行命令，无需填写 cd。支持后续上传新版代码和回滚。'}</p>
       {kind !== 'docker' && !service && <details className="deployment-location"><summary>指定部署目录（可选）</summary><label>部署目录<input aria-label="部署目录" className="input" value={directory} onChange={event => setDirectory(event.target.value)} placeholder="留空使用 Spearmint 专用目录；也可填写目标节点上的空目录" /></label><p className="muted tiny">默认使用 Spearmint 数据目录下的独立应用目录。自定义位置用于存放代码版本和持久数据。</p></details>}
       {service?.deployment?.directory && <small className="muted">部署目录：{service.deployment.directory}</small>}
       {kind === 'docker' && <p className="muted tiny">自动保留已有卷与绑定目录，镜像声明的数据卷和 /data 使用持久卷。请将需要保留的数据放入这些目录。</p>}
       <DeploymentSettings value={settings} onChange={value => { setSettings(value); setDirty(true) }} docker={kind === 'docker'} />
-      <div className="button-row"><button className="btn btn-primary" disabled={busy || (!!history && !history.can_update)} type="submit"><Icon name="package" size={16} />{service ? '更新并启动' : '部署并启动'}</button>
+      <div className={service ? 'button-row' : 'button-row registration-submit'}><button className="btn btn-primary" disabled={busy || (!!history && !history.can_update)} type="submit"><Icon name="package" size={16} />{service ? '更新并启动' : '部署并启动'}</button>
         {service && history?.can_rollback && <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => { if (confirm('回滚到上一版并重启此服务？应用数据目录保持原样。')) void start(undefined, true) }}>回滚上一版</button>}</div>
       {service && <p className="muted tiny">更新会短暂停止服务；启动失败自动恢复上一版，最多保留一份回滚版本。</p>}
     </form>}

@@ -33,11 +33,12 @@ export function ExistingCodeRegistration({ target, windows }: { target: string; 
     {error && <Notice tone="amber">{error}</Notice>}
     {registered ? <><Notice tone="green">已登记 {registered.name}，可在服务详情中启动并查看日志。</Notice><a className="btn btn-primary" href={href}>打开服务<Icon name="arrow-right" size={15} /></a></>
       : <form className="stack" onSubmit={event => void submit(event)}>
-        <label>服务名称（可选）<input className="input" maxLength={80} value={name} onChange={event => setName(event.target.value)} /></label>
-        <label>启动命令<textarea aria-label="已有代码启动命令" className="input deploy-command" rows={5} required maxLength={8192} value={command}
+        <label><span>服务名称 <small className="registration-optional">可选</small></span>
+          <input className="input" placeholder="例如 Web 应用" maxLength={80} value={name} onChange={event => setName(event.target.value)} /></label>
+        <label><span className="registration-command-label"><Icon name="terminal" size={15} />启动命令</span><textarea aria-label="已有代码启动命令" className="input deploy-command" rows={4} required maxLength={8192} value={command}
           placeholder={windows ? 'cd /d "D:\\my-app"\npython hello.py --port 8080' : 'cd /srv/my-app\npython hello.py --port 8080'} onChange={event => setCommand(event.target.value)} /></label>
         <p className="muted tiny">请在命令中 cd 到已有代码目录。Spearmint 托管启停和日志，代码由你自行更新。</p>
-        <div className="button-row"><button className="btn btn-primary" disabled={busy}><Icon name="plus" size={15} />{busy ? '正在登记…' : '登记服务'}</button></div>
+        <div className="button-row registration-submit"><button className="btn btn-primary" disabled={busy}><Icon name="plus" size={15} />{busy ? '正在登记…' : '登记服务'}</button></div>
       </form>}
   </div>
 }

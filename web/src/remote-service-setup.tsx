@@ -1,13 +1,14 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiError, api, type Session } from './api'
 import { refreshConsole, useConsole } from './console-data'
 import { groveServiceRegistrationHref, localServiceHref, remoteServiceSyncHref } from './grove-navigation'
-import { Icon, Loading, Notice, PageHeading, Panel, Tabs } from './ui'
+import { Icon, Loading, Notice, Panel } from './ui'
 import { returnRoute, withReturn } from './workspace-api'
 import { allowNavigation, useUnsavedChanges } from './navigation-guard'
 import { ServiceDeployment } from './service-deployment'
 import { ExistingCodeRegistration } from './existing-code-registration'
 import { HostServiceAuthorization } from './host-service-authorization'
+import './service-registration.css'
 
 const kinds = { systemd: 'systemd 系统服务', windows: 'Windows 系统服务', docker: 'Docker 容器' }
 type Kind = keyof typeof kinds
@@ -20,6 +21,12 @@ type Readiness = { ready: boolean; log_path?: string | null; observe_ready?: boo
 type SetupProps = { session: Session; onUnauthorized: () => void }
 type Action = 'kinds' | 'running' | 'inspect' | 'take-over' | 'manage'
 type Mode = 'take-over' | 'create' | 'existing'
+
+const registrationModes: { id: Mode; label: string; description: string; icon: string }[] = [
+  { id: 'create', label: '一键部署新服务', description: '部署程序包或 Docker 容器', icon: 'package' },
+  { id: 'existing', label: '登记已有代码', description: '使用目标节点已有的代码', icon: 'terminal' },
+  { id: 'take-over', label: '接管运行中服务', description: '从正在运行的服务中选取', icon: 'activity' },
+]
 
 function request<T>(session: Session, nodeId: string, action: Action, body: object, signal: AbortSignal) {
   return api<T>(`/peers/${encodeURIComponent(nodeId)}/service-setup/${action}`, {
@@ -49,28 +56,31 @@ function setupError(error: unknown, onUnauthorized: () => void) {
 }
 
 export function GroveServiceSetup({ targetId, session, onUnauthorized }: SetupProps & { targetId?: string }) {
-  const { memberNodes, listedNodes, local } = useConsole()
+  const { memberNodes, listedNodes, local, localName } = useConsole()
   const targets = memberNodes ?? listedNodes
   const nodeId = targetId === local.data?.node_id ? undefined : targetId
   const remote = targets.find(node => node.id === nodeId && !node.local)
-  return <>
-    <a href={returnRoute()} className="back-link"><Icon name="arrow-left" size={15} />返回来源</a>
-    <PageHeading eyebrow="OPERATIONS / SERVICES" title="登记服务" description="选择服务所在的节点，通过当前面板接管或新建服务。" />
-    <Panel title="服务所在节点">
-      <label className="field-label">节点
-        <select className="input" aria-label="服务所在节点" value={nodeId || ''} onChange={event => { location.hash = withReturn(groveServiceRegistrationHref(event.target.value), returnRoute()) }}>
-          <option value="">本机节点</option>
-          {nodeId && !remote && <option value={nodeId}>正在确认所选节点</option>}
-          {targets.filter(node => !node.local).map(node => <option key={node.id} value={node.id}>{node.name}</option>)}
-        </select>
-      </label>
-    </Panel>
-    {nodeId && !remote?.peer?.enabled ? <Notice tone="amber">等待当前面板同步成员并建立到目标的 Mesh 连接。</Notice>
-      : <ServiceSetup key={nodeId || 'local'} nodeId={nodeId || 'local'} session={session} onUnauthorized={onUnauthorized} />}
-  </>
+  const nodePicker = <label className="field-label registration-node">
+    <span><Icon name="server" size={16} />服务所在节点</span>
+    <select className="input" value={nodeId || ''} onChange={event => { location.hash = withReturn(groveServiceRegistrationHref(event.target.value), returnRoute()) }}>
+      <option value="">{localName === '本机节点' ? localName : `${localName} · 本机`}</option>
+      {nodeId && !remote && <option value={nodeId}>正在确认所选节点</option>}
+      {targets.filter(node => !node.local).map(node => <option key={node.id} value={node.id}>{node.name}</option>)}
+    </select>
+  </label>
+  return <div className="service-registration">
+    <header className="registration-heading">
+      <a href={returnRoute()} className="back-link"><Icon name="arrow-left" size={15} />返回来源</a>
+      <h1 tabIndex={-1} id="page-title">登记服务</h1>
+    </header>
+    {nodeId && !remote?.peer?.enabled
+      ? <div className="registration-layout"><Panel className="registration-selector">{nodePicker}</Panel>
+        <Notice tone="amber">等待当前面板同步成员并建立到目标的 Mesh 连接。</Notice></div>
+      : <ServiceSetup key={nodeId || 'local'} nodeId={nodeId || 'local'} nodePicker={nodePicker} session={session} onUnauthorized={onUnauthorized} />}
+  </div>
 }
 
-function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId: string }) {
+function ServiceSetup({ nodeId, nodePicker, session, onUnauthorized }: SetupProps & { nodeId: string; nodePicker: ReactNode }) {
   const [mode, setMode] = useState<Mode>('create')
   const [supported, setSupported] = useState<Capabilities>()
   const [kind, setKind] = useState<Kind>()
@@ -83,7 +93,6 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
   const [dockerPermission, setDockerPermission] = useState(false)
   const [reads, setReads] = useState(0)
   const [busy, setBusy] = useState(false)
-  const [step, setStep] = useState(1)
   const [review, setReview] = useState<{ action: 'take-over'; body: object; name: string }>()
   const [dirty, setDirty] = useState(false)
   const [registrationMode, setRegistrationMode] = useState<'observe' | 'manage'>('manage')
@@ -132,6 +141,7 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
   }
 
   function refresh() {
+    setReview(undefined)
     setDockerPermission(false)
     selectCandidate('')
     setChoices(undefined)
@@ -166,13 +176,39 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
       const log_path = String(values.get('log_path') ?? '').trim() || null
       const chosenName = name || Array.from(candidate.name).slice(0, 80).join('')
       setReview({ action: 'take-over', name: chosenName, body: { kind, target: candidate.target, name: chosenName, log_path,
-        ...(checked?.observe_ready ? { mode: registrationMode } : {}) } }); setStep(3)
+        ...(checked?.observe_ready ? { mode: registrationMode } : {}) } })
     }
   }
 
-  return <Panel title="接入方式" action={<button className="btn btn-secondary" type="button" onClick={refresh} disabled={busy}>刷新</button>}>
-    <Tabs label="接入方式" current={mode} items={[{ id: 'create', label: '一键部署新服务' }, { id: 'existing', label: '登记已有代码' }, { id: 'take-over', label: '接管运行中服务' }]}
-      onChange={value => { if (!busy && value !== mode && allowNavigation()) { setMode(value as Mode); setStep(1); selectCandidate(''); setChoices(undefined); setDirty(false) } }} />
+  const modeTitle = registrationModes.find(item => item.id === mode)!.label
+  return <div className="registration-layout">
+    <Panel className="registration-selector">
+      {nodePicker}
+      <div className="registration-mode-group" role="group" aria-labelledby="registration-method">
+        <h2 id="registration-method">接入方式</h2>
+        {registrationModes.map(item => <button key={item.id} type="button" className="registration-mode"
+          aria-pressed={item.id === mode} disabled={busy} onClick={() => {
+            if (item.id === mode || !allowNavigation()) return
+            setMode(item.id)
+            setReview(undefined)
+            selectCandidate('')
+            setChoices(undefined)
+            setDirty(false)
+          }}>
+          <span className="registration-mode-icon"><Icon name={item.icon} size={18} /></span>
+          <span><strong>{item.label}</strong><small>{item.description}</small></span>
+          {item.id === mode && <Icon name="check" size={15} />}
+        </button>)}
+      </div>
+    </Panel>
+    <section className="panel registration-form-panel" aria-labelledby="registration-form-title">
+      <header className="registration-form-heading">
+        <h2 id="registration-form-title">{modeTitle}</h2>
+        {mode === 'take-over' && !result && !review && <button className="btn btn-secondary btn-small" type="button" onClick={refresh} disabled={busy}>
+          <Icon name="refresh" size={14} />刷新
+        </button>}
+      </header>
+      <div className="registration-form-body">
     {mode === 'create' ? <ServiceDeployment target={nodeId} /> : mode === 'existing' ? <ExistingCodeRegistration target={nodeId} windows={!!supported?.kinds.includes('windows')} /> :
     <div className="stack">
       {error && <Notice tone="amber">{error}</Notice>}
@@ -183,12 +219,12 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
           {result.command && <pre className="command-block">{result.command}</pre>}
           <div className="button-row">
             <a className="btn btn-primary" href={serviceHref(result.id)}>打开服务</a>
-            <button className="btn btn-secondary" type="button" onClick={() => { setResult(undefined); setReview(undefined); setStep(1); setCandidateId(''); refresh() }}>继续登记</button>
+            <button className="btn btn-secondary" type="button" onClick={() => { setResult(undefined); refresh() }}>继续登记</button>
           </div>
         </> : <>
-          <ol className="registration-steps">{['选择节点与方式', '填写登记信息', '核对并登记'].map((label, index) => <li key={label} className={step === index + 1 ? 'current' : ''}>{index + 1} · {label}</li>)}</ol>
-          {step === 1 && <><p className="muted">读取目标节点正在运行的服务，选择后检查是否可以接管。</p><div><button className="btn btn-primary" onClick={() => setStep(2)}>下一步</button></div></>}
-          <div hidden={step !== 2}>
+          <ol className="registration-steps">{['选择服务', '核对并登记'].map((label, index) => <li key={label}
+            aria-current={Number(!!review) === index ? 'step' : undefined}><span>{index + 1}</span>{label}</li>)}</ol>
+          <div className="stack registration-takeover" hidden={!!review}>
           {mode === 'take-over' && (!supported.checks ? <Notice tone="amber">目标节点仍在使用允许列表过滤服务。请通过 Grove 群组更新升级目标节点，再读取运行中的服务。</Notice> : <>
             <p className="muted">列表显示正在运行的服务。选择后检查目标机的管理和日志权限。</p>
             {supported.kinds.length ? <label className="field-label">服务类型<select className="input" aria-label="服务类型" value={kind || ''} disabled={busy}
@@ -241,11 +277,13 @@ function ServiceSetup({ nodeId, session, onUnauthorized }: SetupProps & { nodeId
               : <label className="field-label">目标 Windows 应用日志的绝对路径
               <input className="input" name="log_path" maxLength={420} required disabled={busy} placeholder={'C:\\Apps\\MyApp\\logs\\app.log'} />
             </label>)}
-            <div className="button-row"><button type="button" className="btn btn-secondary" onClick={() => setStep(1)}>上一步</button><button className="btn btn-primary" disabled={busy}>核对登记信息</button></div>
+            <div className="button-row registration-submit"><button className="btn btn-primary" disabled={busy}>核对登记信息<Icon name="arrow-right" size={15} /></button></div>
           </form>}
           </div>
-          {step === 3 && review && <><dl className="facts"><div><dt>服务名称</dt><dd>{review.name}</dd></div><div><dt>登记方式</dt><dd>{checked?.observe_ready && registrationMode === 'observe' ? '观察状态与日志' : '托管启停'} · 保留运行状态</dd></div></dl><div className="button-row"><button className="btn btn-secondary" disabled={busy} onClick={() => setStep(2)}>上一步</button><button className="btn btn-primary" disabled={busy} onClick={() => void mutate(review.action, review.body)}>{busy ? '正在登记…' : '确认登记'}</button></div></>}
+          {review && <><dl className="facts registration-review"><div><dt>服务名称</dt><dd>{review.name}</dd></div><div><dt>登记方式</dt><dd>{checked?.observe_ready && registrationMode === 'observe' ? '观察状态与日志' : '托管启停'} · 保留运行状态</dd></div></dl><div className="button-row registration-submit"><button className="btn btn-secondary" disabled={busy} onClick={() => setReview(undefined)}>上一步</button><button className="btn btn-primary" disabled={busy} onClick={() => void mutate(review.action, review.body)}>{busy ? '正在登记…' : '确认登记'}</button></div></>}
         </>}
     </div>}
-  </Panel>
+      </div>
+    </section>
+  </div>
 }

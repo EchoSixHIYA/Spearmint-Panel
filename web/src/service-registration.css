@@ -1,0 +1,145 @@
+.service-registration {
+  max-width: 1120px;
+  margin-inline: auto;
+  container-type: inline-size;
+}
+.registration-heading { margin-bottom: 20px; }
+.registration-heading .back-link { margin: 0; }
+.registration-heading h1 { margin: 6px 0 0; }
+.registration-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 264px) minmax(0, 1fr);
+  align-items: start;
+  gap: 18px;
+}
+.registration-layout > .panel { min-width: 0; margin: 0; }
+.registration-selector.panel { padding: 16px; }
+.registration-node { margin: 0; }
+.registration-node > span { display: flex; align-items: center; gap: 8px; }
+.registration-node .icon { color: var(--green); }
+.registration-mode-group {
+  display: grid;
+  gap: 6px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--edge);
+}
+.registration-mode-group h2 { margin: 0 0 2px; font-size: 12px; letter-spacing: 0; }
+.registration-mode {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 15px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  text-align: left;
+}
+.registration-mode:hover { background: #f5f8f5; }
+.registration-mode[aria-pressed=true] { color: #225f48; border-color: #b9d6c0; background: #edf6ed; }
+.registration-mode small { display: block; font-size: 11px; color: #617b6c; overflow-wrap: anywhere; }
+.registration-mode strong { display: block; font-size: 13px; overflow-wrap: anywhere; }
+.registration-mode-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: #eff4ef;
+  color: #466f59;
+}
+.registration-mode[aria-pressed=true] .registration-mode-icon { background: #dceee0; color: #2d7656; }
+.registration-form-panel.panel { padding: 0; }
+.registration-form-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px clamp(14px, 2.7cqw, 26px);
+  border-radius: inherit;
+  border-bottom-right-radius: 0;
+  border-bottom-left-radius: 0;
+  background: linear-gradient(120deg, #184a3d, #286850);
+  color: #fff;
+}
+.registration-form-heading h2 { margin: 0; font-size: 18px; letter-spacing: 0; }
+.registration-form-body { padding: 18px clamp(14px, 2.7cqw, 26px) 20px; }
+.registration-form-body .stack { gap: 14px; }
+.registration-form-body p { margin: 0; }
+.registration-form-body .field-label { margin: 0; }
+.registration-form-body .service-deployment label { color: #344e40; font-weight: 650; }
+.registration-form-body .service-deployment form > .tabs {
+  align-self: flex-start;
+  max-width: 100%;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 3px;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: #f4f7f4;
+  overflow: visible;
+}
+.registration-form-body .tabs > .tab {
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #4f6d5c;
+}
+.registration-form-body .tabs > .tab.active {
+  border-color: #c7ddd0;
+  background: #fff;
+  color: #20644a;
+}
+.registration-optional { padding-left: 5px; color: #647d6f; font-weight: 400; }
+.registration-form-body .service-deployment .deploy-command {
+  min-height: 93px;
+  padding: 11px 12px;
+  background: #f6f9f6;
+  color: #224736;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.registration-form-body .deploy-command:focus-visible { outline: 2px solid #72b896; outline-offset: 2px; }
+.registration-form-body .deployment-location > summary { width: fit-content; padding-block: 3px; }
+.registration-form-body .deployment-settings { background: #fafcf9; }
+.registration-form-body .registration-submit {
+  justify-content: flex-end;
+  margin: 0;
+  border-top: 1px solid var(--edge);
+  padding-top: 12px;
+}
+.registration-steps { display: flex; flex-wrap: wrap; gap: 16px; padding: 0; margin: 0; list-style: none; color: var(--muted); font-size: 12px; }
+.registration-steps li { display: flex; align-items: center; gap: 6px; }
+.registration-steps li > span {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #eff4ef;
+  color: #527260;
+}
+.registration-steps [aria-current=step] { color: var(--green); font-weight: 700; }
+.registration-steps [aria-current=step] > span { background: #247553; color: white; }
+.registration-review { padding-inline: 12px; border: 1px solid var(--edge); border-radius: 9px; background: #f6f9f6; }
+
+@container (max-width: 670px) {
+  .registration-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .registration-mode-group { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .registration-mode-group h2 { grid-column: 1 / -1; }
+  .registration-mode { grid-template-columns: minmax(0, 1fr); gap: 5px; }
+  .registration-mode > .icon { display: none; }
+}
+@container (max-width: 435px) {
+  .registration-mode-group { grid-template-columns: minmax(0, 1fr); }
+  .registration-mode { grid-template-columns: auto minmax(0, 1fr) 15px; gap: 9px; padding: 6px 8px; }
+  .registration-mode > .icon { display: inline-block; }
+}
+@container (max-width: 355px) {
+  .service-registration .deployment-package-picker { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+  .service-registration .deployment-package-picker > .icon { display: none; }
+}
