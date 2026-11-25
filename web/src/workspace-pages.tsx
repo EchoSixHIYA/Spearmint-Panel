@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { timestamp, usePoll } from './api'
-import { useConsole, type Metrics, type Preferences, refreshConsole } from './console-data'
+import { useConsole, type AuditEntry, type Metrics, type Preferences, refreshConsole } from './console-data'
 import { NodeNote, SettingsPage, TopologyPaths } from './console-pages'
 import { nodeTypes } from './node-types'
 import { GroveCard } from './grove-auth'
@@ -10,6 +10,8 @@ import { ServiceList } from './service-workspace'
 import { useWorkspace, returnRoute, withReturn } from './workspace-api'
 import { nodeResourcesTarget, groveServiceRegistrationHref, localServiceHref, savedRemoteOperationHref, savedRemoteOperationTarget } from './grove-navigation'
 import { SavedRemoteOperation } from './operation-history'
+import type { History } from './remote-operations'
+import { actions, type Operation } from './services'
 import { hostResources, hostTrendSeries, type HostTrend } from './host-resources'
 import { publicPanelLabel } from './grove-directory'
 import { Badge, CopyValue, EmptyState, Icon, Loading, NodeConnectionBadge, Notice, PageHeading, Panel, StateBadge, Tabs } from './ui'
@@ -89,24 +91,75 @@ export function AccountWorkspace({ onFactors, onSave, section }: { onFactors: ()
   </>
 }
 
+const operationEvents: Partial<Record<string, { subject: string; action: string; status: string }>> = {
+  'service.registered': { subject: '服务登记', action: '登记服务', status: 'succeeded' },
+  'service.unregistered': { subject: '服务登记', action: '取消登记', status: 'succeeded' },
+  'service.details.updated': { subject: '服务登记', action: '修改服务信息', status: 'succeeded' },
+  'service.deployment.started': { subject: '服务部署', action: '启动部署', status: 'started' },
+  'service.deployment.succeeded': { subject: '服务部署', action: '完成部署', status: 'succeeded' },
+  'service.deployment.failed': { subject: '服务部署', action: '部署失败', status: 'failed' },
+  'service.deployment.cancelled': { subject: '服务部署', action: '取消部署', status: 'cancelled' },
+  'seed.wizard.accepted': { subject: '节点播种', action: '接收播种任务', status: 'accepted' },
+  'seed.wizard.started': { subject: '节点播种', action: '启动目标面板', status: 'started' },
+  'seed.wizard.joined': { subject: '节点播种', action: '加入 Grove', status: 'succeeded' },
+  'seed.wizard.failed': { subject: '节点播种', action: '播种失败', status: 'failed' },
+  'grove.update.started': { subject: 'Grove 群组更新', action: '发起群组更新', status: 'started' },
+  'grove.update.accepted': { subject: 'Grove 群组更新', action: '接收更新任务', status: 'accepted' },
+  'grove.update.succeeded': { subject: 'Grove 群组更新', action: '本机更新完成', status: 'succeeded' },
+  'grove.update.failed': { subject: 'Grove 群组更新', action: '本机更新失败', status: 'failed' },
+  'grove.node_note_changed': { subject: '节点资料', action: '修改节点备注', status: 'succeeded' },
+  'grove.node_profile_changed': { subject: '节点资料', action: '修改节点资料', status: 'succeeded' },
+}
+type HistoryTarget = { service_id: string; service_name: string | null }
+type OperationRow = { id: string; source: 'local' | 'remote' | 'change'; subject: string; node: string;
+  action: string; status: string; time: number; href?: string; reference?: string }
+
 export function OperationCenter() {
-  const { onUnauthorized, localName, listedNodes } = useConsole()
-  const local = usePoll<any[]>('/operations/local', onUnauthorized)
-  const remote = usePoll<any[]>('/operations/remote', onUnauthorized)
+  const { admin, onUnauthorized, localName, listedNodes, services } = useConsole()
+  const local = usePoll<Array<Operation & HistoryTarget>>(admin ? '/operations/local' : null, onUnauthorized)
+  const remote = usePoll<Array<History & HistoryTarget & { node_id: string }>>(admin ? '/operations/remote' : null, onUnauthorized)
+  const audit = usePoll<AuditEntry[]>(admin ? '/audit?limit=200' : null, onUnauthorized, 15000)
   const [source, setSource] = useState('all'), [status, setStatus] = useState('all')
   const saved = savedRemoteOperationTarget(location.hash)
+  if (!admin) return <EmptyState title="操作记录仅向节点管理员开放" />
   if (saved) return <SavedRemoteOperation {...saved} />
-  const rows = [
-    ...(local.data || []).map(item => ({ ...item, source: 'local', result: item, node: localName, request: item.id })),
-    ...(remote.data || []).map(item => ({ ...item, source: 'remote', result: item.receipt?.operation,
-      node: listedNodes.find(node => node.id === item.node_id)?.name || item.node_id, request: item.request_id })),
-  ].sort((a, b) => b.updated_at - a.updated_at).filter(item => (source === 'all' || source === item.source)
-    && (status === 'all' || status === 'pending' ? status === 'all' || !item.result || ['queued', 'running', 'uncertain'].includes(item.result.status) : item.result?.status === status))
-  return <><PageHeading eyebrow="WORKSPACE / OPERATIONS" title="操作中心" description="在当前面板跟踪本机和远程请求，查询执行回执。" />
+  const nodeNames = new Map(listedNodes.map(node => [node.id, node.name]))
+  const serviceNames = new Map((services.data || []).map(service => [service.id, service.name]))
+  const rows: OperationRow[] = [
+    ...(local.data || []).map<OperationRow>(item => ({ id: `local/${item.id}`, source: 'local', subject: item.service_name || '已移除的服务',
+      node: localName, action: actions[item.action], status: item.status, time: item.updated_at, reference: item.id,
+      href: item.service_name ? withReturn(localServiceHref(item.service_id, 'history')) : undefined })),
+    ...(remote.data || []).map<OperationRow>(item => ({ id: `remote/${item.node_id}/${item.request_id}`, source: 'remote',
+      subject: item.service_name || '远程服务', node: nodeNames.get(item.node_id) || item.node_id, action: actions[item.action],
+      status: item.receipt?.operation?.status || (item.receipt ? 'accepted' : 'uncertain'), time: item.updated_at, reference: item.request_id,
+      href: savedRemoteOperationHref(item.node_id, item.service_id, item.request_id) })),
+    ...(audit.data || []).flatMap<OperationRow>(entry => {
+      const event = operationEvents[entry.event]
+      if (!event) return []
+      return [{ ...event, id: `audit/${entry.id}`, source: 'change', time: entry.recorded_at,
+        subject: serviceNames.get(entry.target || '') || event.subject, node: nodeNames.get(entry.target || '') || localName }]
+    }),
+  ].sort((a, b) => b.time - a.time).filter(item => (source === 'all' || source === item.source)
+    && (status === 'all' || status === item.status || (status === 'pending' && item.source !== 'change'
+      && ['accepted', 'queued', 'running', 'uncertain'].includes(item.status))))
+  const reads = source === 'local' ? [local] : source === 'remote' ? [remote] : source === 'change' ? [audit] : [local, remote, audit]
+  const loading = reads.some(read => !read.data && !read.error)
+  const failed = reads.some(read => !!read.error)
+  const phaseLabels: Record<string, string> = { started: '已启动', accepted: '已受理', cancelled: '已取消' }
+  return <><PageHeading eyebrow="WORKSPACE / OPERATIONS" title="操作中心" description="查看此面板保存的服务回执、任务与变更记录。" />
     <Panel title="操作记录" action={<button className="btn btn-secondary" onClick={refreshConsole}>刷新</button>}><div className="workspace-filters">
-      <select className="input" aria-label="操作来源" value={source} onChange={event => setSource(event.target.value)}><option value="all">全部来源</option><option value="local">本机操作</option><option value="remote">远程操作</option></select>
+      <select className="input" aria-label="记录类型" value={source} onChange={event => setSource(event.target.value)}><option value="all">全部记录</option><option value="local">本机服务操作</option><option value="remote">远程服务操作</option><option value="change">任务与变更</option></select>
       <select className="input" aria-label="操作结果" value={status} onChange={event => setStatus(event.target.value)}><option value="all">全部状态</option><option value="pending">待跟踪</option><option value="uncertain">结果待确认</option><option value="succeeded">已完成</option><option value="failed">失败</option></select></div>
-      {(local.error || remote.error) && <Notice tone="amber">部分记录正在等待连接恢复。</Notice>}
-      {rows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>服务 / 请求</th><th>所属节点</th><th>动作</th><th>结果</th><th>更新时间</th></tr></thead><tbody>{rows.map(item => <tr key={`${item.source}/${item.request}`}><td><a className="text-link" href={item.source === 'local' ? withReturn(localServiceHref(item.service_id, 'history')) : savedRemoteOperationHref(item.node_id, item.service_id, item.request)}>{item.service_name || item.service_id}</a><small className="table-secondary">{item.request}</small></td><td>{item.node}</td><td>{{ start: '启动', stop: '停止', restart: '重启' }[item.action as 'start' | 'stop' | 'restart']}</td><td><StateBadge state={item.result?.status || 'queued'} /></td><td>{timestamp(item.updated_at)}</td></tr>)}</tbody></table></div> : !local.data || !remote.data ? <Loading /> : <EmptyState title="没有匹配的操作记录" />}
+      {failed && <Notice tone="amber">部分记录暂时无法读取，可刷新重试。</Notice>}
+      {rows.length ? <div className="table-wrap"><table className="data-table">
+        <thead><tr><th>服务 / 任务</th><th>节点</th><th>动作</th><th>结果</th><th>时间</th></tr></thead>
+        <tbody>{rows.map(item => <tr key={item.id}>
+          <td>{item.href ? <a className="text-link" href={item.href}>{item.subject}</a> : item.subject}
+            {item.reference && <small className="table-secondary">{item.reference}</small>}</td>
+          <td>{item.node}</td><td>{item.action}</td>
+          <td>{phaseLabels[item.status] ? <Badge>{phaseLabels[item.status]}</Badge> : <StateBadge state={item.status} />}</td>
+          <td className="time-cell">{timestamp(item.time)}</td>
+        </tr>)}</tbody>
+      </table></div> : loading ? <Loading /> : !failed && <EmptyState title="没有匹配的操作记录" />}
     </Panel></>
 }
