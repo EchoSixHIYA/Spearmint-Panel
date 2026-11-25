@@ -147,7 +147,10 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
   const flow = useServiceOperation(path, session, detail.data?.version || 1, () => { detail.reload(); refreshConsole() })
   const current = detail.data, unavailable = !!detail.error || !current || current.observation.stale
   const canUpdateCode = !!current?.can_deploy && deployedBySpearmint(current)
-  const blocked = busy || unavailable || flow.tracking || ['unknown', 'missing', 'starting', 'stopping'].includes(current?.observation.status || 'unknown')
+  const writeBlocked = busy || !!detail.error || flow.tracking
+  const runtimeBlocked = writeBlocked || unavailable || ['unknown', 'missing', 'starting', 'stopping'].includes(current?.observation.status || 'unknown')
+  const canUnregister = !!current?.can_unregister && current.version !== undefined && !writeBlocked
+  const targetMissing = !unavailable && current?.observation.status === 'missing'
   const receipt: Receipt | undefined = flow.intent ? { ...flow.intent.operation, action: flow.intent.action,
     status: flow.intent.operation?.status || 'queued', id: flow.intent.request_id || flow.intent.operation?.id || flow.intent.key } : current?.operations[0]
   const reasons = [...new Set([flow.intent?.error, receipt?.message, receiptReason(receipt), current?.observation.message].filter(Boolean))]
@@ -169,14 +172,22 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
   return <>
     <a className="back-link" href={returnRoute()}><Icon name="arrow-left" size={15} />返回来源</a>
     <PageHeading eyebrow="SERVICE / CONTROL" title={current?.name || '服务详情'} description={`${nodeName} · ${current ? serviceDriver(current) : '正在读取目标节点'}`}>
-      {current?.actions.includes(current.observation.status === 'running' ? 'stop' : 'start') && <button className="btn btn-primary" disabled={blocked} onClick={() => command(current.observation.status === 'running' ? 'stop' : 'start')}>{current.observation.status === 'running' ? '停止' : '启动'}</button>}
-      {current?.actions.includes('restart') && <button className="btn btn-secondary" disabled={blocked} onClick={() => command('restart')}>重启</button>}
+      {current?.actions.includes(current.observation.status === 'running' ? 'stop' : 'start') && <button className="btn btn-primary" disabled={runtimeBlocked} onClick={() => command(current.observation.status === 'running' ? 'stop' : 'start')}>{current.observation.status === 'running' ? '停止' : '启动'}</button>}
+      {current?.actions.includes('restart') && <button className="btn btn-secondary" disabled={runtimeBlocked} onClick={() => command('restart')}>重启</button>}
       <button className="btn btn-secondary" onClick={detail.reload}>核对状态</button>
     </PageHeading>
     {detail.error && <Notice tone="amber">{detail.error}</Notice>}{error && <Notice tone="amber">{error}</Notice>}
     <Tabs label="服务工作区" current={tab} onChange={next => { if (allowNavigation()) setTab(next) }} items={[{ id: 'overview', label: '概览' }, { id: 'links', label: '访问链接' }, { id: 'logs', label: '日志' }, { id: 'history', label: '操作记录' }, { id: 'settings', label: '管理设置' }, ...(canUpdateCode ? [{ id: 'update', label: '代码与更新' }] : [])]} />
     {!current && !detail.error && <Loading />}
     {current && tab === 'overview' && <div className="stack service-overview">
+      {targetMissing && <Panel title={current.driver === 'docker' ? '已登记的容器已不存在' : '已登记的运行目标已不存在'}
+        action={current.can_unregister && <button type="button" className="btn btn-danger btn-small"
+          disabled={!canUnregister} onClick={() => setConfirmation('remove')}>取消登记</button>}>
+        <p className="muted tiny">{current.unregister_reason || (!current.can_unregister
+          ? '请在所属节点处理这条登记。'
+          : current.driver === 'docker' ? '如果容器已重建，可以取消旧登记，再从服务页接管新容器。'
+            : '如果服务已替换，可以取消旧登记，再登记新的服务。')}</p>
+      </Panel>}
       <ServiceUsage service={current} unavailable={unavailable} />
       <div className={`service-overview-content${hasReceipt ? ' has-receipt' : ''}`}>
         <ServiceLogs path={path} serviceId={id} onUnauthorized={onUnauthorized} remote={!local}
@@ -194,7 +205,7 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
     </div>}
     {current && tab === 'logs' && <ServiceLogs path={path} serviceId={id} onUnauthorized={onUnauthorized} remote={!local} active={!unavailable && current.logs_available !== false} />}
     {current && tab === 'links' && <ServiceAccessLinks links={current.access_links} version={current.version ?? 1}
-      canEdit={current.can_edit_details && !detail.error && !busy && !flow.tracking}
+      canEdit={current.can_edit_details && !writeBlocked}
       onSave={async (links, version) => {
         const updated = await workspace<Detail>(target, session, 'edit',
           { service_id: id, version, name: current.name, endpoint: current.endpoint, access_links: links })
@@ -205,9 +216,9 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
     {current && tab === 'history' && <Panel title="此服务的操作记录">{current.operations.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>动作</th><th>结果</th><th>时间</th><th>说明</th></tr></thead><tbody>{current.operations.map(item => <tr key={item.id}><td>{actionNames[item.action as keyof typeof actionNames] || item.action}</td><td><StateBadge state={item.status} /></td><td>{timestamp(item.updated_at)}</td><td>{item.message || receiptReason(item) || '—'}</td></tr>)}</tbody></table></div> : <EmptyState title="此服务暂无操作记录" />}</Panel>}
     {current && tab === 'settings' && <Panel className="service-settings-panel">
       <div className="service-setting-row"><span className="service-setting-label">服务名称</span><strong className="service-setting-value">{current.name}</strong>
-        <button className="btn btn-secondary btn-small" disabled={blocked || !current.can_edit_details} onClick={() => setEditing(true)}>重命名</button></div>
+        <button className="btn btn-secondary btn-small" disabled={writeBlocked || !current.can_edit_details} onClick={() => setEditing(true)}>重命名</button></div>
       <div className="service-setting-row"><span className="service-setting-label">管理方式</span>
-        <fieldset className="service-mode-options" aria-label="管理方式" disabled={blocked || !current.can_change_mode}>
+        <fieldset className="service-mode-options" aria-label="管理方式" disabled={runtimeBlocked || !current.can_change_mode}>
           <label><input type="radio" name="service-management-mode" value="manage" checked={current.managed} onChange={() => void mutate('mode', { mode: 'manage' })} />托管启停</label>
           <label><input type="radio" name="service-management-mode" value="observe" checked={!current.managed} onChange={() => void mutate('mode', { mode: 'observe' })} />观察模式</label>
         </fieldset>{current.runtime === 'systemd-system' && !current.managed && <HostServiceAuthorization nodeId={target} session={session} onUnauthorized={onUnauthorized}
@@ -219,14 +230,21 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
       <section className="service-advanced-management" role="group" aria-labelledby="service-advanced-title"><h3 id="service-advanced-title">高级管理</h3>
         <div className="service-advanced-actions"><a className="btn btn-secondary btn-small" href={withReturn(`#/ssh/${local ? current.node_id : target}`)}><Icon name="terminal" size={15} />打开该节点终端</a>
           <button className="btn btn-secondary btn-small" onClick={() => setTab('mapping')}><Icon name="globe" size={15} />公网映射<Badge tone="amber">规划中</Badge></button>
-          <button className="btn btn-danger btn-small" disabled={blocked || !current.can_unregister} title={current.unregister_reason} onClick={() => setConfirmation('remove')}>取消登记</button></div>
+          <button className="btn btn-danger btn-small" disabled={!canUnregister} title={current.unregister_reason} onClick={() => setConfirmation('remove')}>取消登记</button></div>
       </section>
     </Panel>}
     {current && tab === 'update' && canUpdateCode && <Panel title="更新服务"><ServiceDeployment target={target} service={current} onChanged={detail.reload} onOpen={() => setTab('overview')} /></Panel>}
     {current && tab === 'mapping' && <div className="stack"><div className="button-row"><button className="btn btn-ghost btn-small" onClick={() => setTab('settings')}><Icon name="arrow-left" size={14} />返回高级管理</button><Badge tone="amber">规划中</Badge></div>
       <FrpMappings path={path} session={session} onUnauthorized={onUnauthorized} stale={unavailable} /></div>}
     {confirmation && <Modal title={confirmation === 'remove' ? `取消登记 ${current?.name}？` : `${actionNames[confirmation as keyof typeof actionNames]} ${current?.name}？`} onClose={() => setConfirmation(undefined)}>
-      <p>目标节点：{nodeName}。操作结果将在当前面板显示。</p><div className="modal-actions"><button className="btn btn-secondary" onClick={() => setConfirmation(undefined)}>取消</button><button className="btn btn-danger" onClick={() => { const action = confirmation; setConfirmation(undefined); if (action === 'remove') void mutate('remove', {}); else void flow.submit(action) }}>确认{confirmation === 'remove' ? '取消登记' : actionNames[confirmation as keyof typeof actionNames]}</button></div></Modal>}
+      <p>{confirmation === 'remove' ? <>将从 {nodeName} 的 Spearmint 中移除此服务的登记记录。</> : <>目标节点：{nodeName}。操作结果将在当前面板显示。</>}</p>
+      <div className="modal-actions"><button className="btn btn-secondary" onClick={() => setConfirmation(undefined)}>取消</button>
+        <button className="btn btn-danger" disabled={confirmation === 'remove' ? !canUnregister : runtimeBlocked} onClick={() => {
+          const action = confirmation
+          setConfirmation(undefined)
+          if (action === 'remove') void mutate('remove', {})
+          else void flow.submit(action)
+        }}>确认{confirmation === 'remove' ? '取消登记' : actionNames[confirmation as keyof typeof actionNames]}</button></div></Modal>}
     {editing && current && <Modal title="编辑服务信息" onClose={() => setEditing(false)}><form className="stack" onSubmit={event => { event.preventDefault(); const values = new FormData(event.currentTarget); void mutate('edit', { name: values.get('name'), endpoint: current.endpoint }) }}>
       <label className="field-label">服务名称<input className="input" name="name" defaultValue={current.name} maxLength={80} required /></label><div className="modal-actions"><button type="button" className="btn btn-secondary" onClick={() => setEditing(false)}>取消</button><button className="btn btn-primary" disabled={busy}>保存</button></div></form></Modal>}
   </>
