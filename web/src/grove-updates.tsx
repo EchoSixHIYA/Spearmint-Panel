@@ -162,12 +162,16 @@ export function GroveUpdatePanel() {
               title="重新发起群组更新，已是目标版本的节点会自动跳过" onClick={() => void perform('retrying', retry)}>
               {action === 'retrying' ? actionLabels.retrying : '重试本次更新'}</button>}
           </div></div>
-        <div className="table-wrap"><table className="data-table maintenance-table"><thead><tr><th>节点</th><th>更新状态</th></tr></thead>
+        <div className="table-wrap"><table className="data-table maintenance-table">
+          <colgroup><col className="maintenance-node-column" /><col className="maintenance-status-column" /><col /></colgroup>
+          <thead><tr><th scope="col">节点</th><th scope="col">更新状态</th><th scope="col">说明</th></tr></thead>
           <tbody>{visibleRows.map(([id, row]) => {
-            const view = updatePresentation(row)
+            const source = row.package_source_node
+            const view = updatePresentation(row, source ? names.get(source) ?? shortId(source) : undefined)
             return <tr key={id}><td><a className="text-link" href={`#/nodes/${id}`}>{names.get(id) ?? shortId(id)}</a>
               {id === local.data?.node_id && <span className="maintenance-local">本机</span>}</td>
-              <td><Badge tone={view.tone}>{view.label}</Badge>{view.detail && <span className="maintenance-reason">{view.detail}</span>}</td></tr>
+              <td><Badge tone={view.tone}>{view.label}</Badge></td>
+              <td><span className="maintenance-reason">{view.detail}</span></td></tr>
           })}</tbody></table></div>
         {!active && counts.retryable > 0 && !candidate && <p className="maintenance-footnote muted">重试会重新发起群组更新，已是目标版本的节点会自动跳过。</p>}
       </div> : !candidate && !feedback && <p className="maintenance-feedback muted">{status.error ? '暂时无法读取更新记录，可重新检查更新。'

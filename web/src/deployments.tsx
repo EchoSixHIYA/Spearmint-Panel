@@ -1,7 +1,7 @@
 import { useConsole } from './console-data'
 import { usePoll } from './api'
 import { GroveUpdatePanel } from './grove-updates'
-import { Badge, Icon, PageHeading, Panel } from './ui'
+import { Badge, Icon, PageHeading, Panel, shortId } from './ui'
 import { updatePresentation, updateProgress, type GroveUpdate } from './grove-update-state'
 
 type NodeVersion = { node_id: string; build: { version: string | null; commit?: string | null } }
@@ -16,7 +16,9 @@ function TargetVersion({ id }: { id: string }) {
   const build = isLocal ? local.data?.build : version.data?.node_id === id ? version.data.build : undefined
   const value = build?.commit && build.commit === batch?.release.commit ? batch.release.tag : build?.version ? `v${build.version}` : '—'
   const result = batch?.nodes[id]
-  const view = result && updatePresentation(updateProgress(result, batch.expires))
+  const source = result?.package_source_node
+  const view = result && updatePresentation(updateProgress(result, batch.expires),
+    source ? listedNodes.find(item => item.id === source)?.name ?? shortId(source) : undefined)
   return <Panel className="maintenance-node" title={<span className="maintenance-target-name"><Icon name="server" size={18} />{node?.name ?? '目标节点'}</span>}
     action={<a className="text-link" href="#/maintenance">前往群组更新<Icon name="arrow-right" size={14} /></a>}>
     <dl className="maintenance-node-facts"><div><dt>当前版本</dt><dd>{value}</dd></div>

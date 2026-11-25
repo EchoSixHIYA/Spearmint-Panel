@@ -95,6 +95,73 @@ class UpdateDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, response)
         self.updates.remote.call.assert_awaited_with('peer-a', grove_updates.METHOD, {'action': 'catalog'}, diagnostic=True)
 
+    async def test_reports_the_selected_supplier_and_clears_it_before_trying_another(self):
+        asset = self.latest.packages['windows-amd64']
+        self.updates.ask = AsyncMock(return_value={'ready': True})
+        self.updates.transfer = AsyncMock(side_effect=[False, True])
+        report = Mock()
+
+        self.assertTrue(await self.updates.from_members(asset, wait_for_sources=False, on_transfer=report))
+        suppliers = [entry.args[0] for entry in self.updates.transfer.await_args_list]
+        self.assertEqual({*suppliers}, {'peer-a', 'peer-b'})
+        self.assertEqual([entry.args[0] for entry in report.call_args_list], [suppliers[0], None, suppliers[1]])
+
+    async def test_group_receipt_uses_the_actual_supplier_when_reported(self):
+        origin = 'spm1-' + '0' * 64
+        supplier = 'spm1-' + '1' * 64
+        receiving = 'spm1-' + '2' * 64
+        legacy = 'spm1-' + '3' * 64
+        finished = 'spm1-' + '4' * 64
+        self.updates.local_id = origin
+        self.updates.group_path = 'group.json'
+        self.updates.remote.work.return_value = [origin, supplier, receiving, legacy, finished]
+        self.updates.prepare_group_archives = Mock()
+        batch = {'job': 'a' * 32, 'release': self.latest.model_dump(), 'identity': [],
+                 'expires': int(grove_updates.time.time()) + 60,
+                 'nodes': {origin: {'status': 'succeeded'}, supplier: {'status': 'succeeded'},
+                           receiving: {'status': 'queued'}, legacy: {'status': 'queued'}, finished: {'status': 'queued'}}}
+        self.updates.ask = AsyncMock(side_effect=lambda node, _: {
+            receiving: {'status': 'downloading', 'reason': 'fetching_from_grove',
+                        'source_node': origin, 'package_source_node': supplier},
+            legacy: {'status': 'downloading', 'reason': 'fetching_from_grove', 'source_node': origin},
+            finished: {'status': 'installing', 'package_source_node': supplier},
+        }[node])
+
+        with patch.object(grove_updates.worker, 'read_record', return_value=batch), \
+                patch.object(grove_updates.worker, 'write_record') as saved:
+            await self.updates.tick_group()
+            receipt = self.updates.group_status()['nodes']
+        saved.assert_called_once()
+        self.assertEqual(receipt[receiving]['package_source_node'], supplier)
+        self.assertNotIn('package_source_node', receipt[legacy])
+        self.assertNotIn('package_source_node', receipt[finished])
+
+    async def test_local_receipt_clears_the_supplier_when_installation_starts(self):
+        origin = 'spm1-' + '0' * 64
+        supplier = 'spm1-' + '1' * 64
+        self.updates.local_id = 'spm1-' + '2' * 64
+        self.updates.local_path = 'local.json'
+        self.updates.target = 'windows-amd64'
+        self.updates.state = SimpleNamespace(directory='fixture')
+        self.updates.verify_source = AsyncMock()
+        offer = grove_updates.Offer(job='a' * 32, expires=int(grove_updates.time.time()) + 60,
+                                   release=self.latest, target=self.updates.local_id, identity=[])
+        job = {'job': offer.job, 'release': self.latest.model_dump(), 'source': offer.identity,
+               'source_node': origin, 'expires': offer.expires, 'status': 'queued'}
+
+        async def acquire(asset, *, on_transfer):
+            on_transfer(supplier)
+            receipt = self.updates.local_status(offer, origin)
+            self.assertEqual(receipt['package_source_node'], supplier)
+            self.assertEqual(receipt['source_node'], origin)
+            return True
+
+        self.updates.acquire = acquire
+        with patch.object(grove_updates.worker, 'read_record', return_value=job), \
+                patch.object(grove_updates.worker, 'write_record'), patch.object(grove_updates.worker, 'launch'):
+            await self.updates.run_node(job)
+            self.assertEqual(self.updates.local_status(offer, origin), {'status': 'installing', 'source_node': origin})
+
 
 class GitHubReleaseListTest(unittest.TestCase):
     def test_release_list_revalidates_through_the_http_cache(self):

@@ -1,5 +1,5 @@
 export type UpdateRelease = { tag: string; commit: string }
-export type NodeUpdate = { status: string; reason?: string }
+export type NodeUpdate = { status: string; reason?: string; package_source_node?: string }
 export type UpdateBatch = { job: string; release: UpdateRelease; nodes: Record<string, NodeUpdate>; expires: number }
 export type GroveUpdate = { job: null } | UpdateBatch
 
@@ -28,12 +28,14 @@ export function updateProgress(row: NodeUpdate, expires: number, now = Date.now(
   return expires <= now && !terminal.has(row.status) ? { status: 'expired' } : row
 }
 
-export function updatePresentation(row: NodeUpdate) {
+export function updatePresentation(row: NodeUpdate, packageSourceName?: string) {
   if (row.reason === 'older_release') return { label: '版本较新，已跳过', tone: 'neutral', detail: '' }
   if (row.reason === 'member_removed') return { label: '已离开 Grove', tone: 'neutral', detail: '' }
   return { label: row.reason === 'already_current' || row.reason === 'already_current_unmanaged' ? '已是目标版本' : labels[row.status] ?? '等待确认',
     tone: row.status === 'succeeded' ? 'green' : terminal.has(row.status) ? 'red' : 'amber',
-    detail: terminal.has(row.status) && ['grove_sync_pending', 'legacy_peer_unverified', 'legacy_revision_mismatch'].includes(row.reason ?? '')
+    detail: row.status === 'downloading' && row.reason === 'fetching_from_grove' && packageSourceName
+      ? `正在从${packageSourceName}接收安装包`
+      : terminal.has(row.status) && ['grove_sync_pending', 'legacy_peer_unverified', 'legacy_revision_mismatch'].includes(row.reason ?? '')
       ? '权限同步未完成，连接恢复后可重试' : reasons[row.reason ?? ''] ?? '' }
 }
 

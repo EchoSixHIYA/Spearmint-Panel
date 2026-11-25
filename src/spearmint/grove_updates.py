@@ -1,6 +1,7 @@
 """Coordinate a Grove update and exchange verified release archives over Mesh."""
 import asyncio
 from collections import Counter
+from collections.abc import Callable
 from contextlib import suppress
 from hashlib import sha256
 import logging
@@ -331,7 +332,7 @@ class UpdateCoordinator:
             return None
         if job['release'] != offer.release.model_dump() or (job['source'], job['source_node']) != (offer.identity, source):
             raise PeerError('CONFLICT', 'Update job ID was reused')
-        return {key: job[key] for key in ('status', 'reason', 'source_node') if key in job}
+        return {key: job[key] for key in ('status', 'reason', 'source_node', 'package_source_node') if key in job}
 
     async def accept(self, offer: Offer, pair=None) -> dict:
         if offer.target != self.local_id or set(offer.release.packages) != set(release.TARGETS):
@@ -535,7 +536,8 @@ class UpdateCoordinator:
         finally:
             intermediate.unlink(missing_ok=True)
 
-    async def from_members(self, asset: release.Asset, *, wait_for_sources: bool, on_transfer=None) -> bool:
+    async def from_members(self, asset: release.Asset, *, wait_for_sources: bool,
+                           on_transfer: Callable[[str | None], None] | None = None) -> bool:
         async def prepare_peer(node):
             response = await self.ask(node, {'action': 'prepare', 'asset': asset.model_dump()})
             return node, response or {}
@@ -550,9 +552,11 @@ class UpdateCoordinator:
                         node, response = await probe
                         if response.get('ready'):
                             if on_transfer is not None:
-                                on_transfer()
+                                on_transfer(node)
                             if await self.transfer(node, asset):
                                 return True
+                            if on_transfer is not None:
+                                on_transfer(None)
                         pending = pending or bool(response.get('pending'))
                 finally:
                     for probe in probes:
@@ -562,7 +566,8 @@ class UpdateCoordinator:
                 return False
             await asyncio.sleep(2)
 
-    async def acquire(self, asset: release.Asset, *, wait_for_sources: bool = False, on_transfer=None) -> bool:
+    async def acquire(self, asset: release.Asset, *, wait_for_sources: bool = False,
+                      on_transfer: Callable[[str | None], None] | None = None) -> bool:
         if await asyncio.to_thread(release.correct_archive, self.archive(asset), asset):
             return True
         github = self.prepare(asset)
@@ -584,13 +589,19 @@ class UpdateCoordinator:
     async def run_node(self, job: dict) -> None:
         candidate = release.Release.model_validate(job['release'])
         offer = Offer(job=job['job'], release=candidate, expires=job['expires'], target=self.local_id, identity=job['source'])
+
+        def report_transfer(node: str | None) -> None:
+            if node is None:
+                self.write_status(job, 'downloading', reason='checking_package_sources')
+            else:
+                self.write_status(job, 'downloading', reason='fetching_from_grove', package_source_node=node)
+
         try:
             if job['expires'] <= int(time.time()):
                 self.write_status(job, 'expired')
                 return
             self.write_status(job, 'downloading', reason='checking_package_sources')
-            if not await self.acquire(candidate.packages[self.target],
-                                      on_transfer=lambda: self.write_status(job, 'downloading', reason='fetching_from_grove')):
+            if not await self.acquire(candidate.packages[self.target], on_transfer=report_transfer):
                 self.write_status(job, 'waiting_package', reason='source_unavailable')
                 self.node_retry = time.monotonic() + 15
                 return
@@ -612,6 +623,7 @@ class UpdateCoordinator:
 
     def write_status(self, job: dict, status: str, **extra) -> None:
         job.pop('reason', None)
+        job.pop('package_source_node', None)
         job.update(status=status, **extra)
         worker.write_record(self.local_path, job)
 
@@ -646,6 +658,10 @@ class UpdateCoordinator:
 
         def save(node, result):
             row = {key: result[key] for key in ('status', 'reason') if isinstance(result.get(key), str) and len(result[key]) <= 64}
+            package_source = result.get('package_source_node')
+            if (row['status'] == 'downloading' and row.get('reason') == 'fetching_from_grove'
+                    and isinstance(package_source, str) and package_source != node and package_source in members):
+                row['package_source_node'] = package_source
             if row['status'] == 'waiting_grove' and row.get('reason', '').startswith('legacy_'):
                 since = nodes[node].get('grove_wait_since', now)
                 if now - since >= GROVE_RETRY_SECONDS:

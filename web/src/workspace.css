@@ -40,19 +40,20 @@
 .maintenance-batch { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; font-size: 12px; }
 .maintenance-batch strong { font-weight: 600; }
 .maintenance-batch strong span { margin-left: 7px; }
-.maintenance-table th { text-align: center; }
-.maintenance-table th:first-child { width: 40%; }
-.maintenance-table th:nth-child(2) { width: 60%; }
+.maintenance-table { width: 100%; table-layout: fixed; white-space: normal; overflow-wrap: anywhere; }
+.maintenance-node-column { width: 40%; }
+.maintenance-status-column { width: 9rem; }
 .maintenance-table td { padding-top: 10px; padding-bottom: 10px; }
-.maintenance-table td:nth-child(2) { text-align: center; }
-.maintenance-reason { margin-left: 12px; font-size: 11px; color: var(--muted); }
+.maintenance-table td:first-child .text-link { display: inline; }
+.maintenance-reason { font-size: 11px; color: var(--muted); }
 .maintenance-local { margin-left: 8px; color: var(--muted); font-size: 10px; }
 @media (max-width: 600px) {
   .maintenance-update { padding: 16px; }
   .maintenance-installed { flex-direction: column; gap: 6px; overflow-wrap: anywhere; }
-  .maintenance-table { min-width: 0; table-layout: fixed; white-space: normal; overflow-wrap: anywhere; }
+  .maintenance-table { min-width: 0; }
+  .maintenance-node-column { width: 29%; }
+  .maintenance-status-column { width: 7rem; }
   .maintenance-table td, .maintenance-table th { padding-left: 8px; padding-right: 8px; }
-  .maintenance-reason { display: block; margin: 5px 0 0; }
   .maintenance-offer > .maintenance-offer-actions, .maintenance-offer .btn { width: 100%; }
   .maintenance-batch > .maintenance-inline-actions { width: 100%; justify-content: space-between; }
 }
