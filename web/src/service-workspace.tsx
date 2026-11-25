@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { timestamp } from './api'
+import { ApiError, timestamp } from './api'
 import { useConsole, refreshConsole } from './console-data'
 import { useRemoteCatalog, useRemoteObservationTime } from './remote-catalog'
 import { ServiceLogs } from './service-logs'
@@ -105,18 +105,21 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
         const href = withReturn(row.local ? localServiceHref(row.service.id) : remoteServiceHref(row.node, row.service.id))
         return <tr key={`${row.node}/${row.service.id}`}><td><a className="text-link" href={href}><strong>{row.service.name}</strong></a><small className="table-secondary">{row.service.driver === 'docker' ? 'Docker 容器' : '系统服务 / 程序'}</small></td><td><a href={withReturn(`#/nodes/${row.node}`)}>{row.name}</a><small className="table-secondary">{row.local ? '当前面板 · 本机' : '通过 Mesh 管理'}</small></td>
           <td><StateBadge state={row.observation?.status || 'unknown'} stale={row.stale} /></td><td className="muted time-cell">{timestamp(row.observation?.checked_at ?? null)}</td>
-          <td><ServiceRowActions path={row.local ? `/services/${row.service.id}` : `/peers/${row.node}/services/${row.service.id}`}
+          <td><ServiceRowActions target={row.local ? 'local' : row.node} serviceId={row.service.id} nodeName={row.name}
+            path={row.local ? `/services/${row.service.id}` : `/peers/${row.node}/services/${row.service.id}`}
             name={row.service.name} status={row.observation?.status} allowed={row.service.actions} version={row.service.version || 1} stale={row.stale}
             detailsHref={href} logsHref={withReturn(row.local ? localServiceHref(row.service.id, 'logs') : remoteServiceHref(row.node, row.service.id, true))} /></td></tr>
       })}</tbody></table></div> : <EmptyState title="没有匹配的服务" />}
     </Panel></>
 }
 
-function ServiceRowActions({ path, name, status, allowed, version, stale, detailsHref, logsHref }: {
+function ServiceRowActions({ target, serviceId, nodeName, path, name, status, allowed, version, stale, detailsHref, logsHref }: {
+  target: string; serviceId: string; nodeName: string
   path: string; name: string; status?: string; allowed: readonly string[]; version: number; stale: boolean; detailsHref: string; logsHref: string
 }) {
   const { session } = useConsole()
   const flow = useServiceOperation(path, session, version, refreshConsole)
+  const [confirmRemoval, setConfirmRemoval] = useState(false)
   const availableAction = status === 'running' ? 'stop' : status === 'stopped' || status === 'failed' ? 'start' : undefined
   return <div className="service-row-actions">
     <div className="service-action-icons" role="group" aria-label={`${name} 的操作`}>
@@ -128,11 +131,67 @@ function ServiceRowActions({ path, name, status, allowed, version, stale, detail
         }}><Icon name={action === 'start' ? 'play' : 'stop'} size={16} /></button>)}
       <a className="icon-button" title={`查看 ${name} 详情`} aria-label={`查看 ${name} 详情`} href={detailsHref}><Icon name="info" size={16} /></a>
       <a className="icon-button" title={`查看 ${name} 日志`} aria-label={`查看 ${name} 日志`} href={logsHref}><Icon name="file-text" size={16} /></a>
+      <button type="button" className="icon-button" aria-label={`重启 ${name}`}
+        title={flow.tracking ? '操作执行中，等待回执' : stale ? '状态待确认' : !allowed.includes('restart') ? '当前服务不支持重启' : `重启 ${name}`}
+        disabled={flow.tracking || stale || !availableAction || !allowed.includes('restart')} onClick={() => {
+          if (confirm(`重启 ${name}？操作由所属节点执行。`)) void flow.submit('restart')
+        }}><Icon name="refresh" size={16} /></button>
+      <button type="button" className="icon-button service-action-unregister" aria-label={`取消登记 ${name}`}
+        title={flow.tracking ? '操作执行中，等待回执' : `取消登记 ${name}`}
+        disabled={flow.tracking} onClick={() => setConfirmRemoval(true)}><Icon name="x" size={16} /></button>
     </div>
     {flow.tracking && (flow.intent?.operation?.status === 'uncertain'
       ? <button type="button" className="service-action-receipt" onClick={() => void flow.query()}>查询原请求</button>
       : <span className="service-action-receipt" role="status">执行中…</span>)}
+    {confirmRemoval && <ServiceRowRemoval target={target} serviceId={serviceId} name={name} nodeName={nodeName}
+      onClose={() => setConfirmRemoval(false)} />}
   </div>
+}
+
+function ServiceRowRemoval({ target, serviceId, name, nodeName, onClose }: {
+  target: string; serviceId: string; name: string; nodeName: string; onClose: () => void
+}) {
+  const { session, onUnauthorized } = useConsole()
+  type Registration = Pick<Detail, 'name' | 'version' | 'can_unregister' | 'unregister_reason'>
+  const [registration, setRegistration] = useState<Registration>()
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    workspace<Registration>(target, session, 'detail', { service_id: serviceId }, controller.signal).then(value => {
+      if (!controller.signal.aborted) setRegistration(value)
+    }).catch(failure => {
+      if (controller.signal.aborted) return
+      if (failure instanceof ApiError && failure.status === 401) onUnauthorized()
+      setError(workspaceError(failure))
+    })
+    return () => controller.abort()
+  }, [target, serviceId, session, onUnauthorized])
+
+  async function remove() {
+    if (busy || !registration?.can_unregister || registration.version === undefined) return
+    setBusy(true)
+    try {
+      await workspace(target, session, 'remove', { service_id: serviceId, version: registration.version })
+      refreshConsole()
+      onClose()
+    } catch (failure) {
+      if (failure instanceof ApiError && failure.status === 401) onUnauthorized()
+      setError(workspaceError(failure))
+    } finally { setBusy(false) }
+  }
+
+  return <Modal title={`取消登记 ${registration?.name ?? name}？`} dismissOnEscape={!busy} onClose={() => { if (!busy) onClose() }}>
+    <p>将从 {nodeName} 的 Spearmint 中移除此服务的登记记录。服务文件和数据会保留。</p>
+    {error ? <Notice tone="amber">{error}</Notice> : !registration ? <Loading /> : !registration.can_unregister
+      && <Notice tone="amber">{registration.unregister_reason || '此服务的登记受保护，请在所属节点处理。'}</Notice>}
+    <div className="modal-actions">
+      <button type="button" className="btn btn-secondary" onClick={onClose} disabled={busy}>取消</button>
+      <button type="button" className="btn btn-danger" disabled={busy || !!error || !registration?.can_unregister || registration.version === undefined}
+        onClick={() => void remove()}>{busy ? '正在取消登记…' : '确认取消登记'}</button>
+    </div>
+  </Modal>
 }
 
 function ServiceDetail({ target, id, initialTab }: { target: string; id: string; initialTab?: string }) {
