@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useConsole } from './console-data'
 import type { RemoteObservation } from './remote-observation'
 import type { Action } from './services'
+import type { ServiceGroup } from './service-groups'
 import { remoteDirectoryCurrent } from './remote-directory'
 
 export { remoteDirectoryCurrent } from './remote-directory'
@@ -17,7 +18,8 @@ export type RemoteService = {
   observation: RemoteObservation | null
 }
 
-export type RemoteDirectory = { stale: boolean; catalog_complete?: boolean; connection_id?: string | null; directory_generation?: number | null; services: RemoteService[] }
+export type RemoteDirectory = { stale: boolean; catalog_complete?: boolean; connection_id?: string | null; directory_generation?: number | null;
+  services: RemoteService[]; service_groups?: ServiceGroup[] }
 export type NodeDirectory = RemoteDirectory & { node_id: string }
 
 export function useRemoteObservationTime(observations: readonly (RemoteObservation | null | undefined)[]) {

@@ -1,13 +1,14 @@
-import { useEffect, useState } from 'react'
-import { ApiError, timestamp } from './api'
+import { Fragment, useEffect, useState } from 'react'
+import { ApiError, timestamp, usePoll } from './api'
 import { useConsole, refreshConsole } from './console-data'
-import { useRemoteCatalog, useRemoteObservationTime } from './remote-catalog'
+import { remoteDirectoryCurrent, useRemoteCatalog, useRemoteObservationTime } from './remote-catalog'
 import { ServiceLogs } from './service-logs'
 import { FrpMappings } from './frp-mappings'
 import { GroveServiceSetup } from './remote-service-setup'
 import { ServiceDeployment, deployedBySpearmint } from './service-deployment'
 import { ServiceAccessLinks, type AccessLink } from './service-access-links'
 import { HostServiceAuthorization } from './host-service-authorization'
+import { ServiceGroupActions, ServiceGroupEditor, type GroupTarget, type ServiceGroup } from './service-groups'
 import { allowNavigation } from './navigation-guard'
 import { type Service, actions as actionNames, serviceDriver } from './services'
 import { groveServiceRegistrationHref, localServiceHref, remoteServiceHref } from './grove-navigation'
@@ -72,50 +73,119 @@ export function ServiceWorkspace({ section, segments }: { section?: string; segm
 }
 
 export function ServiceList({ initialNode, embedded = false }: { initialNode?: string; embedded?: boolean }) {
-  const { services, listedNodes, local, localName } = useConsole()
-  const { entries, error } = useRemoteCatalog()
+  const { services, listedNodes, local, localName, onUnauthorized } = useConsole()
+  const { entries, error, directories } = useRemoteCatalog()
+  const localGroups = usePoll<ServiceGroup[]>('/services/groups', onUnauthorized)
   const now = useRemoteObservationTime(entries.map(entry => entry.service.observation)) / 1000
   const query = new URLSearchParams(location.hash.split('?')[1])
   const [search, setSearch] = useState(query.get('q') || '')
   const [node, setNode] = useState((embedded ? initialNode : query.get('node') || initialNode) || '')
   const [status, setStatus] = useState(query.get('status') || '')
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [editor, setEditor] = useState<{ target: string; group?: ServiceGroup }>()
+  const localId = local.data?.node_id || 'local'
   const rows = [
-    ...(services.data || []).map(service => ({ service, node: local.data?.node_id || 'local', name: localName, local: true, stale: !!services.error || service.observation.stale, observation: service.observation })),
+    ...(services.data || []).map(service => ({ service, node: localId, name: localName, local: true, stale: !!services.error || service.observation.stale, observation: service.observation })),
     ...entries.map(entry => ({ service: entry.service, node: entry.node.id, name: entry.node.name, local: false,
       stale: entry.stale || entry.service.observation?.stale !== false || (entry.service.observation?.valid_until ?? 0) <= now,
       observation: entry.service.observation })),
   ].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN') || a.node.localeCompare(b.node)
     || a.service.name.localeCompare(b.service.name, 'zh-CN') || a.service.id.localeCompare(b.service.id))
-  const visible = rows.filter(row => (!node || row.node === node) && (!status || (status === 'stale' ? row.stale : row.observation?.status === status))
-    && `${row.service.name} ${row.name} ${row.service.id}`.toLowerCase().includes(search.toLowerCase()))
+  const targets = [
+    { node: localId, id: 'local', label: localName, available: !!localGroups.data && !localGroups.error && !services.error, groups: localGroups.data || [] },
+    ...listedNodes.filter(item => !item.local && directories.get(item.id)?.service_groups !== undefined).map(item => {
+      const directory = directories.get(item.id)
+      return { node: item.id, id: item.id, label: item.name, available: !error && remoteDirectoryCurrent(item, directory),
+        groups: directory?.service_groups || [] }
+    }),
+  ].map(target => ({ ...target, services: rows.filter(row => row.node === target.node).map(row => row.service) }))
+  const selectableTargets = targets.filter(target => (!embedded || target.node === initialNode) && target.available && target.services.length)
+  const preferredTarget = selectableTargets.find(target => target.node === node) ?? selectableTargets[0]
+  const searchTerm = search.trim().toLowerCase()
+  function statusMatches(row: typeof rows[number]) {
+    return !status || (status === 'stale' ? row.stale : row.observation?.status === status)
+  }
+  function searchMatches(row: typeof rows[number]) {
+    return `${row.service.name} ${row.name} ${row.service.id}`.toLowerCase().includes(searchTerm)
+  }
+  const assigned = new Set(targets.flatMap(target => target.groups.flatMap(group =>
+    group.members.map(member => `${target.node}/${member.service_id}`))))
+  const groups = targets.filter(target => !node || target.node === node).flatMap(target => target.groups.map(group => {
+    const members = group.members.map(member => ({ ...member,
+      row: rows.find(row => row.node === target.node && row.service.id === member.service_id) }))
+    const named = group.name.toLowerCase().includes(searchTerm)
+    const matching = members.filter(member => member.row && statusMatches(member.row) && (named || searchMatches(member.row)))
+    return { target, group, members, matching }
+  }).filter(item => item.matching.length || (!status && item.group.name.toLowerCase().includes(searchTerm))))
+  const visible = rows.filter(row => (!node || row.node === node) && !assigned.has(`${row.node}/${row.service.id}`)
+    && statusMatches(row) && searchMatches(row))
   function update(field: 'q' | 'node' | 'status', value: string) {
     if (field === 'q') setSearch(value); else if (field === 'node') setNode(value); else setStatus(value)
     const params = new URLSearchParams(location.hash.split('?')[1]); if (value) params.set(field, value); else params.delete(field)
     history.replaceState(null, '', location.hash.split('?')[0] + (params.size ? '?' + params : ''))
   }
+  function serviceRow(row: typeof rows[number], options?: { statusOnly: boolean; groupRunning: boolean }) {
+    const href = withReturn(row.local ? localServiceHref(row.service.id) : remoteServiceHref(row.node, row.service.id))
+    return <tr className={options ? 'service-group-child' : undefined} key={row.service.id}><td>
+      {options?.statusOnly ? <strong>{row.service.name}</strong> : <a className="text-link" href={href}><strong>{row.service.name}</strong></a>}
+      <small className="table-secondary">{row.service.driver === 'docker' ? 'Docker 容器' : '系统服务 / 程序'}</small>
+    </td><td><a href={withReturn(`#/nodes/${row.node}`)}>{row.name}</a><small className="table-secondary">{row.local ? '当前面板 · 本机' : '通过 Mesh 管理'}</small></td>
+      <td><StateBadge state={row.observation?.status || 'unknown'} stale={row.stale} /></td><td className="muted time-cell">{timestamp(row.observation?.checked_at ?? null)}</td>
+      <td>{options?.statusOnly ? <span className="muted tiny">仅显示状态</span>
+        : <ServiceRowActions target={row.local ? 'local' : row.node} serviceId={row.service.id} nodeName={row.name}
+          path={row.local ? `/services/${row.service.id}` : `/peers/${row.node}/services/${row.service.id}`}
+          name={row.service.name} status={row.observation?.status} allowed={options?.groupRunning ? [] : row.service.actions}
+          version={row.service.version || 1} stale={row.stale} blocked={options?.groupRunning}
+          detailsHref={href} logsHref={withReturn(row.local ? localServiceHref(row.service.id, 'logs') : remoteServiceHref(row.node, row.service.id, true))} />}</td>
+    </tr>
+  }
   return <>{!embedded && <PageHeading eyebrow="WORKSPACE / SERVICES" title="服务" description="找到程序，控制启停，确认结果。">
+    <button type="button" className="btn btn-secondary" disabled={!preferredTarget} onClick={() => {
+      if (preferredTarget) setEditor({ target: preferredTarget.id })
+    }}><Icon name="layers" size={16} />新建服务组</button>
     <a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(node || undefined))}><Icon name="plus" size={16} />登记服务</a>
-  </PageHeading>}{embedded && <div className="button-row"><a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(initialNode))}>在此节点登记服务</a></div>}
+  </PageHeading>}{embedded && <div className="button-row"><a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(initialNode))}>在此节点登记服务</a>
+    {preferredTarget && <button type="button" className="btn btn-secondary" onClick={() => setEditor({ target: preferredTarget.id })}>新建服务组</button>}</div>}
     <div className="workspace-summary"><strong>{rows.length} 个已登记服务</strong><span>{rows.filter(row => !row.stale && row.observation?.status === 'running').length} 个运行中</span><span role="status">{services.error || error ? '部分状态暂时无法更新，保留上次目录' : '通过 Mesh 在当前面板管理目标节点'}</span></div>
     <Panel><div className="workspace-filters"><label className="search-box"><Icon name="search" size={16} /><input aria-label="搜索服务" value={search} onChange={e => update('q', e.target.value)} placeholder="搜索服务、节点或程序名称…" /></label>
       <select className="input" aria-label="按节点筛选" value={node} disabled={embedded} onChange={e => update('node', e.target.value)}><option value="">全部节点</option>{listedNodes.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
       <select className="input" aria-label="按状态筛选" value={status} onChange={e => update('status', e.target.value)}><option value="">全部状态</option><option value="running">运行中</option><option value="stopped">已停止</option><option value="failed">失败</option><option value="stale">状态待确认</option></select>
       <button className="btn btn-secondary" onClick={refreshConsole}>刷新</button></div>
-      {!services.data && !services.error ? <Loading /> : visible.length ? <div className="table-wrap"><table className="data-table workspace-service-table"><thead><tr><th>服务</th><th>所属节点</th><th>运行状态</th><th>最近检查</th><th>操作</th></tr></thead><tbody>{visible.map(row => {
-        const href = withReturn(row.local ? localServiceHref(row.service.id) : remoteServiceHref(row.node, row.service.id))
-        return <tr key={`${row.node}/${row.service.id}`}><td><a className="text-link" href={href}><strong>{row.service.name}</strong></a><small className="table-secondary">{row.service.driver === 'docker' ? 'Docker 容器' : '系统服务 / 程序'}</small></td><td><a href={withReturn(`#/nodes/${row.node}`)}>{row.name}</a><small className="table-secondary">{row.local ? '当前面板 · 本机' : '通过 Mesh 管理'}</small></td>
-          <td><StateBadge state={row.observation?.status || 'unknown'} stale={row.stale} /></td><td className="muted time-cell">{timestamp(row.observation?.checked_at ?? null)}</td>
-          <td><ServiceRowActions target={row.local ? 'local' : row.node} serviceId={row.service.id} nodeName={row.name}
-            path={row.local ? `/services/${row.service.id}` : `/peers/${row.node}/services/${row.service.id}`}
-            name={row.service.name} status={row.observation?.status} allowed={row.service.actions} version={row.service.version || 1} stale={row.stale}
-            detailsHref={href} logsHref={withReturn(row.local ? localServiceHref(row.service.id, 'logs') : remoteServiceHref(row.node, row.service.id, true))} /></td></tr>
-      })}</tbody></table></div> : <EmptyState title="没有匹配的服务" />}
-    </Panel></>
+      {!services.data && !services.error ? <Loading /> : visible.length || groups.length ? <div className="table-wrap"><table className="data-table workspace-service-table"><thead><tr><th>服务</th><th>所属节点</th><th>运行状态</th><th>最近检查</th><th>操作</th></tr></thead><tbody>
+        {groups.map(({ target, group, members, matching }) => {
+          const key = `${target.id}/${group.id}`
+          const open = expanded[key] ?? false
+          const running = members.filter(({ row }) => row && !row.stale && row.observation?.status === 'running' && row.observation.health !== 'unhealthy').length
+          const unknown = members.some(({ row }) => !row || row.stale)
+          const failed = members.some(({ row }) => row && !row.stale &&
+            (['missing', 'failed'].includes(row.observation?.status || '') || row.observation?.health === 'unhealthy'))
+          return <Fragment key={key}><tr className="service-group-header">
+            <td><button type="button" className="service-group-toggle" aria-expanded={open}
+              onClick={() => setExpanded(previous => ({ ...previous, [key]: !open }))}>
+              <Icon name={open ? 'chevron-down' : 'chevron-right'} size={15} /><Icon name="layers" size={17} />
+              <strong>{group.name}</strong><small>{members.length} 项</small>
+            </button></td>
+            <td>{target.label}</td>
+            <td><Badge tone={failed ? 'red' : running === members.length ? 'green' : 'neutral'}>{running}/{members.length} 运行中</Badge>
+              {(unknown || failed) && <small className="table-secondary">{failed ? '成员异常' : '部分状态待确认'}</small>}</td>
+            <td>—</td>
+            <td><ServiceGroupActions group={group} target={target satisfies GroupTarget} onEdit={() => setEditor({ target: target.id, group })} /></td>
+          </tr>
+          {open && matching.map(member => member.row && serviceRow(member.row, { statusOnly: member.status_only,
+            groupRunning: group.operation?.status === 'running' }))}
+          </Fragment>
+        })}
+        {visible.map(row => <Fragment key={`${row.node}/${row.service.id}`}>{serviceRow(row)}</Fragment>)}
+      </tbody></table></div> : <EmptyState title="没有匹配的服务" />}
+    </Panel>
+    {editor && <ServiceGroupEditor targets={editor.group ? targets.filter(target => target.id === editor.target) : selectableTargets}
+      initialTarget={editor.target} group={editor.group} onClose={() => setEditor(undefined)} />}
+  </>
 }
 
-function ServiceRowActions({ target, serviceId, nodeName, path, name, status, allowed, version, stale, detailsHref, logsHref }: {
+function ServiceRowActions({ target, serviceId, nodeName, path, name, status, allowed, version, stale, blocked, detailsHref, logsHref }: {
   target: string; serviceId: string; nodeName: string
-  path: string; name: string; status?: string; allowed: readonly string[]; version: number; stale: boolean; detailsHref: string; logsHref: string
+  path: string; name: string; status?: string; allowed: readonly string[]; version: number; stale: boolean; blocked?: boolean; detailsHref: string; logsHref: string
 }) {
   const { session } = useConsole()
   const flow = useServiceOperation(path, session, version, refreshConsole)
@@ -138,7 +208,7 @@ function ServiceRowActions({ target, serviceId, nodeName, path, name, status, al
         }}><Icon name="refresh" size={16} /></button>
       <button type="button" className="icon-button service-action-unregister" aria-label={`取消登记 ${name}`}
         title={flow.tracking ? '操作执行中，等待回执' : `取消登记 ${name}`}
-        disabled={flow.tracking} onClick={() => setConfirmRemoval(true)}><Icon name="x" size={16} /></button>
+        disabled={flow.tracking || blocked} onClick={() => setConfirmRemoval(true)}><Icon name="x" size={16} /></button>
     </div>
     {flow.tracking && (flow.intent?.operation?.status === 'uncertain'
       ? <button type="button" className="service-action-receipt" onClick={() => void flow.query()}>查询原请求</button>

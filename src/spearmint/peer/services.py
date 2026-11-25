@@ -1829,7 +1829,9 @@ class PeerServices:
                 db.execute('BEGIN')
                 actor.require(db)
                 services = [Service.from_row(row) for row in db.execute('SELECT * FROM service ORDER BY name,id')]
-            return {'services': [{'id': service.id, 'name': service.name, 'driver': service.driver,
+            groups = getattr(self.workspace, 'groups', None)
+            return {**({'service_groups': groups.public(services)} if groups is not None else {}),
+                    'services': [{'id': service.id, 'name': service.name, 'driver': service.driver,
                                   'version': service.version, 'status': True, 'logs': service.logs_available,
                                   'actions': service.actions,
                                   'observation': observation(self.controller.describe(service)['observation'],
@@ -1917,6 +1919,7 @@ class PeerServices:
         for item in result['services']:
             services[item['id']] = item
         return {**directory, 'catalog_complete': True,
+                **({'service_groups': result['service_groups']} if 'service_groups' in result else {}),
                 'services': sorted(services.values(), key=lambda item: (item['name'], item['id']))}
 
     async def visible_directories(self, actor: Actor) -> list[dict]:

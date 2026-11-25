@@ -17,7 +17,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 from threading import Event, RLock, Thread
 import time
 
-from .catalog import Service, get_service, list_services, register, require_idle, service_name
+from .catalog import DISPLAY_FIELDS, Service, get_service, list_services, register, require_idle, service_name
 from .drivers import CONTAINER_ID, Observation
 from .host import HostError, local_docker_command
 from .platforms import WINDOWS
@@ -432,8 +432,8 @@ class ServiceDeployments:
             current = get_service(db, service.id)
             if current is None or current.version != service.version:
                 raise StateError('服务登记已变化，停止切换。')
-            if 'access_links' in current.spec:
-                spec = {**spec, 'access_links': current.spec['access_links']}
+            spec = {**{key: value for key, value in spec.items() if key not in DISPLAY_FIELDS},
+                    **{key: current.spec[key] for key in DISPLAY_FIELDS if key in current.spec}}
             db.execute('UPDATE service SET spec=?, target=?, version=version+1 WHERE id=?',
                        (json.dumps(spec, sort_keys=True), target, service.id))
             publish(db, service.id)

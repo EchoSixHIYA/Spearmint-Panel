@@ -60,9 +60,10 @@ class Mode(Versioned):
 class Workspace:
     method = 'grove.workspace.v1'
 
-    def __init__(self, state, node_id, controller, metrics, docker_socket):
+    def __init__(self, state, node_id, controller, metrics, docker_socket, groups=None):
         self.state, self.node_id, self.controller = state, node_id, controller
         self.metrics, self.docker_socket = metrics, docker_socket
+        self.groups = groups
 
     def dispatch(self, pair, params):
         if params.keys() != {'identity', 'action', 'body'}:
@@ -81,6 +82,8 @@ class Workspace:
                         **({'trend': self.metrics.trend()} if body.get('trend') else {}), 'workspace': 1}
             if action == 'detail':
                 return self.detail(actor, Target.model_validate(body).service_id)
+            if action in {'group-save', 'group-delete', 'group-run'} and self.groups is not None:
+                return self.groups.request(actor, action, body)
             if action in {'edit', 'remove', 'mode'}:
                 model = Details if action == 'edit' else Mode if action == 'mode' else Versioned
                 selection = model.model_validate(body)

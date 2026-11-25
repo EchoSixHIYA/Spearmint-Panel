@@ -10,6 +10,7 @@ from .state import State, StateError, audit
 
 ACTIONS = ("start", "stop", "restart")
 MAX_SERVICES = 32
+DISPLAY_FIELDS = ("access_links", "service_groups")
 
 
 class RegistrationError(StateError):
@@ -45,7 +46,7 @@ class Service:
         return ACTIONS if self.managed else ()
 
     def runtime_spec(self) -> dict:
-        return {name: value for name, value in self.spec.items() if name != "access_links"}
+        return {name: value for name, value in self.spec.items() if name not in DISPLAY_FIELDS}
 
     @property
     def existing_systemd_unit(self) -> bool:

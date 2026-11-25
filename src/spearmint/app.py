@@ -35,6 +35,7 @@ from .service_mode import ModeChangeError, change_mode
 from .service_removal import unregister
 from .terminal_service import TerminalService
 from .peer.workspace import Workspace
+from .service_groups import ServiceGroups
 from .service_deployment import BULK_CHUNK, ServiceDeployments
 from .seeding import SeedDeployments
 from .state import State, StateError
@@ -391,7 +392,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     remote.service_setup = service_setup.ServiceSetup(store, node_id, config.docker_socket)
     terminals = TerminalService(store, node_id)
     remote.terminals = terminals
-    workspace = Workspace(store, node_id, controller, metrics, config.docker_socket)
+    groups = ServiceGroups(store, controller, remote.operations)
+    workspace = Workspace(store, node_id, controller, metrics, config.docker_socket, groups)
     remote.workspace = workspace
     deployments = ServiceDeployments(store, node_id, controller, config.docker_socket)
     remote.service_deployments = deployments
@@ -428,6 +430,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         with controller.running(), metrics.running():
+            await run_in_threadpool(groups.recover)
             await run_in_threadpool(deployments.recover)
             async with remote.running():
                 task = asyncio.create_task(synchronize_enrollment())
@@ -441,6 +444,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                     voter_jobs.cancel()
                     await asyncio.gather(task, rollout, voter_jobs, return_exceptions=True)
                     wizard.shutdown()
+                    await run_in_threadpool(groups.shutdown)
                     await run_in_threadpool(remote.service_setup.host_authorization.shutdown)
                     await run_in_threadpool(deployments.shutdown)
                     await run_in_threadpool(terminals.shutdown)
@@ -790,7 +794,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                                  'body': {'job': identifier, 'offset': offset, 'data': wire_b64(bytes(data)), 'sha256': digest}}, diagnostic=True)
 
     @app.post('/api/v1/peers/{target}/workspace/{action}')
-    async def workspace_request(target: str, action: Literal['host', 'detail', 'edit', 'remove', 'mode'],
+    async def workspace_request(target: str, action: Literal['host', 'detail', 'edit', 'remove', 'mode', 'group-save', 'group-delete', 'group-run'],
                                 body: dict = Depends(grove_body), actor: auth.Actor = Depends(require_admin_write)):
         if target in ('local', node_id):
             return await remote.work(workspace.request, service_setup.LocalAdmin(actor), action, body)
@@ -1430,6 +1434,10 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     @app.get("/api/v1/services")
     def services(_actor: auth.Actor = Depends(require_admin)):
         return [{**controller.describe(service), 'approval_required': False} for service in list_services(store)]
+
+    @app.get('/api/v1/services/groups')
+    def service_groups(_actor: auth.Actor = Depends(require_admin)):
+        return groups.public(list_services(store))
 
     @app.get("/api/v1/services/systemd-units")
     def systemd_units(_actor: auth.Actor = Depends(require_admin)):
