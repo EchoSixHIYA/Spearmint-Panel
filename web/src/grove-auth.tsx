@@ -6,10 +6,11 @@ import { memberPanelOrigin, type DirectoryMember, type MemberDirectoryVersion } 
 import { isAutomaticQuorumInvitation, isQuorumInvitation, isSignedGroveInvitation, parseGroveInvitation, takeQuorumInvitation, type GroveRealm } from './grove-invitation'
 import { CopyGroveInvitation, GroveInvitationField } from './grove-invitation-fields'
 import { startBrowserJoin } from './grove-join'
+import { GroveAccountDialog, type AccountAction } from './grove-account-access'
 import './identity.css'
 
 export type GroveInfo = { configured: boolean; realm?: GroveRealm; local_issuer?: boolean; frozen?: string; issuer_paused?: boolean;
-  local_login?: boolean;
+  local_login?: boolean; account_management?: boolean;
   access?: { mode: 'online' | 'offline' | 'synchronizing' | 'unavailable'; offline_seconds: number;
     confirmed_at: number | null; offline_until: number | null; identity_changes: boolean };
   member_login?: boolean; issuer_retired?: boolean; continuity_configured?: boolean; operator_revocation?: 'available' | 'awaiting-quorum';
@@ -17,7 +18,7 @@ export type GroveInfo = { configured: boolean; realm?: GroveRealm; local_issuer?
   identity_voter?: boolean;
   directory_requested_at?: Record<string, number>; directory_mesh_requested_at?: Record<string, number>;
   member_directory?: MemberDirectoryVersion;
-  members?: DirectoryMember[]; users?: { id: string; name: string; role: string; enabled: boolean; require_mfa?: boolean; can_suspend?: boolean }[]; valid_until?: number; sequence?: number }
+  members?: DirectoryMember[]; users?: { id: string; name: string; role: string; enabled: boolean; require_mfa?: boolean; can_suspend?: boolean; pending?: boolean }[]; valid_until?: number; sequence?: number }
 
 type DirectorySyncReport = {
   realm_id: string; previous_sequence: string | null; member_directory: MemberDirectoryVersion;
@@ -297,6 +298,8 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
   const [confirmRetirement, setConfirmRetirement] = useState(false)
   const [retirementDelivery, setRetirementDelivery] = useState<{ delivered: number; required: number }>()
   const retirementIncomplete = retirementDelivery && retirementDelivery.delivered < retirementDelivery.required
+  const [accountAction, setAccountAction] = useState<{ action: AccountAction; username?: string; role?: string }>()
+  const manageAccounts = session.grove && session.role === 'node_admin' && data?.account_management
   const [operatorToRevoke, setOperatorToRevoke] = useState<{ id: string; name: string }>()
   const [roleChange, setRoleChange] = useState<{ id: string; name: string; role: 'node_admin' | 'remote_operator' }>()
   const [revocation, setRevocation] = useState('')
@@ -407,7 +410,10 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
   }
   return <Panel className={mode === 'identity' ? 'identity-accounts-panel' : 'grove-node-access'}
     title={mode === 'nodes' ? '节点接入' : <span className="identity-grove-name"><Icon name="leaf" size={19} />{data?.realm?.name || 'Grove 账号'}</span>}
-    action={mode === 'identity' && data?.users ? <span className="muted tiny">{data.users.length} 个账号</span> : undefined}>
+    action={mode === 'identity' && manageAccounts ? <div className="identity-account-actions">
+      <button className="btn btn-secondary btn-small" onClick={() => setAccountAction({ action: 'invite' })}>邀请注册</button>
+      <button className="btn btn-primary btn-small" onClick={() => setAccountAction({ action: 'create' })}><Icon name="plus" size={14} />创建账号</button>
+    </div> : undefined}>
     {error && <Notice tone="amber">{error}</Notice>}
     {!data ? <Loading /> : !data.configured ? <>
       {openJoin && session.grove && <Notice tone="amber">请用这台节点的本机管理员账号登录后继续加入 Grove。</Notice>}
@@ -478,7 +484,7 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
         {data.users.map(user => <tr key={user.id}>
           <td><strong>{user.name}</strong>{session.grove && [session.username, session.display_name].includes(user.name) && <span className="identity-current-account">当前账号</span>}</td>
           <td>{user.role === 'node_admin' ? '管理员' : '操作员'}</td>
-          <td><Badge tone={user.enabled ? 'green' : 'neutral'}>{user.enabled ? '有效' : '已停用'}</Badge></td>
+          <td><Badge tone={user.enabled ? 'green' : user.pending ? 'amber' : 'neutral'}>{user.enabled ? '有效' : user.pending ? '待激活' : '已停用'}</Badge></td>
           <td><div className="identity-account-actions">
           {session.grove && user.enabled && user.can_suspend && data.operator_revocation === 'available' &&
             <button className="btn btn-secondary btn-small" disabled={pending} onClick={() => { setMessage(''); setOperatorToRevoke(user) }}>停用</button>}
@@ -487,7 +493,12 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
             <button className="btn btn-secondary btn-small" disabled={pending} onClick={() => {
               setMessage(''); setRoleChange({ ...user, role: user.role === 'node_admin' ? 'remote_operator' : 'node_admin' })
             }}>{data.role_votes?.includes(user.id) ? '重新核对批准' : '调整角色'}</button>}
-          {(!session.grove || !user.enabled || data.operator_revocation !== 'available' || !(user.can_suspend || data.recovery_admin && data.recovery_admin !== user.id && (user.role === 'node_admin' || user.require_mfa))) && <span className="muted">—</span>}
+          {manageAccounts && user.pending && <button className="btn btn-secondary btn-small"
+            onClick={() => setAccountAction({ action: 'invite', username: user.name, role: user.role })}>重新邀请</button>}
+          {manageAccounts && user.enabled && ![session.username, session.display_name].includes(user.name) &&
+            <button className="btn btn-secondary btn-small" onClick={() => setAccountAction({ action: 'assist', username: user.name })}>协助重置</button>}
+          {(!manageAccounts || !user.pending && (!user.enabled || [session.username, session.display_name].includes(user.name))) &&
+            (!session.grove || !user.enabled || data.operator_revocation !== 'available' || !(user.can_suspend || data.recovery_admin && data.recovery_admin !== user.id && (user.role === 'node_admin' || user.require_mfa))) && <span className="muted">—</span>}
           </div></td>
         </tr>)}
         {!data.users.length && <tr><td colSpan={4} className="muted">暂无 Grove 账号。</td></tr>}
@@ -500,6 +511,7 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
         onClick={() => void directorySync.sync()}><Icon name="refresh" size={14} />{directorySync.checking ? '正在同步…' : '刷新账号目录'}</button>
         {directorySync.message && <p className={directorySync.message.error ? 'error' : 'muted'} role="status">{directorySync.message.text}</p>}</details>
       </>}
+      {accountAction && <GroveAccountDialog {...accountAction} session={session} onClose={() => setAccountAction(undefined)} onUnauthorized={onUnauthorized} />}
       {operatorToRevoke && <Modal title={`停用 ${operatorToRevoke.name}`} onClose={() => { if (!pending) setOperatorToRevoke(undefined) }}>
         <p>成员收到停用记录后会注销该账号的会话。此操作无法撤销。</p>
         {message && <p className="error" role="alert">{message}</p>}

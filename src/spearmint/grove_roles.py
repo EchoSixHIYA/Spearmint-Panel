@@ -21,7 +21,7 @@ USER_ID = re.compile(r'usr1-[a-f0-9]{32}')
 
 
 def recovery_admin(users: list[dict]) -> str | None:
-    admins = sorted(user['id'] for user in users if user['enabled'] and user['role'] == ADMIN)
+    admins = sorted(user['id'] for user in users if user['enabled'] and user['role'] == ADMIN and not user.get('account_directory'))
     return admins[0] if admins else None
 
 

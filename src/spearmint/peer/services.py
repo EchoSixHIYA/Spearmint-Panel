@@ -15,7 +15,7 @@ from cryptography.exceptions import InvalidSignature
 from pydantic import ValidationError
 
 from ..auth import Actor
-from .. import auth, grove, grove_admission, grove_availability, grove_continuity, grove_identity_changes, grove_login, grove_metadata, grove_password, grove_revocation, grove_roles, grove_web_join, seed_admission
+from .. import auth, grove, grove_accounts, grove_admission, grove_availability, grove_continuity, grove_identity_changes, grove_login, grove_metadata, grove_password, grove_revocation, grove_roles, grove_web_join, seed_admission
 from ..build_info import (DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_HOST_METHOD, DEPLOYMENT_METHOD,
                           DEPLOYMENT_PACKAGE_METHOD, DEPLOYMENT_WEB_METHOD, DeploymentStatus)
 from ..catalog import Service, get_service
@@ -131,6 +131,7 @@ class PeerServices:
         self.deployment_status: Callable[[], dict] | None = None
         self.grove_refresh: asyncio.Task[tuple[str, dict | None]] | None = None
         self.grove_sync_requested = asyncio.Event()
+        self.grove_accounts = None
         self.mesh_enrollment_policy = None
         self.voter_service = None
         self.seed_wizard = None
@@ -470,8 +471,11 @@ class PeerServices:
             handler = grove_web_join.invitation_reply if method == grove_web_join.INVITATION_METHOD else grove_web_join.reply
             return await self.work(handler, self.state, config, pair, params, rpc=True)
         if method in {grove_continuity.METHOD, grove_continuity.VOTE_METHOD, grove_continuity.PASSWORD_VOTE_METHOD,
-                      grove_continuity.ROLE_VOTE_METHOD, grove_continuity.MEMBERS_VOTE_METHOD}:
+                      grove_continuity.ROLE_VOTE_METHOD, grove_continuity.MEMBERS_VOTE_METHOD,
+                      grove_continuity.ACCOUNTS_VOTE_METHOD}:
             return await self.work(self.grove_continuity_vote, pair, params, method, rpc=True)
+        if method == grove_accounts.METHOD and self.grove_accounts is not None:
+            return await self.work(self.grove_accounts.dispatch, pair, params, rpc=True)
         if method == grove_continuity.STATUS_METHOD:
             return await self.work(self.grove_continuity_ready, pair, params, rpc=True)
         if method == grove_continuity.INSTALL_METHOD:
@@ -596,12 +600,14 @@ class PeerServices:
         fields = {'nonce', 'anchor'}
         if method != grove_continuity.METHOD:
             fields.add('revocations')
-        if method in {grove_continuity.PASSWORD_VOTE_METHOD, grove_continuity.ROLE_VOTE_METHOD, grove_continuity.MEMBERS_VOTE_METHOD}:
+        if method in {grove_continuity.PASSWORD_VOTE_METHOD, grove_continuity.ROLE_VOTE_METHOD, grove_continuity.MEMBERS_VOTE_METHOD, grove_continuity.ACCOUNTS_VOTE_METHOD}:
             fields.add('passwords')
-        if method in {grove_continuity.ROLE_VOTE_METHOD, grove_continuity.MEMBERS_VOTE_METHOD}:
+        if method in {grove_continuity.ROLE_VOTE_METHOD, grove_continuity.MEMBERS_VOTE_METHOD, grove_continuity.ACCOUNTS_VOTE_METHOD}:
             fields.add('roles')
-        if method == grove_continuity.MEMBERS_VOTE_METHOD:
+        if method in {grove_continuity.MEMBERS_VOTE_METHOD, grove_continuity.ACCOUNTS_VOTE_METHOD}:
             fields.add('members')
+        if method == grove_continuity.ACCOUNTS_VOTE_METHOD:
+            fields.add('accounts')
         if (params.keys() != fields or not matches(RANDOM_ID, params['nonce'])
                 or any(not matches(grove_continuity.ANCHOR_DIGEST, params[field]) for field in fields - {'nonce'})):
             raise PeerError('INVALID_REQUEST', 'Invalid Grove continuity vote request')
@@ -610,7 +616,7 @@ class PeerServices:
             if pair.legacy or quarantine.contains(db, pair.node_id):
                 raise PeerError('DENIED', 'Grove continuity requires an active Mesh peer')
         return grove_continuity.vote(self.state, pair.node_id, params['nonce'], params['anchor'], params.get('revocations'),
-                                    params.get('passwords'), params.get('roles'), params.get('members'))
+                                    params.get('passwords'), params.get('roles'), params.get('members'), params.get('accounts'))
 
     def grove_continuity_ready(self, pair: Pair, params: dict) -> dict:
         with self.state.connect(read_only=True) as db:
@@ -1015,8 +1021,24 @@ class PeerServices:
                 passwords = grove_continuity.password_digest(db, params['anchor'])
                 roles = grove_continuity.role_versions(db)
                 members = grove_continuity.admission_versions(db)
+                accounts = grove_accounts.versions(db)
             roles_digest = grove_continuity.role_digest(roles)
             admissions_digest = grove_continuity.admission_digest(members)
+            accounts_digest = grove_accounts.digest_of(accounts)
+
+        async def synchronize_accounts(node_id, versions):
+            if (not isinstance(versions, dict) or len(versions) > grove_accounts.MAX_ACCOUNTS
+                    or any(not matches(grove_accounts.USERNAME, name) or type(version) is not int or not 0 < version < 2**53
+                           for name, version in versions.items())):
+                raise PeerError('PROTOCOL', 'Invalid Grove account revisions')
+            for name, version in versions.items():
+                if version > accounts.get(name, 0):
+                    reply = await self.call(node_id, grove_accounts.METHOD, {'action': 'get', 'username': name}, diagnostic=True)
+                    certificate = reply.get('certificate')
+                    record = certificate.get('proposal', {}) if isinstance(certificate, dict) else {}
+                    if record.get('username') != name or not isinstance(record.get('revision'), int) or record['revision'] < version:
+                        raise PeerError('PROTOCOL', 'Account record does not match its revision')
+                    await self.work(self.grove_accounts.dispatch, None, {'action': 'apply', 'certificate': certificate})
 
         async def synchronize_roles(node_id, versions):
             if (not isinstance(versions, dict) or len(versions) > 64
@@ -1046,6 +1068,8 @@ class PeerServices:
             try:
                 if not standby:
                     versions = (
+                        (grove_continuity.ACCOUNTS_VOTE_METHOD, {'revocations': revision, 'passwords': passwords,
+                            'roles': roles_digest, 'members': admissions_digest, 'accounts': accounts_digest}),
                         (grove_continuity.MEMBERS_VOTE_METHOD, {'revocations': revision, 'passwords': passwords,
                             'roles': roles_digest, 'members': admissions_digest}),
                         (grove_continuity.ROLE_VOTE_METHOD, {'revocations': revision, 'passwords': passwords,
@@ -1066,6 +1090,8 @@ class PeerServices:
                         # and controls while we wait for the other voters.
                         if reply['revocations'] or reply.get('passwords'):
                             grove_availability.synchronize(self.state, nonce, True)
+                        if reply.get('accounts'):
+                            await synchronize_accounts(node_id, reply['accounts'])
                         if reply['revocations']:
                             await self.work(grove_revocation.apply, self.state, reply['revocations'], node_id)
                         if reply.get('passwords'):

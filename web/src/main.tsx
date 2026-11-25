@@ -12,6 +12,7 @@ import { ExposuresPage } from './frp-mappings'
 import { AccessPage, OperationsPage } from './security-pages'
 import { Sessions } from './sessions'
 import { SignIn } from './sign-in'
+import { GroveAccountAccess } from './grove-account-access'
 import { FirstFactor, Setup, takeSetupEntry } from './onboarding'
 import { GroveAuthorize, GroveReturn, takeGroveDestination, takeGroveReturn } from './grove-auth'
 import { rememberQuorumInvitation } from './grove-invitation'
@@ -134,6 +135,8 @@ function App() {
       if (completed) expireSession()
       location.hash = completed ? '#/signin' : '#/overview'
     }} />
+  if (!session && (route.page === 'grove-register' || route.page === 'grove-forgot')) return <GroveAccountAccess
+    key={route.page} mode={route.page === 'grove-register' ? 'register' : 'reset'} />
   if (!session || changingFactors) return <SignIn key={changingFactors ? 'factor-change' : route.id ?? route.page} initialError={error}
     authorizeRequest={route.page === 'grove-authorize' ? route.id : undefined}
     mode={route.page === 'auth-enroll' ? 'enroll' : route.page === 'auth-recover' ? 'recover' : 'signin'}
@@ -142,7 +145,7 @@ function App() {
   if (route.page === 'grove-authorize' && route.id) return <GroveAuthorize key={route.id} request={route.id} session={session}
     signedInForRequest={groveRequestSignIn?.request === route.id && groveRequestSignIn.csrf === session.csrf_token}
     onReauthenticate={() => void signOut(null)} reauthenticating={pending} reauthenticationError={error} />
-  const page = ['signin', 'auth-recover'].includes(route.page) ? 'services' : route.page
+  const page = ['signin', 'auth-recover', 'grove-register', 'grove-forgot'].includes(route.page) ? 'services' : route.page
   return <ConsoleData key={session.username} session={session} onUnauthorized={expireSession} preferences={preferences} webBuild={webBuild}>
     <ConsoleLayout page={page} onSignOut={() => void signOut()} signingOut={pending}>
       {error && <Notice tone="amber">{error}</Notice>}

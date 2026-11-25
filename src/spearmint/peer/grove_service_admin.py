@@ -45,14 +45,17 @@ def admin_revision(db, member_realm: str, user_id: str) -> list:
             users = grove.verified('directory', json.loads(realm['manifest']), realm['public_key'])['users']
         except (KeyError, TypeError, ValueError) as error:
             raise PeerError('DENIED', 'The Grove identity directory is unavailable') from error
+    from .. import grove_accounts
+    users = grove_accounts.profile_overlay(db, users)
     user = next((entry for entry in users if entry['id'] == user_id and entry['enabled']), None)
     role = db.execute('SELECT role,generation FROM grove_login_role WHERE user_id=?', (user_id,)).fetchone()
     revoked = db.execute('SELECT 1 FROM grove_login_revocation WHERE user_id=?', (user_id,)).fetchone()
     if user is None or revoked or (role['role'] if role else user['role']) != 'node_admin':
         raise PeerError('DENIED', 'Grove administrator required')
     password = db.execute('SELECT generation FROM grove_login_password WHERE user_id=?', (user_id,)).fetchone()
+    revision = grove_accounts.credential_version(db, user_id)
     return [member_realm, user_id, user['epoch'], role['generation'] if role else 0,
-            password['generation'] if password else 0]
+            revision if revision is not None else password['generation'] if password else 0]
 
 
 def source_identity(state, local_id: str, pair: Pair | None, actor: auth.Actor) -> list:

@@ -6,7 +6,7 @@ import sqlite3
 from typing import Literal
 import re
 import secrets
-from time import perf_counter
+from time import perf_counter, time
 from urllib.parse import urlsplit
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
@@ -16,10 +16,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, grove, grove_updates, grove_admission, grove_login, grove_metadata, grove_password, grove_quorum_join, grove_voters, grove_voter_service, grove_web_join, mesh_enrollment, onboarding, passkeys, seed_admission, seed_wizard
+from . import auth, grove, grove_accounts, grove_updates, grove_admission, grove_login, grove_metadata, grove_password, grove_quorum_join, grove_voters, grove_voter_service, grove_web_join, mesh_enrollment, onboarding, passkeys, seed_admission, seed_wizard
 from .build_info import deployment_host, deployment_web, running_build
 from .catalog import RegistrationError, TargetAlreadyRegistered, get_service, list_services
 from .config import Config
+from .grove_account_service import GroveAccountService
 from .control import ControlError, Controller, operation_data
 from .drivers import CONTAINER_REFERENCE, ContainerNotFound, DockerDriver, Driver, ProcessDriver, SystemUnitDriver
 from .host import HostError
@@ -78,6 +79,34 @@ class GrovePasswordChange(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     current_password: str = Field(min_length=1, max_length=256)
     new_password: str = Field(min_length=12, max_length=256)
+
+
+class GroveAccountName(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    username: str = Field(pattern=grove_accounts.USERNAME_PATTERN)
+
+
+class GroveAccountInvitation(GroveAccountName):
+    role: Literal['node_admin', 'remote_operator']
+
+
+class GroveAccountCreate(GroveAccountInvitation):
+    password: str = Field(min_length=12, max_length=256)
+
+
+class GroveAccountReset(GroveAccountName):
+    code: str = Field(pattern=grove_accounts.CODE_PATTERN)
+    password: str = Field(min_length=12, max_length=256)
+
+
+class GroveAccountRegistration(GroveAccountReset):
+    totp: str = Field(pattern=grove_accounts.TOTP_PATTERN)
+    otp: str = Field(pattern=r'^[0-9]{6}$')
+
+
+class GroveRecoveryCode(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    current_password: str = Field(min_length=1, max_length=256)
 
 
 class GroveRoleChange(BaseModel):
@@ -384,6 +413,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                           advertise_port=config.mesh_advertise_port)
     peers = remote.manager
     remote.grove_config = config
+    accounts = GroveAccountService(store, remote)
+    remote.grove_accounts = accounts
     voter_service = grove_voter_service.VoterService(store, remote, config)
     remote.voter_service = voter_service
     remote.seed_deployments = seeds
@@ -605,14 +636,71 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             raise HTTPException(401, 'Invalid Grove account or authentication factor')
         return set_session(store, request, response, session)
 
+    def grove_session_account(actor):
+        with store.connect(read_only=True) as db:
+            session = auth.active_session(db, actor.token_hash, int(time()))
+            if session and session['grove_replica'] and grove_accounts.available(db):
+                entry = grove_accounts.record_for(db, session['display_name'])
+                return session['display_name'], entry
+        return None, None
+
+    async def grove_account_result(action, body, request, response, actor=None):
+        require_origin(request)
+        response.headers['Cache-Control'] = 'no-store'
+        return await accounts.run(action, address=address_of(request), actor=actor, **body.model_dump())
+
+    @app.post('/api/v1/grove/accounts/create')
+    async def grove_create_account(body: GroveAccountCreate, request: Request, response: Response,
+                                   actor: auth.Actor = Depends(require_admin_write)):
+        return await grove_account_result('create', body, request, response, actor)
+
+    @app.post('/api/v1/grove/accounts/invite')
+    async def grove_invite_account(body: GroveAccountInvitation, request: Request, response: Response,
+                                   actor: auth.Actor = Depends(require_admin_write)):
+        return await grove_account_result('invite', body, request, response, actor)
+
+    @app.post('/api/v1/grove/accounts/assist')
+    async def grove_assist_account(body: GroveAccountName, request: Request, response: Response,
+                                   actor: auth.Actor = Depends(require_admin_write)):
+        return await grove_account_result('assist', body, request, response, actor)
+
+    @app.post('/api/v1/auth/grove/account/register')
+    async def grove_register_account(body: GroveAccountRegistration, request: Request, response: Response):
+        return await grove_account_result('register', body, request, response)
+
+    @app.post('/api/v1/auth/grove/account/reset')
+    async def grove_reset_account(body: GroveAccountReset, request: Request, response: Response):
+        return await grove_account_result('reset', body, request, response)
+
+    @app.get('/api/v1/auth/grove/account/recovery-code')
+    def grove_recovery_status(actor: auth.Actor = Depends(require_actor)):
+        name, entry = grove_session_account(actor)
+        return {'available': name is not None, 'configured': bool(entry and entry['recovery_configured'])}
+
+    @app.post('/api/v1/auth/grove/account/recovery-code')
+    async def grove_recovery_code(body: GroveRecoveryCode, request: Request, response: Response,
+                                  actor: auth.Actor = Depends(require_write)):
+        name, _ = grove_session_account(actor)
+        if not name:
+            raise PeerError('DENIED', '请先使用 Grove 账号登录。')
+        require_origin(request)
+        response.headers['Cache-Control'] = 'no-store'
+        return await accounts.run('recovery-code', name, address_of(request), actor=actor,
+                                  current_password=body.current_password)
+
     @app.get('/api/v1/auth/grove/password')
     def grove_password_status(actor: auth.Actor = Depends(require_actor)):
-        return {'available': grove_password.available(store, actor)}
+        _, entry = grove_session_account(actor)
+        return {'available': bool(entry and entry['owns_password']) or grove_password.available(store, actor)}
 
     @app.post('/api/v1/auth/grove/password')
     async def grove_change_password(body: GrovePasswordChange, actor: auth.Actor = Depends(require_write)):
         if secrets.compare_digest(body.current_password.encode(), body.new_password.encode()):
             raise HTTPException(422, 'Choose a different Grove password')
+        name, entry = grove_session_account(actor)
+        if entry and entry['owns_password']:
+            return await accounts.run('password', name, actor.address, actor=actor, current_password=body.current_password,
+                                      password=body.new_password)
         return await remote.change_grove_password(actor, body.current_password, body.new_password)
 
     @app.get('/api/v1/grove')

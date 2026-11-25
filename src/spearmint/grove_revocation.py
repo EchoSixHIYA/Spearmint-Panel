@@ -24,7 +24,8 @@ def current_context(db, requester: str | None = None) -> tuple[str, dict, list[d
         raise PeerError('DENIED', 'This operation requires a Grove identity member')
     realm = db.execute('SELECT manifest,public_key FROM grove_realm').fetchone()
     users = grove.verified('directory', json.loads(realm['manifest']), realm['public_key'])['users']
-    return grove_continuity.anchor_digest(envelope), anchor, users
+    from . import grove_accounts
+    return grove_continuity.anchor_digest(envelope), anchor, grove_accounts.profile_overlay(db, users)
 
 
 def validate_document(document: dict, digest: str, anchor: dict, users: list[dict]) -> str:

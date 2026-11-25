@@ -196,7 +196,8 @@ def describe(state: State, *, private: bool = False) -> dict:
             return {'configured': False}
         result = {'configured': True, 'realm': realm_data(row), 'local_issuer': bool(row['is_issuer']),
                   'frozen': row['frozen'], 'issuer_paused': bool(row['issuer_paused'])}
-        from . import grove_availability
+        from . import grove_accounts, grove_availability
+        result['account_management'] = grove_accounts.available(db)
         result['access'] = grove_availability.status(db)
         continuity = db.execute('SELECT sequence,lease_until,anchor,recovery_proof FROM grove_login_continuity').fetchone()
         if continuity and continuity['sequence'] == row['sequence']:
@@ -238,10 +239,12 @@ def describe(state: State, *, private: bool = False) -> dict:
                     if not row['issuer_paused']:
                         revoked = {item[0] for item in db.execute('SELECT user_id FROM grove_login_revocation')}
                         roles = {item['user_id']: item['role'] for item in db.execute('SELECT user_id,role FROM grove_login_role')}
+                        users = grove_accounts.profile_overlay(db, directory['users'])
                         result['users'] = [user | {'enabled': user['enabled'] and user['id'] not in revoked,
                                                   'role': roles.get(user['id'], user['role']),
+                                                  'pending': bool(user.get('account_directory') and not user['enabled']),
                                                   'can_suspend': user['role'] == 'remote_operator' and roles.get(user['id']) != 'node_admin'}
-                                           for user in directory['users']]
+                                           for user in users]
                         if not row['is_issuer'] and result.get('issuer_retired'):
                             if result['identity_voter']:
                                 result['operator_revocation'] = 'available' if result.get('member_directory') else 'awaiting-quorum'

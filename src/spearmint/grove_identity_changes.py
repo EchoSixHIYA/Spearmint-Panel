@@ -52,6 +52,9 @@ def ballot(state, kind, document, actor: str, requester: str | None = None):
             raise PeerError('DENIED', 'An active Grove account is required')
         role = db.execute('SELECT role FROM grove_login_role WHERE user_id=?', (actor,)).fetchone()
         if kind == 'password':
+            from . import grove_accounts
+            if grove_accounts.credential_version(db, actor) is not None:
+                raise PeerError('CONFLICT', '请使用支持新版 Grove 账号管理的面板修改密码。')
             current = db.execute('SELECT generation FROM grove_login_password WHERE user_id=?', (actor,)).fetchone()
             if record['user_id'] != actor or record['generation'] != (current['generation'] if current else 0) + 1:
                 raise PeerError('CONFLICT', 'The Grove password revision changed')

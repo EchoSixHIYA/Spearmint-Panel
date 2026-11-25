@@ -197,7 +197,7 @@ def require_unlocked(db):
 
 
 def checkpoint(state, db):
-    from . import grove_continuity
+    from . import grove_accounts, grove_continuity
     original = json.loads(db.execute('SELECT anchor FROM grove_login_continuity').fetchone()[0])
     anchor = grove_continuity.anchor_digest(original)
     proofs = []
@@ -206,7 +206,9 @@ def checkpoint(state, db):
         proofs += [proof_digest(json.loads(row[0])) for row in db.execute(f'SELECT {column} FROM {table}')]
     proofs += [proof_digest(json.loads(factors.unseal(state, row['user_id'], row['document'])))
                for row in db.execute('SELECT user_id,document FROM grove_login_password')]
-    return {'proofs': sorted(set(proofs)), 'revocations': grove_continuity.revocation_digest(db, anchor),
+    accounts = grove_accounts.checkpoint_proofs(db)
+    return {'proofs': sorted(set(proofs + accounts)),
+            **({'accounts': grove_accounts.version_digest(db)} if accounts else {}), 'revocations': grove_continuity.revocation_digest(db, anchor),
             'passwords': grove_continuity.password_digest(db, anchor),
             'roles': grove_continuity.role_digest(grove_continuity.role_versions(db)),
             'members': grove_continuity.admission_digest(grove_continuity.admission_versions(db))}
@@ -294,6 +296,7 @@ def recovery_checkpoint(db):
 
 def restore_checkpoint(db, checkpoint):
     """A data restore must not undo a committed configuration or durable promise."""
+    from . import grove_accounts
     from .state import StateError
     saved = local_state(db)
     for index, row in enumerate(checkpoint['configurations']):
@@ -317,7 +320,9 @@ def restore_checkpoint(db, checkpoint):
     for key, row in checkpoint['jobs'].items():
         if key not in saved['jobs'] or saved['jobs'][key]['updated_at'] <= row['updated_at']:
             saved['jobs'][key] = row
-    if not saved['configurations'] and not saved['ballots'] and not saved['jobs']:
+    if 'account_book' in checkpoint:
+        saved['account_book'] = grove_accounts.merge_checkpoint(grove_accounts.storage(db), checkpoint['account_book'])
+    if not any(saved.get(key) for key in ('configurations', 'ballots', 'jobs', 'account_book')):
         return
     save_local_state(db, saved)
     refresh_mesh_roots(db)
@@ -458,10 +463,11 @@ def prepare(state, identity, previous, version, term, pair=None):
 
 
 def accept(state, identity, proposal, term, bootstrap, pair=None):
-    from . import grove_continuity
+    from . import grove_accounts, grove_continuity
     validate_term(term)
     with state.connect(write=True) as db:
         authorize(state, db, identity, pair, fresh=False)
+        grove_accounts.require_no_accepted_changes(db)
         current = grove_continuity.read_anchor(db)
         anchor = current[1]
         old = anchor['voters']

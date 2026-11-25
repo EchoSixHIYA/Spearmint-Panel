@@ -126,6 +126,8 @@ def import_snapshot(state: State, db, directory: dict, records: list[dict], dige
 
 
 def store_records(state: State, db, records: list[dict], seen: set[str]) -> None:
+    from . import grove_accounts
+
     for record in records:
         profile = record['profile']
         sealed = factors.seal(state, profile['id'], json.dumps([record['password_hash'], record['totp']], ensure_ascii=True))
@@ -134,7 +136,8 @@ def store_records(state: State, db, records: list[dict], seen: set[str]) -> None
                       last_step=CASE WHEN excluded.epoch=grove_login_verifier.epoch THEN grove_login_verifier.last_step ELSE -1 END,
                       epoch=excluded.epoch,verifier=excluded.verifier''',
                    (profile['id'], profile['name'], profile['role'], profile['epoch'], sealed))
-    db.execute('DELETE FROM grove_login_verifier WHERE user_id NOT IN (SELECT value FROM json_each(?))', (json.dumps(sorted(seen)),))
+    db.execute('DELETE FROM grove_login_verifier WHERE user_id NOT IN (SELECT value FROM json_each(?))', (json.dumps(sorted(seen | grove_accounts.projected_ids(db))),))
+    grove_accounts.restore_verifiers(state, db)
 
 
 def apply_verifiers(state: State, envelope: dict, standby: dict | None = None, recovery: dict | None = None) -> str:
@@ -234,13 +237,16 @@ def password_verifier(state: State, user_id: str, sealed: bytes) -> str:
 
 
 def login(state: State, username: str, password: str, code: str | None, address: str) -> tuple[str, str] | None:
+    from . import grove_accounts
+
     def read_verifier(db):
         if usable_replica(db, int(time.time()), operational=True) is None:
             raise PeerError('OFFLINE', 'This member has no current Grove login verifiers')
-        return db.execute('''SELECT v.*, p.change_digest, p.document AS password_change, coalesce(r.role,v.role) AS effective_role
+        row = db.execute('''SELECT v.*, p.change_digest, p.document AS password_change, coalesce(r.role,v.role) AS effective_role
                              FROM grove_login_verifier v LEFT JOIN grove_login_password p ON p.user_id=v.user_id
                              LEFT JOIN grove_login_role r ON r.user_id=v.user_id WHERE v.username=?
                              AND NOT EXISTS (SELECT 1 FROM grove_login_revocation r WHERE r.user_id=v.user_id)''', (username,)).fetchone()
+        return dict(row) | {'account_password': grove_accounts.login_password(state, db, username)} if row else None
 
     with auth.authentication_attempt(state, address, int(time.time()), username=username) as (db, _):
         verifier = read_verifier(db)
@@ -251,7 +257,9 @@ def login(state: State, username: str, password: str, code: str | None, address:
         totp = None
         if verifier is not None:
             password_hash, totp = json.loads(factors.unseal(state, verifier['user_id'], verifier['verifier']))
-            if verifier['password_change'] is not None:
+            if verifier['account_password']:
+                password_hash = verifier['account_password']
+            elif verifier['password_change'] is not None:
                 # The signed change is validated and sealed when the member accepts it.
                 password_hash = password_verifier(state, verifier['user_id'], verifier['password_change'])
             valid = auth.PASSWORD.verify(password_hash, password)

@@ -18,6 +18,7 @@ VOTE_METHOD = 'grove.login.continuity.v2'
 PASSWORD_VOTE_METHOD = 'grove.login.continuity.v3'
 ROLE_VOTE_METHOD = 'grove.login.continuity.v4'
 MEMBERS_VOTE_METHOD = 'grove.login.continuity.v5'
+ACCOUNTS_VOTE_METHOD = 'grove.login.continuity.v6'
 STATUS_METHOD = 'grove.login.continuity.ready'
 INSTALL_METHOD = 'grove.login.continuity.install'
 DOCUMENT_METHOD = 'grove.login.continuity.get'
@@ -324,6 +325,8 @@ def snapshot(state: State, db, realm_id: str, recipient: str) -> dict:
     profiles = {profile['id']: profile for profile in directory['users']}
     records = []
     for row in db.execute('SELECT user_id,verifier FROM grove_login_verifier'):
+        if row['user_id'] not in profiles:
+            continue
         password, totp = json.loads(factors.unseal(state, row['user_id'], row['verifier']))
         records.append({'profile': profiles[row['user_id']], 'password_hash': password, 'totp': totp})
     # The issuer exports verifier records in the order of the signed user directory.
@@ -434,7 +437,8 @@ def read_anchor(db):
 
 
 def vote(state: State, requester: str, nonce: str, digest: str, known_revocations: str | None = None,
-         known_passwords: str | None = None, known_roles: str | None = None, known_members: str | None = None) -> dict:
+         known_passwords: str | None = None, known_roles: str | None = None, known_members: str | None = None,
+         known_accounts: str | None = None) -> dict:
     with state.connect(read_only=True) as db:
         db.execute('BEGIN')
         current = read_anchor(db)
@@ -488,6 +492,13 @@ def vote(state: State, requester: str, nonce: str, digest: str, known_revocation
                 response['members'] = members if known_members != payload['members'] else {}
             elif members:
                 raise PeerError('CONFLICT', 'Synchronize Grove admissions before renewing')
+            from . import grove_accounts
+            accounts = grove_accounts.versions(db)
+            if known_accounts is not None:
+                payload['accounts'] = grove_accounts.digest_of(accounts)
+                response['accounts'] = accounts if known_accounts != payload['accounts'] else {}
+            elif accounts:
+                raise PeerError('CONFLICT', 'Synchronize Grove accounts before renewing')
         ballot = grove.signed('login-continuity-vote', payload, key)
         if known_revocations is not None:
             return {'ballot': ballot, **response}
@@ -563,6 +574,8 @@ def renew(state: State, envelope: dict, nonce: str, votes: dict[str, dict], *, s
         revocations = revocation_digest(db, digest) if not standby else None
         passwords = password_digest(db, digest) if not standby else None
         roles = role_digest(role_versions(db)) if not standby else None
+        from . import grove_accounts
+        accounts = grove_accounts.version_digest(db) if not standby else None
         for voter in anchor['voters']:
             if voter == local or voter not in votes:
                 continue
@@ -579,10 +592,11 @@ def renew(state: State, envelope: dict, nonce: str, votes: dict[str, dict], *, s
                 data = grove_voters.unstamp(data)
                 issued = data['issued_at']
                 correct_state = data.keys() == VOTE_FIELDS if standby else (
-                    data.keys() <= VOTE_FIELDS | {'revocations', 'passwords', 'roles', 'members'} and VOTE_FIELDS <= data.keys()
+                    data.keys() <= VOTE_FIELDS | {'revocations', 'passwords', 'roles', 'members', 'accounts'} and VOTE_FIELDS <= data.keys()
                     and data.get('revocations', EMPTY_REVOCATIONS) == revocations
                     and data.get('passwords', EMPTY_PASSWORDS) == passwords and data.get('roles', EMPTY_ROLES) == roles
-                    and data.get('members', EMPTY_ADMISSIONS) == admissions)
+                    and data.get('members', EMPTY_ADMISSIONS) == admissions
+                    and data.get('accounts', grove_accounts.EMPTY_VERSION) == accounts)
                 if (correct_state and data['requester'] == local
                         and data['nonce'] == nonce and data['anchor'] == digest and type(issued) is int
                         and now - 30 <= issued <= now + grove.CLOCK_SKEW):
