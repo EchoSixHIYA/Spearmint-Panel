@@ -20,6 +20,7 @@ const reasons: Record<string, string> = {
   authorization_denied: '目标节点未认可当前 Grove 管理员，完成同步后可重试',
   update_conflict: '目标节点正在处理其他更新，结束后可重试',
   grove_sync_pending: '正在同步成员和管理员信息，将自动重试',
+  installed_release_unknown: '正在核对目标节点当前安装版本的签名',
   legacy_peer_unverified: '正在同步发起端的 Grove 成员身份', legacy_revision_mismatch: '正在同步管理员信息',
   another_update: '等待该节点的另一项更新结束', running_commit_mismatch: '重启后的版本不符，请核对该节点后重试',
   checking_package_sources: '正在查找 GitHub 和 Grove 安装包', fetching_from_grove: '正在从 Grove 节点接收安装包',
@@ -32,6 +33,7 @@ export function updateProgress(row: NodeUpdate, expires: number, now = Date.now(
 
 export function updatePresentation(row: NodeUpdate, packageSourceName?: string) {
   if (row.reason === 'older_release') return { label: '版本较新，已跳过', tone: 'neutral', detail: '' }
+  if (row.reason === 'installed_release_unknown') return { label: '正在核对版本', tone: 'amber', detail: reasons.installed_release_unknown }
   if (row.reason === 'member_removed') return { label: '已离开 Grove', tone: 'neutral', detail: '' }
   return { label: row.reason === 'already_current' || row.reason === 'already_current_unmanaged' ? '已是目标版本' : labels[row.status] ?? '等待确认',
     tone: row.status === 'succeeded' ? 'green' : terminal.has(row.status) ? 'red' : 'amber',

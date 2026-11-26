@@ -74,6 +74,8 @@ class UpdateCoordinator:
         self.github_checked = 0.0
         self.github_catalog: release.Release | None = None
         self.check_task: asyncio.Task | None = None
+        self.baseline_task: asyncio.Task | None = None
+        self.baseline_checked = 0.0
         self.downloads: dict[str, tuple[asyncio.Task, float]] = {}
         self.seed_downloads: dict[str, asyncio.Task] = {}
         self.seed_readers: Counter[str] = Counter()
@@ -359,14 +361,14 @@ class UpdateCoordinator:
             return {'status': 'unsupported', 'reason': 'native_install_required'}
         if offer.release.database_schema != self.schema:
             return {'status': 'unsupported', 'reason': 'schema_change'}
-        if self.build['version'] and self.build['version'].count('.') == 2:
-            version = self.build['version'].split('.')
-            if all(part.isdecimal() for part in version) and tuple(map(int, version)) > tuple(map(int, offer.release.version.split('.'))):
-                return {'status': 'unsupported', 'reason': 'older_release'}
         previous = worker.read_record(self.local_path)
         if previous and previous['status'] not in TERMINAL:
             return {'status': 'queued', 'reason': 'another_update'}
-        if not self.newer_than_installed(offer.release, previous):
+        allowed = self.newer_than_installed(offer.release, previous)
+        if allowed is None:
+            self.check_baseline()
+            return {'status': 'waiting_grove', 'reason': 'installed_release_unknown'}
+        if not allowed:
             return {'status': 'unsupported', 'reason': 'older_release'}
         config = {'origin': self.config.origin}
         if WINDOWS:
@@ -378,20 +380,80 @@ class UpdateCoordinator:
         await self.remote.work(self.audit_event, revision[1], source, 'accepted', offer.job)
         return {'status': 'queued'}
 
-    def newer_than_installed(self, candidate, previous=None) -> bool:
-        if candidate.commit == self.build['commit']:
-            return True
-        installed = []
-        if previous and previous['status'] == 'succeeded':
-            installed.append(previous['release']['sequence'])
-        cached = self.cached_seed_release()
-        if cached is not None and cached.commit == self.build['commit']:
-            installed.append(cached.sequence)
+    def signed_record(self, path):
         with suppress(*IO_ERRORS, KeyError, TypeError):
-            document = worker.read_record(self.root / worker.INSTALLED_RELEASE)
-            if document is not None:
-                installed.append(release.Release.model_validate(document).sequence)
-        return not installed or candidate.sequence > max(installed)
+            data = worker.read_record(path)
+            if data is not None:
+                return release.Release.model_validate(data)
+
+    def release_for_commit(self, commit, previous=None):
+        candidates = [self.catalog, self.github_catalog, self.cached_seed_release(),
+                      self.cached_group_release(), self.signed_record(self.root / worker.INSTALLED_RELEASE)]
+        if previous and previous['status'] == 'succeeded':
+            with suppress(ValidationError, KeyError):
+                candidates.append(release.Release.model_validate(previous['release']))
+        return max((item for item in candidates if item is not None and item.commit == commit),
+                   key=lambda item: item.sequence, default=None)
+
+    def newer_than_installed(self, candidate, previous=None) -> bool | None:
+        current = self.build['commit']
+        if candidate.commit == current:
+            return True
+        version = self.build.get('version')
+        higher_version = False
+        if isinstance(version, str) and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+            installed_version = tuple(map(int, version.split('.')))
+            candidate_version = tuple(map(int, candidate.version.split('.')))
+            if candidate_version < installed_version:
+                return False
+            higher_version = candidate_version > installed_version
+        baseline = self.release_for_commit(current, previous)
+        if baseline is None:
+            return True if higher_version else None
+        return candidate.sequence > baseline.sequence
+
+    def check_baseline(self):
+        if self.baseline_task is not None and not self.baseline_task.done():
+            return
+        if self.baseline_checked and time.monotonic() - self.baseline_checked < 45:
+            return
+        self.baseline_task = asyncio.create_task(self.recover_baseline())
+
+    async def recover_baseline(self):
+        commit = self.build['commit']
+        if not isinstance(commit, str) or not re.fullmatch(r'[a-f0-9]{40}', commit):
+            return
+
+        async def ask_peer(node):
+            reply = await self.ask(node, {'action': 'release_for_commit', 'commit': commit})
+            if reply and reply.get('release') is not None:
+                with suppress(ValidationError):
+                    signed = release.Release.model_validate(reply['release'])
+                    if signed.commit == commit:
+                        return signed
+
+        try:
+            members = [node for node in await self.remote.work(self.members) if node != self.local_id]
+            peers = [asyncio.create_task(ask_peer(node)) for node in members[:8]]
+            try:
+                async with asyncio.timeout(8):
+                    for request in asyncio.as_completed(peers):
+                        if baseline := await request:
+                            worker.write_record(self.root / worker.INSTALLED_RELEASE, baseline.model_dump())
+                            return
+            except TimeoutError:
+                pass
+            finally:
+                for request in peers:
+                    request.cancel()
+                await asyncio.gather(*peers, return_exceptions=True)
+            baseline = await asyncio.to_thread(release.latest_release, commit=commit)
+            if baseline is not None and baseline.commit == commit:
+                worker.write_record(self.root / worker.INSTALLED_RELEASE, baseline.model_dump())
+        except (PeerError, *IO_ERRORS, KeyError, TypeError) as error:
+            LOG.debug('Could not identify the installed signed release: %s', type(error).__name__)
+        finally:
+            self.baseline_checked = time.monotonic()
 
     def archive(self, asset: release.Asset) -> Path:
         return self.root / (asset.sha256 + '.archive')
@@ -501,6 +563,13 @@ class UpdateCoordinator:
                 cached = (self.github_catalog, self.cached_seed_release(), self.cached_group_release())
                 catalog = max((item for item in cached if item is not None), key=lambda item: item.sequence, default=None)
                 return {'pending': pending, 'release': catalog.model_dump() if catalog else None, 'user_authorization': True}
+            if action == 'release_for_commit' and set(params) == {'action', 'commit'}:
+                commit = params['commit']
+                if not isinstance(commit, str) or not re.fullmatch(r'[a-f0-9]{40}', commit):
+                    raise ValueError('Invalid build commit')
+                previous = worker.read_record(self.local_path)
+                signed = self.release_for_commit(commit, previous)
+                return {'release': signed.model_dump() if signed is not None else None}
             if action == 'prepare' and set(params) == {'action', 'asset'}:
                 asset = release.Asset.model_validate(params['asset'])
                 if self.has_archive(asset):
@@ -620,18 +689,24 @@ class UpdateCoordinator:
             if job['expires'] <= int(time.time()):
                 self.write_status(job, 'expired')
                 return
+            if 'accepted_at' not in job or not isinstance(offer.identity, dict):
+                self.write_status(job, 'failed', reason='user_authorization_required')
+                return
+            allowed = self.newer_than_installed(candidate)
+            if allowed is None:
+                self.check_baseline()
+                self.write_status(job, 'waiting_grove', reason='installed_release_unknown')
+                self.node_retry = time.monotonic() + 15
+                return
+            if not allowed:
+                self.write_status(job, 'unsupported', reason='older_release')
+                return
             self.write_status(job, 'downloading', reason='checking_package_sources')
             if not await self.acquire(candidate.packages[self.target], on_transfer=report_transfer):
                 self.write_status(job, 'waiting_package', reason='source_unavailable')
                 self.node_retry = time.monotonic() + 15
                 return
-            if 'accepted_at' not in job or not isinstance(offer.identity, dict):
-                self.write_status(job, 'failed', reason='user_authorization_required')
-                return
             await self.verify_source(offer, source=job['source_node'], accepted_at=job['accepted_at'])
-            if not self.newer_than_installed(candidate):
-                self.write_status(job, 'unsupported', reason='older_release')
-                return
             if job['expires'] <= int(time.time()):
                 self.write_status(job, 'expired')
                 return
@@ -747,7 +822,7 @@ class UpdateCoordinator:
                 await asyncio.sleep(4)
         finally:
             tasks = [task for task, _ in self.downloads.values()] + list(self.seed_downloads.values())
-            tasks.extend(task for task in (self.node_task, self.check_task) if task is not None)
+            tasks.extend(task for task in (self.node_task, self.check_task, self.baseline_task) if task is not None)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

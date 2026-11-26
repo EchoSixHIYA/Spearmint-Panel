@@ -90,6 +90,35 @@ class UpdateDiscoveryTest(unittest.IsolatedAsyncioTestCase):
             result = await self.updates.accept(offer)
         self.assertEqual(result, {'status': 'unsupported', 'reason': 'older_release'})
 
+    async def test_manual_install_waits_until_its_signed_build_is_identified(self):
+        self.updates.verify_source = AsyncMock()
+        self.updates.local_status = Mock(return_value=None)
+        self.updates.check_baseline = Mock()
+        self.updates.local_path = Path('local.json')
+        self.updates.root = Path('fixture')
+        self.updates.target = 'windows-amd64'
+        self.updates.schema = 30
+        self.updates.build = {'commit': self.latest.commit, 'version': self.latest.version}
+        self.updates.remote.work.return_value = True
+        offer = SimpleNamespace(target='local', expires=int(grove_updates.time.time()) + 60, release=self.previous)
+        with patch.object(grove_updates.worker, 'read_record', return_value=None), \
+                patch.object(grove_updates.worker, 'write_record') as saved:
+            self.assertEqual(await self.updates.accept(offer), {
+                'status': 'waiting_grove', 'reason': 'installed_release_unknown'})
+            saved.assert_not_called()
+        self.updates.check_baseline.assert_called_once()
+
+    async def test_manual_install_recovers_its_own_signed_build_from_grove(self):
+        self.updates.root = Path('fixture')
+        self.updates.build = {'commit': self.previous.commit, 'version': self.previous.version}
+        self.updates.github_catalog = self.latest
+        self.updates.ask = AsyncMock(return_value={'release': self.previous.model_dump()})
+        with patch.object(grove_updates.worker, 'write_record') as saved, \
+                patch.object(update_release, 'latest_release') as github:
+            await self.updates.recover_baseline()
+        saved.assert_called_once_with(self.updates.root / grove_updates.worker.INSTALLED_RELEASE, self.previous.model_dump())
+        github.assert_not_called()
+
     async def test_older_peer_can_still_supply_a_signed_catalog(self):
         response = {'pending': False, 'release': self.latest.model_dump()}
         self.updates.remote.call = AsyncMock(side_effect=[PeerError('INVALID_REQUEST', 'Unknown request'), response])
@@ -173,6 +202,7 @@ class UpdateDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         self.updates.local_path = 'local.json'
         self.updates.root = Path('fixture')
         self.updates.build = {'commit': self.previous.commit}
+        self.updates.cached_seed_release.return_value = self.previous
         self.updates.target = 'windows-amd64'
         self.updates.state = SimpleNamespace(directory='fixture')
         self.updates.verify_source = AsyncMock()

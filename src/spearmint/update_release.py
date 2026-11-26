@@ -113,7 +113,7 @@ def archive_name(version: str, commit: str, target: str) -> str:
     return f'spearmint-{version}-{target}-{commit[:8]}{suffix}'
 
 
-def latest_release() -> Release | None:
+def latest_release(*, commit: str | None = None) -> Release | None:
     # The shared GitHub cache can still serve the previous list after publication.
     releases = json_response(f'/releases?per_page=10&_={time.time_ns()}', 1024 * 1024)
     for row in sorted(releases, key=lambda release: release['published_at'] or '', reverse=True):
@@ -126,6 +126,8 @@ def latest_release() -> Release | None:
         index = envelope['release']
         if index['tag'] != row['tag_name'] or not re.fullmatch(r'[a-f0-9]{40}', index['commit']):
             raise ValueError('Signed update index does not match the release tag')
+        if commit is not None and index['commit'] != commit:
+            continue
         packages = {}
         for target in TARGETS:
             name = archive_name(index['version'], index['commit'], target)
