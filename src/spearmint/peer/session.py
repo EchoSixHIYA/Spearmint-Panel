@@ -6,7 +6,7 @@ import logging
 from secrets import token_hex
 import time
 
-from .directory import CATALOG_HEALTH_METHOD
+from .directory import CATALOG_HEALTH_METHOD, GROVE_CATALOG_METHOD
 from .path_selection import Latency
 from .protocol import (
     CATALOG, DEADLINE, FRAME, IN_FLIGHT, RELAY_CONTROL, RELAY_FRAMES, RELAY_STREAM, ROUTE_FRAMES,
@@ -21,7 +21,7 @@ HEARTBEAT = 5
 WRITE_BYTES = 1024 * 1024
 BOUNDED_REPLIES = {
     "catalog.sync": CATALOG, CATALOG_HEALTH_METHOD: CATALOG, "mesh.pex": CATALOG, "security.policy.get": CATALOG,
-    "grove.identity.get": CATALOG,
+    "grove.identity.get": CATALOG, GROVE_CATALOG_METHOD: 2 * CATALOG,
     "grove.login.verifiers": CATALOG, "grove.login.verifiers.v2": CATALOG, "grove.login.verifiers.v3": CATALOG,
     "grove.login.continuity.v2": CATALOG, "grove.login.continuity.v3": CATALOG, "grove.login.continuity.v4": CATALOG,
     "grove.login.continuity.v5": 2 * CATALOG, "grove.members.admit.get": CATALOG,

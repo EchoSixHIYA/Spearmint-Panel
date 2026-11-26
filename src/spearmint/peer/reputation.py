@@ -7,6 +7,7 @@ import logging
 import math
 import time
 
+from .directory import GROVE_CATALOG_METHOD
 from .protocol import IN_FLIGHT, PeerError
 
 
@@ -19,6 +20,7 @@ OPTIONAL_SLOTS = IN_FLIGHT - 2
 PEER_OPTIONAL_SLOTS = 2
 GROUPS = {
     'service.logs': 'logs',
+    GROVE_CATALOG_METHOD: 'inventory',
     'security.evidence.list': 'evidence',
     'security.evidence.part': 'evidence',
     'grove.seed.catalog': 'seed',
@@ -32,7 +34,7 @@ GROUPS = {
     'grove.deployment.status.v6': 'deployment',
 }
 # Requests per window in normal and restricted operation.
-LIMITS = {'logs': (24, 8), 'evidence': (12, 4), 'seed': (12, 4), 'deployment': (12, 4)}
+LIMITS = {'logs': (24, 8), 'evidence': (12, 4), 'seed': (12, 4), 'deployment': (12, 4), 'inventory': (24, 8)}
 
 
 @dataclass

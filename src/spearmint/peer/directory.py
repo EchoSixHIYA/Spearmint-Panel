@@ -12,6 +12,7 @@ STATUSES = {"running", "stopped", "starting", "stopping", "failed", "missing", "
 DRIVERS = {"process", "docker"}
 HEALTH_STATES = ("starting", "healthy", "unhealthy")
 CATALOG_HEALTH_METHOD = "catalog.sync.v2"
+GROVE_CATALOG_METHOD = 'grove.service_inventory.v1'
 STATUS_HEALTH_METHOD = "service.status.v2"
 MAX_REVISION = 2**63 - 1
 

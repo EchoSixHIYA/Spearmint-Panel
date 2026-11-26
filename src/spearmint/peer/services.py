@@ -29,12 +29,13 @@ from ..state import State, StateError, audit
 from .approval_format import ACTIONS, operator_id
 from .credentials import NODE_ID, RANDOM_ID
 from .directory import (
-    CATALOG_HEALTH_METHOD, DRIVERS, MAX_REVISION, STATUS_HEALTH_METHOD, apply_result, catalog_result, mirror_row,
+    CATALOG_HEALTH_METHOD, DRIVERS, GROVE_CATALOG_METHOD, MAX_REVISION, STATUS_HEALTH_METHOD,
+    apply_result, catalog_result, mirror_row,
     observation, valid_observation, validate_result,
 )
 from .discovery import INTERVAL as PEX_INTERVAL, METHOD as PEX_METHOD, Discovery
 from .grove_endpoints import METHOD as GROVE_ENDPOINT_METHOD, GroveEndpoints, literal_endpoint, trusted_members
-from .grove_service_admin import GroveServiceAdmin, source_grant, source_identity
+from .grove_service_admin import GroveServiceAdmin, require_member, source_grant
 from .manager import Neighbor, PeerManager, diagnostic_rpc
 from . import evidence_exchange, frp_access, grove_pairing, mesh_policy, quarantine
 from .operations import (
@@ -535,6 +536,8 @@ class PeerServices:
             return await self.work(evidence_exchange.part, self.state, pair, params, rpc=True, optional=optional)
         if method in {"catalog.sync", "service.status", "service.logs", CATALOG_HEALTH_METHOD, STATUS_HEALTH_METHOD}:
             return await self.work(self.local, pair, method, params, rpc=True, optional=optional)
+        if method == GROVE_CATALOG_METHOD:
+            return await self.work(self.grove_inventory_rpc, pair, params, rpc=True, optional=optional)
         if method == GROVE_SERVICE:
             return await self.work(self.grove_service_rpc, pair, params, rpc=True)
         if self.service_setup is not None and method == self.service_setup.method:
@@ -1858,6 +1861,27 @@ class PeerServices:
             "services": sorted(services, key=lambda entry: (entry["name"], entry["id"])),
         }
 
+    def grove_inventory_rpc(self, pair: Pair, params: dict) -> dict:
+        from ..service_groups import groups_from
+
+        if params:
+            raise PeerError('INVALID_REQUEST', 'Service inventory takes no parameters')
+        with self.state.connect(read_only=True) as db:
+            db.execute('BEGIN')
+            require_member(db, self.local_id, pair)
+            services = [Service.from_row(row) for row in db.execute('SELECT * FROM service ORDER BY name,id')]
+        return {'services': self.service_inventory(services, management=False),
+                'service_groups': list(groups_from(services).values())}
+
+    def service_inventory(self, services: list[Service], *, management: bool) -> list[dict]:
+        return [{'id': service.id, 'name': service.name, 'driver': service.driver,
+                 'version': service.version, 'status': True,
+                 'logs': management and service.logs_available,
+                 'actions': service.actions if management else [],
+                 'observation': observation(self.controller.describe(service)['observation'],
+                                            OBSERVATION_TTL, include_health=True)}
+                for service in services]
+
     def grove_service_rpc(self, pair: Pair, params: dict) -> dict:
         if params.keys() != {'identity', 'action', 'body'} or not isinstance(params['body'], dict):
             raise PeerError('INVALID_REQUEST', 'Invalid Grove service request')
@@ -1870,12 +1894,7 @@ class PeerServices:
                 services = [Service.from_row(row) for row in db.execute('SELECT * FROM service ORDER BY name,id')]
             groups = getattr(self.workspace, 'groups', None)
             return {**({'service_groups': groups.public(services)} if groups is not None else {}),
-                    'services': [{'id': service.id, 'name': service.name, 'driver': service.driver,
-                                  'version': service.version, 'status': True, 'logs': service.logs_available,
-                                  'actions': service.actions,
-                                  'observation': observation(self.controller.describe(service)['observation'],
-                                                             OBSERVATION_TTL, include_health=True)}
-                                 for service in services]}
+                    'services': self.service_inventory(services, management=True)}
         service_id = body.get('service_id')
         if not matches(RANDOM_ID, service_id):
             raise PeerError('INVALID_REQUEST', 'Invalid service ID')
@@ -1914,14 +1933,21 @@ class PeerServices:
     async def grove_service(self, node_id: str, actor: Actor, action: str, body: dict, *,
                             connection_id: str | None = None, directory_generation: int | None = None) -> dict | None:
         pair = self.pair_for(node_id)
+        method = GROVE_SERVICE
         try:
             identity = await self.work(source_grant, self.state, self.local_id, pair, actor, 'services')
+            params = {'identity': identity, 'action': action, 'body': body}
         except PeerError as error:
-            PeerServices.record_failure(self, node_id, f'{GROVE_SERVICE}.{action}', 'local_identity', error)
-            if error.code in {'DENIED', 'OFFLINE'} or action == 'catalog' and error.code == grove_authorization.ERROR:
-                return None
-            raise
-        params = {'identity': identity, 'action': action, 'body': body}
+            if action == 'catalog' and not body and error.code == grove_authorization.ERROR:
+                if not actor.grove:
+                    return None
+                # source_grant has already verified the local Grove administrator session.
+                method, params = GROVE_CATALOG_METHOD, {}
+            else:
+                PeerServices.record_failure(self, node_id, f'{GROVE_SERVICE}.{action}', 'local_identity', error)
+                if error.code in {'DENIED', 'OFFLINE'}:
+                    return None
+                raise
         selected = None
         if connection_id is not None or directory_generation is not None:
             selected = self.directory_publication(node_id)
@@ -1932,15 +1958,18 @@ class PeerServices:
             if selected is not None:
                 if self.adaptive and self.adaptive.admitted(pair):
                     self.adaptive.touch(node_id)
-                result = await selected[0].call(GROVE_SERVICE, params)
+                result = await selected[0].call(method, params)
                 if action != 'submit' and selected != self.directory_publication(node_id):
                     raise PeerError('ROUTE_LOST', 'The service directory changed')
-                return result
-            return await self.call(node_id, GROVE_SERVICE, params, diagnostic=True)
+            else:
+                result = await self.call(node_id, method, params, diagnostic=True)
+            if method == GROVE_CATALOG_METHOD:
+                return {**result, 'catalog_read_only': True}
+            return result
         except PeerError as error:
             if error.code == 'UNSUPPORTED_METHOD':
-                return None
-            PeerServices.record_failure(self, node_id, f'{GROVE_SERVICE}.{action}', 'remote_rpc', error)
+                return {'catalog_read_only': True} if method == GROVE_CATALOG_METHOD else None
+            PeerServices.record_failure(self, node_id, f'{method}.{action}', 'remote_rpc', error)
             raise
 
     async def grove_directory(self, actor: Actor, directory: dict) -> dict:
@@ -1954,10 +1983,13 @@ class PeerServices:
             return {**directory, 'stale': True, 'catalog_complete': False}
         if result is None:
             return {**directory, 'catalog_complete': not actor.grove, 'stale': directory['stale'] or actor.grove}
+        read_only = result.get('catalog_read_only', False)
+        if 'services' not in result:
+            return {**directory, 'catalog_complete': False, 'stale': True, 'catalog_read_only': read_only}
         services = {item['id']: item for item in directory['services']}
         for item in result['services']:
             services[item['id']] = item
-        return {**directory, 'catalog_complete': True,
+        return {**directory, 'catalog_complete': True, 'catalog_read_only': read_only,
                 **({'service_groups': result['service_groups']} if 'service_groups' in result else {}),
                 'services': sorted(services.values(), key=lambda item: (item['name'], item['id']))}
 

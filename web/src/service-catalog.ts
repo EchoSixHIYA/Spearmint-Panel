@@ -56,6 +56,7 @@ export function retainServiceCatalog(previous: readonly NodeDirectory[], incomin
     const services = new Map(cached?.services.map(service => [service.id, service]))
     for (const service of directory?.services ?? []) services.set(service.id, service)
     return [{ ...(directory ?? cached!), node_id: peer.node_id, stale: true, catalog_complete: false,
+      catalog_read_only: directory?.catalog_read_only ?? cached?.catalog_read_only,
       services: [...services.values()], service_groups: directory?.service_groups ?? cached?.service_groups }]
   })
 }

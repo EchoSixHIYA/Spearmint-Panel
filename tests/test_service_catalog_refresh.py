@@ -5,10 +5,16 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
+from pyotp import TOTP
+
 from grove_fixture import GroveFixture
-from spearmint import grove_availability, grove_continuity, grove_identity_changes, grove_revocation
+from spearmint import auth, grove_authorization, grove_availability, grove_continuity, grove_identity_changes, grove_login, grove_revocation
+from spearmint.catalog import register
+from spearmint.peer.directory import GROVE_CATALOG_METHOD
+from spearmint.peer.pairing import configured
 from spearmint.peer.protocol import PeerError
-from spearmint.peer.services import PeerServices
+from spearmint.peer.services import GROVE_SERVICE, PeerServices
+from test_grove_voters import VoterFixture
 
 
 class Renewal:
@@ -93,6 +99,89 @@ class ServiceCatalogRefreshTest(unittest.TestCase):
             with fixture.states[0].connect(read_only=True) as db:
                 self.assertEqual(grove_availability.status(db)['mode'], 'online')
                 self.assertEqual(db.execute('SELECT count(*) FROM grove_login_revocation').fetchone()[0], 1)
+
+    def test_signed_in_admin_can_see_service_inventory_without_management_grant(self):
+        root = Path.cwd() / 'work/tmp/service-catalog-regression'
+        root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=root) as directory:
+            fixture = VoterFixture(Path(directory))
+            source, target = fixture.states[:2]
+            source_id, target_id = source.identity()[0], target.identity()[0]
+            token, _ = grove_login.login(source, 'admin', fixture.password, TOTP(fixture.secret).now(), '127.0.0.1')
+            actor = auth.actor_for(source, token, '127.0.0.1')
+
+            register(target, 'process', 'Existing web service', 'owned.service', {
+                'runtime': 'systemd-system', 'log_path': '/private/service.log',
+                'service_groups': [{'id': 'a' * 32, 'name': 'Example group', 'position': 0, 'status_only': False}],
+            }, managed=True)
+            observed = {'status': 'running', 'source': 'process', 'checked_at': fixture.now,
+                        'last_seen_at': fixture.now, 'last_status': 'running', 'stale': False, 'pid': 123}
+            recipient = SimpleNamespace(state=target, local_id=target_id, workspace=None,
+                                        controller=SimpleNamespace(describe=lambda _: {'observation': observed}))
+            recipient.service_inventory = lambda *args, **kwargs: PeerServices.service_inventory(recipient, *args, **kwargs)
+
+            with source.connect(read_only=True) as db:
+                target_pair = configured(db, target_id)
+            with target.connect(read_only=True) as db:
+                source_pair = configured(db, source_id)
+
+            class Source:
+                state, local_id, adaptive = source, source_id, None
+                grove_service, grove_directory = PeerServices.grove_service, PeerServices.grove_directory
+                supported = True
+
+                def pair_for(self, node):
+                    assert node == target_id
+                    return target_pair
+
+                def directory_publication(self, node):
+                    assert node == target_id
+                    return (self, 1)
+
+                async def work(self, function, *args):
+                    return function(*args)
+
+                async def call(self, method, params):
+                    if method == GROVE_CATALOG_METHOD:
+                        if not self.supported:
+                            raise PeerError('UNSUPPORTED_METHOD', 'Owned older panel')
+                        return PeerServices.grove_inventory_rpc(recipient, source_pair, params)
+                    assert method == GROVE_SERVICE
+                    return PeerServices.grove_service_rpc(recipient, source_pair, params)
+
+                connection_id = 'owned-session'
+
+            panel = Source()
+            snapshot = {'node_id': target_id, 'stale': False, 'services': [],
+                        'connection_id': panel.connection_id, 'directory_generation': 1}
+            panel.supported = False
+            old = asyncio.run(panel.grove_directory(actor, snapshot))
+            self.assertFalse(old['catalog_complete'])
+            self.assertTrue(old['catalog_read_only'])
+
+            panel.supported = True
+            inventory = asyncio.run(panel.grove_directory(actor, snapshot))
+            self.assertTrue(inventory['catalog_complete'])
+            self.assertTrue(inventory['catalog_read_only'])
+            self.assertEqual(inventory['service_groups'][0]['name'], 'Example group')
+            self.assertNotIn('operation', inventory['service_groups'][0])
+            entry, = inventory['services']
+            self.assertEqual(entry['name'], 'Existing web service')
+            self.assertEqual(entry['observation']['status'], 'running')
+            self.assertEqual(entry['actions'], [])
+            self.assertFalse(entry['logs'])
+            self.assertNotIn('pid', entry['observation'])
+            self.assertNotIn('spec', entry)
+
+            with self.assertRaises(PeerError) as denied:
+                asyncio.run(panel.grove_service(target_id, actor, 'logs', {'service_id': entry['id'], 'tail': 10}))
+            self.assertEqual(denied.exception.code, grove_authorization.ERROR)
+
+            fixture.authorize(source, actor, scopes=['services'])
+            signed = asyncio.run(panel.grove_directory(actor, snapshot))
+            self.assertTrue(signed['catalog_complete'])
+            self.assertFalse(signed['catalog_read_only'])
+            self.assertIn('stop', signed['services'][0]['actions'])
 
     def test_failed_catalog_is_incomplete_and_cannot_remove_visible_rows(self):
         directory = {'node_id': 'owned', 'stale': False, 'services': [], 'connection_id': 'session', 'directory_generation': 1}

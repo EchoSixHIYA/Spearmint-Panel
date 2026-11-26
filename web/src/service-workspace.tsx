@@ -84,6 +84,10 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [editor, setEditor] = useState<{ target: string; group?: ServiceGroup }>()
   const localId = local.data?.node_id || 'local'
+  const selectedPeers = listedNodes.filter(item => !item.local && item.peer?.enabled
+    && item.status !== 'quarantined' && item.status !== 'disabled' && (!node || item.id === node))
+  const partialCatalog = selectedPeers.some(item => !remoteDirectoryCurrent(item, directories.get(item.id)))
+  const readOnlyCatalog = selectedPeers.some(item => directories.get(item.id)?.catalog_read_only)
   const rows = [
     ...(services.data || []).map(service => ({ service, node: localId, name: localName, local: true, stale: !!services.error || service.observation.stale, observation: service.observation })),
     ...entries.map(entry => ({ service: entry.service, node: entry.node.id, name: entry.node.name, local: false,
@@ -95,7 +99,8 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
     { node: localId, id: 'local', label: localName, available: !!localGroups.data && !localGroups.error && !services.error, groups: localGroups.data || [] },
     ...listedNodes.filter(item => !item.local && directories.get(item.id)?.service_groups !== undefined).map(item => {
       const directory = directories.get(item.id)
-      return { node: item.id, id: item.id, label: item.name, available: !error && remoteDirectoryCurrent(item, directory),
+      return { node: item.id, id: item.id, label: item.name,
+        available: !error && !directory?.catalog_read_only && remoteDirectoryCurrent(item, directory),
         groups: directory?.service_groups || [] }
     }),
   ].map(target => ({ ...target, services: rows.filter(row => row.node === target.node).map(row => row.service) }))
@@ -135,7 +140,8 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
         : <ServiceRowActions target={row.local ? 'local' : row.node} serviceId={row.service.id} nodeName={row.name}
           path={row.local ? `/services/${row.service.id}` : `/peers/${row.node}/services/${row.service.id}`}
           name={row.service.name} status={row.observation?.status} allowed={options?.groupRunning ? [] : row.service.actions}
-          version={row.service.version || 1} stale={row.stale} blocked={options?.groupRunning}
+          version={row.service.version || 1} stale={row.stale}
+          blocked={options?.groupRunning || directories.get(row.node)?.catalog_read_only}
           detailsHref={href} logsHref={withReturn(row.local ? localServiceHref(row.service.id, 'logs') : remoteServiceHref(row.node, row.service.id, true))} />}</td>
     </tr>
   }
@@ -146,7 +152,9 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
     <a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(node || undefined))}><Icon name="plus" size={16} />登记服务</a>
   </PageHeading>}{embedded && <div className="button-row"><a className="btn btn-primary" href={withReturn(groveServiceRegistrationHref(initialNode))}>在此节点登记服务</a>
     {preferredTarget && <button type="button" className="btn btn-secondary" onClick={() => setEditor({ target: preferredTarget.id })}>新建服务组</button>}</div>}
-    <div className="workspace-summary"><strong>{rows.length} 个已登记服务</strong><span>{rows.filter(row => !row.stale && row.observation?.status === 'running').length} 个运行中</span><span role="status">{services.error || error ? '部分状态暂时无法更新，保留上次目录' : '通过 Mesh 在当前面板管理目标节点'}</span></div>
+    <div className="workspace-summary"><strong>{rows.length} 个{partialCatalog ? '已显示服务' : '已登记服务'}</strong><span>{rows.filter(row => !row.stale && row.observation?.status === 'running').length} 个运行中</span>
+      <span role="status">{services.error || error || partialCatalog ? '部分节点的服务目录暂不可用' : ''}</span></div>
+    {readOnlyCatalog && <Notice tone="amber">管理远程服务或读取日志需要<a href="#/identity">授权当前面板</a>。</Notice>}
     <Panel><div className="workspace-filters"><label className="search-box"><Icon name="search" size={16} /><input aria-label="搜索服务" value={search} onChange={e => update('q', e.target.value)} placeholder="搜索服务、节点或程序名称…" /></label>
       <select className="input" aria-label="按节点筛选" value={node} disabled={embedded} onChange={e => update('node', e.target.value)}><option value="">全部节点</option>{listedNodes.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
       <select className="input" aria-label="按状态筛选" value={status} onChange={e => update('status', e.target.value)}><option value="">全部状态</option><option value="running">运行中</option><option value="stopped">已停止</option><option value="failed">失败</option><option value="stale">状态待确认</option></select>
@@ -176,7 +184,7 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
           </Fragment>
         })}
         {visible.map(row => <Fragment key={`${row.node}/${row.service.id}`}>{serviceRow(row)}</Fragment>)}
-      </tbody></table></div> : <EmptyState title="没有匹配的服务" />}
+      </tbody></table></div> : <EmptyState title={partialCatalog ? '所选范围的服务目录尚未读全' : '没有匹配的服务'} />}
     </Panel>
     {editor && <ServiceGroupEditor targets={editor.group ? targets.filter(target => target.id === editor.target) : selectableTargets}
       initialTarget={editor.target} group={editor.group} onClose={() => setEditor(undefined)} />}
