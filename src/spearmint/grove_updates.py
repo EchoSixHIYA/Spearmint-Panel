@@ -290,8 +290,13 @@ class UpdateCoordinator:
                 return await self.ask(node, {'action': 'catalog'})
             if error.code == 'UNSUPPORTED_METHOD':
                 return {'status': 'unsupported', 'reason': 'updater_missing'}
-            if params['action'] == 'offer' and (result := self.authorization_result(error)) is not None:
-                return result
+            if params['action'] == 'offer':
+                if error.code == 'INVALID_REQUEST' and isinstance(params['intent']['identity'], dict):
+                    catalog = await self.ask(node, {'action': 'catalog'})
+                    if catalog is not None and 'release' in catalog and not catalog.get('user_authorization'):
+                        return {'status': 'unsupported', 'reason': 'upgrade_from_older_panel'}
+                if (result := self.authorization_result(error)) is not None:
+                    return result
             LOG.debug('Grove update RPC %s deferred for %s: %s', params['action'], node, error.code)
             return None
 
@@ -339,14 +344,17 @@ class UpdateCoordinator:
         if offer.expires > now + JOB_TTL + 120:
             return {'status': 'expired'}
         source = pair.node_id if pair is not None else self.local_id
+        if pair is not None:
+            await self.remote.work(self.authorize_member, pair, rpc=True)
         if existing := self.local_status(offer, source):
             return existing
-        revision = await self.verify_source(offer, pair)
         if offer.expires <= now:
             return {'status': 'expired'}
-        runnable = self.target is not None and await self.remote.work(worker.supported)
         if self.build['commit'] == offer.release.commit:
+            runnable = self.target is not None and await self.remote.work(worker.supported)
             return {'status': 'succeeded', 'reason': 'already_current' if runnable else 'already_current_unmanaged'}
+        revision = await self.verify_source(offer, pair)
+        runnable = self.target is not None and await self.remote.work(worker.supported)
         if not runnable:
             return {'status': 'unsupported', 'reason': 'native_install_required'}
         if offer.release.database_schema != self.schema:
@@ -476,21 +484,23 @@ class UpdateCoordinator:
             stream.seek(offset)
             return {'data': wire_b64(stream.read(min(release.CHUNK, asset.size - offset)))}
 
+    def authorize_member(self, pair) -> None:
+        with self.state.connect(read_only=True) as db:
+            db.execute('BEGIN')
+            require_member(db, self.local_id, pair)
+
     async def dispatch(self, pair, params: dict) -> dict:
         try:
             action = params.get('action')
             if action == 'offer' and set(params) == {'action', 'intent'}:
                 return await self.accept(Offer.model_validate(params['intent']), pair)
-            def authorize():
-                with self.state.connect() as db:
-                    require_member(db, self.local_id, pair)
-            await self.remote.work(authorize, rpc=True)
+            await self.remote.work(self.authorize_member, pair, rpc=True)
             if action == 'catalog' and (set(params) == {'action'}
                     or (set(params) == {'action', 'refresh'} and params['refresh'] is True)):
                 pending = self.check_in_background(refresh=params.get('refresh') is True) is not None
                 cached = (self.github_catalog, self.cached_seed_release(), self.cached_group_release())
                 catalog = max((item for item in cached if item is not None), key=lambda item: item.sequence, default=None)
-                return {'pending': pending, 'release': catalog.model_dump() if catalog else None}
+                return {'pending': pending, 'release': catalog.model_dump() if catalog else None, 'user_authorization': True}
             if action == 'prepare' and set(params) == {'action', 'asset'}:
                 asset = release.Asset.model_validate(params['asset'])
                 if self.has_archive(asset):

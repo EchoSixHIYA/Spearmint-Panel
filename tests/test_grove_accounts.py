@@ -141,6 +141,34 @@ class GroveAccountTest(unittest.IsolatedAsyncioTestCase):
         await self.two.grove_accounts.run('reset', 'admin', 'fixture', code=code['recovery_code'], device_key=public_key(key))
         self.assertIsNotNone(device_login(self.three.state, 'admin', key))
 
+    async def test_existing_admin_can_bind_and_restore_access_without_the_issuer(self):
+        key = Ed25519PrivateKey.generate()
+        self.fixture.authorize(self.one.state, self.admin, 'admin', scopes=['self'], signer=key)
+        self.network.pop(self.three.local_id)
+        with self.assertRaisesRegex(PeerError, '请先生成并保存账号恢复码'):
+            await self.one.grove_accounts.run('bind-device', 'admin', 'fixture', actor=self.admin)
+        recovery = await self.one.grove_accounts.run('recovery-code', 'admin', 'fixture',
+                                                     actor=self.admin, current_password=self.fixture.password)
+        self.assertIn('recovery_code', recovery)
+        await self.one.grove_accounts.run('bind-device', 'admin', 'fixture', actor=self.admin)
+        with self.one.state.connect(read_only=True) as db:
+            self.assertIsNone(auth.active_session(db, self.admin.token_hash, int(time.time())))
+            self.assertIsNone(db.execute('SELECT 1 FROM grove_login_verifier WHERE user_id=?',
+                                         (self.fixture.users[0]['id'],)).fetchone())
+        self.assertIsNone(grove_login.login(self.two.state, 'admin', self.fixture.password,
+                                            TOTP(self.fixture.secret).now(), 'fixture'))
+
+        self.network[self.three.local_id] = self.three
+        self.assertTrue(await self.three.sync())
+        self.assertTrue(await self.member.sync())
+        self.assertIsNotNone(device_login(self.three.state, 'admin', key))
+
+        replacement = Ed25519PrivateKey.generate()
+        recovered = await self.member.grove_accounts.run('reset', 'admin', 'fixture',
+                                                         code=recovery['recovery_code'], device_key=public_key(replacement))
+        self.assertNotEqual(recovery['recovery_code'], recovered['recovery_code'])
+        self.assertIsNotNone(device_login(self.one.state, 'admin', replacement))
+
     async def test_quorum_loss_leaves_account_unchanged(self):
         self.network.pop(self.two.local_id)
         self.network.pop(self.three.local_id)

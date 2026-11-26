@@ -16,6 +16,7 @@ const reasons: Record<string, string> = {
   installer_failed: '安装未完成，请检查该节点的安装日志后重试', installer_interrupted: '安装中断，请核对节点状态后重试',
   installer_unavailable: '无法启动安装器，请检查该节点的安装环境', update_unavailable: '暂时无法启动更新，可稍后重试',
   authorization_changed: '管理员权限已变化，完成 Grove 同步后可重试',
+  upgrade_from_older_panel: '请在仍运行旧版的面板发起这次群组更新',
   authorization_denied: '目标节点未认可当前 Grove 管理员，完成同步后可重试',
   update_conflict: '目标节点正在处理其他更新，结束后可重试',
   grove_sync_pending: '正在同步成员和管理员信息，将自动重试',

@@ -97,6 +97,34 @@ class UpdateDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, response)
         self.updates.remote.call.assert_awaited_with('peer-a', grove_updates.METHOD, {'action': 'catalog'}, diagnostic=True)
 
+    async def test_older_panel_can_confirm_current_version_during_rolling_upgrade(self):
+        old = SimpleNamespace(node_id='existing-member')
+        self.updates.local_path = 'local.json'
+        self.updates.target = 'windows-amd64'
+        self.updates.build = {'commit': self.latest.commit}
+        self.updates.verify_source = AsyncMock(side_effect=PeerError('GROVE_USER_AUTHORIZATION_REQUIRED', 'sign first'))
+        offer = SimpleNamespace(job='a' * 32, target='local', release=self.latest,
+                                expires=int(grove_updates.time.time()) + 60, identity=['realm', 'user', 1, 0, 0])
+        with patch.object(grove_updates.worker, 'read_record', return_value=None), \
+                patch.object(grove_updates.worker, 'write_record') as saved:
+            current = await self.updates.accept(offer, old)
+            self.assertEqual(current, {'status': 'succeeded', 'reason': 'already_current'})
+            self.updates.remote.work.assert_any_await(self.updates.authorize_member, old, rpc=True)
+            self.updates.verify_source.assert_not_awaited()
+            self.updates.build['commit'] = self.previous.commit
+            with self.assertRaises(PeerError):
+                await self.updates.accept(offer, old)
+        saved.assert_not_called()
+
+    async def test_outdated_recipient_is_reported_without_retrying_the_offer(self):
+        self.updates.remote.call = AsyncMock(side_effect=[
+            PeerError('INVALID_REQUEST', 'Legacy update protocol'),
+            {'pending': False, 'release': self.latest.model_dump()},
+        ])
+        result = await self.updates.ask('peer-a', {'action': 'offer', 'intent': {'identity': {'grant': 'fixture'}}})
+        self.assertEqual(result, {'status': 'unsupported', 'reason': 'upgrade_from_older_panel'})
+        self.assertEqual([call.args[2]['action'] for call in self.updates.remote.call.await_args_list], ['offer', 'catalog'])
+
     async def test_reports_the_selected_supplier_and_clears_it_before_trying_another(self):
         asset = self.latest.packages['windows-amd64']
         self.updates.ask = AsyncMock(return_value={'ready': True})

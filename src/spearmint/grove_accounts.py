@@ -281,9 +281,12 @@ def proposal(state, db, change, proof, verify_authorization):
         if identity[1] != profile['id']:
             raise PeerError('DENIED', '请使用此 Grove 账号授权变更。')
         if operation == 'bind-device':
+            if device_key(db, profile['id']) is not None:
+                raise PeerError('CONFLICT', '该账号已绑定登录设备。更换设备请使用账号恢复。')
+            if not next_account['recovery_hash']:
+                raise PeerError('CONFLICT', '请先生成并保存账号恢复码，再绑定登录设备。')
             from . import grove_authorization
-            raw_key = device_key(db, profile['id']) or grove_authorization.unsigned(authorization['approvals'][0])['key']
-            next_account['device_key'] = raw_key
+            next_account['device_key'] = grove_authorization.unsigned(authorization['approvals'][0])['key']
             next_account['password_hash'] = None
             next_account['totp'] = None
             next_account['credential_revision'] += 1
