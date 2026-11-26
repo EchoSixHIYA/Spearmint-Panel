@@ -491,7 +491,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         policy = "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
-        response.headers["Content-Security-Policy"] = policy + ("; connect-src 'self' https:; style-src 'self' 'unsafe-inline'" if request.url.path == '/' else '')
+        response.headers["Content-Security-Policy"] = policy + ("; style-src 'self' 'unsafe-inline'" if request.url.path == '/' else '')
         return response
 
     @app.exception_handler(RequestValidationError)
@@ -832,8 +832,9 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             raise PeerError('OFFLINE', 'Grove quorum admission is unavailable')
         if action == 'vote' and data.keys() == {'request', 'authorization'}:
             return await run_in_threadpool(grove_quorum_join.vote, store, enrollment_policy, data['request'], data['authorization'])
-        if action == 'commit' and data.keys() == {'request', 'certificate'}:
-            return await run_in_threadpool(grove_quorum_join.commit, store, enrollment_policy, data['request'], data['certificate'])
+        if action == 'commit' and data.keys() in ({'request', 'certificate'}, {'request', 'certificate', 'nonce'}):
+            return await run_in_threadpool(grove_quorum_join.commit, store, enrollment_policy,
+                                           data['request'], data['certificate'], data.get('nonce'))
         raise PeerError('INVALID_REQUEST', 'Invalid Grove admission request')
 
     @app.post('/api/v1/grove/sync-directory', responses={204: {'description': 'Checked without a report'}})
@@ -1019,22 +1020,6 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         require_origin(request)
         body = grove_model(GroveBrowserInvitation, data)
         return grove_web_join.read_invitation(body.code, config.origin)
-
-    @app.get('/api/v1/auth/grove/verification-status')
-    async def grove_verification_status(
-        realm_id: str = Query(pattern=r'^grv1-[a-f0-9]{32}$'),
-        public_key: str = Query(pattern=r'^[A-Za-z0-9_-]{43}$'),
-    ):
-        info = await run_in_threadpool(grove.describe, store)
-        realm = info.get('realm')
-        if realm is None or realm['id'] != realm_id or realm['public_key'] != public_key:
-            raise PeerError('NOT_FOUND', 'Grove is unavailable on this panel')
-        if info.get('issuer_retired') or info['frozen'] or info['issuer_paused']:
-            raise PeerError('OFFLINE', 'Grove browser joins are unavailable')
-        if not info['local_issuer']:
-            raise PeerError('OFFLINE', 'The Grove issuer must verify the administrator directly')
-        return JSONResponse({'realm_id': realm_id, 'public_key': public_key, 'origin': config.origin, 'ready': True},
-                            headers={'Access-Control-Allow-Origin': '*'})
 
     @app.post('/api/v1/auth/grove/start')
     def grove_start(request: Request, response: Response, data: dict = Depends(grove_body)):
@@ -1245,8 +1230,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         return deployment_web(config.web_dir, packaged_web)
 
     @app.get('/api/v1/grove/deployments/{node_id}')
-    async def peer_deployment(node_id: str, _actor: auth.Actor = Depends(require_admin)):
-        return await remote.peer_deployment(node_id)
+    async def peer_deployment(node_id: str, actor: auth.Actor = Depends(require_admin)):
+        return await remote.peer_deployment(node_id, actor)
 
     @app.get('/api/v1/grove/deployments/{node_id}/member-directory')
     async def peer_deployment_directory(node_id: str, _actor: auth.Actor = Depends(require_admin)):

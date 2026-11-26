@@ -27,7 +27,9 @@ GROUPS = {
     'grove.deployment.status': 'deployment',
     'grove.deployment.status.v2': 'deployment',
     'grove.deployment.status.v3': 'deployment',
+    'grove.deployment.status.v4': 'deployment',
     'grove.deployment.status.v5': 'deployment',
+    'grove.deployment.status.v6': 'deployment',
 }
 # Requests per window in normal and restricted operation.
 LIMITS = {'logs': (24, 8), 'evidence': (12, 4), 'seed': (12, 4), 'deployment': (12, 4)}
@@ -39,6 +41,7 @@ class Observation:
     requests: dict[str, deque[float]] = field(default_factory=dict)
     restricted_until: float = 0
     last_invalid_method: str | None = None
+    next_authorization_audit: float = 0
     limited: int = 0
     in_flight: int = 0
 
@@ -69,6 +72,15 @@ class Reputation:
             if now >= entry.restricted_until:
                 logger.info('Locally reduced optional RPC quotas for %s after request validation errors', node)
             entry.restricted_until = now + RESTRICTION
+
+    def invalid_authorization(self, node: str, method: str) -> bool:
+        self.invalid_request(node, method)
+        entry = self.observations[node]
+        now = self.clock()
+        if entry.next_authorization_audit > now:
+            return False
+        entry.next_authorization_audit = now + WINDOW
+        return True
 
     def reserve(self, node: str, group: str) -> Observation:
         now = self.clock()

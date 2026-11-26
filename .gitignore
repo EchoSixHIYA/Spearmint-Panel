@@ -1,7 +1,12 @@
 /.venv/
 /work/tmp/
-/run/secrets/
-/run/private-console/
+/run/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+node.key
+factor.key
+operator.key
 /docs/handoffs/spearmint-server-handoff.zip
 /docs/handoffs/spearmint-server-handoff.passphrase.txt
 /web/node_modules/

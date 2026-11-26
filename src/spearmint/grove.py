@@ -706,13 +706,11 @@ def pull_http(state: State, config: Config, *, extra_origins: tuple[str, ...] = 
             members = [member['origin'] for member in directory['members'] if member['enabled']]
         except (PeerError, ValueError):
             pass
-    candidates = [origin(candidate) for candidate in extra_origins]
-    if onboarding.loopback_host(urlsplit(issuer).hostname):
-        candidates.extend(candidate for candidate in members if candidate != issuer)
-        candidates.append(issuer)
-    else:
-        candidates.extend([issuer, *members])
-    targets = [candidate for candidate in dict.fromkeys(candidates) if candidate != config.origin][:8]
+    from .grove_web_join import browser_origin
+
+    candidates = [*(origin(candidate) for candidate in extra_origins), issuer, *members]
+    targets = [candidate for candidate in dict.fromkeys(candidates)
+               if candidate != config.origin and browser_origin(candidate)][:8]
     now = int(time.time())
     payload = {'version': 1, 'realm_id': realm['id'], 'kind': 'directory', 'node_id': state.identity()[0],
                'public_key': wire_b64(state.identity()[1]), 'origin': config.origin,

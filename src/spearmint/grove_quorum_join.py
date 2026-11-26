@@ -1,6 +1,8 @@
 """Approve a fresh panel at a Grove quorum before opening its Mesh connection."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import re
+from secrets import token_hex
 import socket
 import time
 from urllib.parse import urlsplit
@@ -15,6 +17,7 @@ PREFIX = 'grove5.'
 LIMIT = 128 * 1024
 API = '/api/v1/auth/grove/quorum-join/'
 PENDING = 'grove-quorum-join.json'
+ADMISSION_RECEIPT = 'browser-admission-receipt'
 
 
 def current_voter(db, state, policy):
@@ -93,7 +96,9 @@ def vote(state, policy, proof, authorization):
     return {'ballot': ballot}
 
 
-def commit(state, policy, proof, certificate):
+def commit(state, policy, proof, certificate, nonce=None):
+    if nonce is not None and (not isinstance(nonce, str) or not re.fullmatch(r'[a-f0-9]{32}', nonce)):
+        raise PeerError('INVALID_REQUEST', 'Invalid admission receipt nonce')
     data = mesh_enrollment.request_data(policy, proof)
     with state.connect(write=True) as db:
         envelope, anchor = current_voter(db, state, policy)
@@ -103,7 +108,32 @@ def commit(state, policy, proof, certificate):
                 data['node_id'], data['origin']):
             raise PeerError('DENIED', 'The approvals concern a different panel')
         grove_admission.admit(db, certificate, anchor, envelope, 'grove-join-https')
-    return {'admitted':True}
+    if nonce is None:
+        return {'admitted': True}
+    key = state.signing_key()
+    record = receipt_fields(envelope, anchor, proof, certificate, nonce)
+    record['public_key'] = wire_b64(key.public_key().public_bytes_raw())
+    return {'receipt': grove.signed(ADMISSION_RECEIPT, record, key)}
+
+
+def receipt_fields(envelope, anchor, proof, certificate, nonce):
+    # Confirm durable admission for this request and round under the same voter roster.
+    return {'anchor': grove_continuity.anchor_digest(envelope), 'configuration': grove_voters.current_id(anchor),
+            'request': grove_voters.digest(proof), 'certificate': grove_voters.digest(certificate), 'nonce': nonce}
+
+
+def confirmed_admissions(replies, envelope, anchor, proof, certificate, nonce):
+    expected = receipt_fields(envelope, anchor, proof, certificate, nonce)
+    voters = set(anchor['voters'])
+    confirmed = set()
+    for expected_node, reply in replies.items():
+        try:
+            node, data = grove_voters.verified_node(ADMISSION_RECEIPT, reply['receipt'])
+            if node == expected_node and node in voters and data == {**expected, 'public_key': data['public_key']}:
+                confirmed.add(node)
+        except (PeerError, KeyError, ValueError, TypeError, AttributeError):
+            continue
+    return len(confirmed)
 
 
 def request_members(config, policy, action, body):
@@ -171,8 +201,9 @@ def prepare(state, config, actor, code, authorization):
             if len(certificate) < policy.majority():
                 raise PeerError('GROVE_ADMISSION_PENDING', 'A majority did not verify and approve this panel')
             onboarding.write_private(pending, grove.encoded({'certificate':certificate}))
-        replies = request_members(config, policy, 'commit', {'request':proof, 'certificate':certificate})
-        if sum(reply.get('admitted') is True for reply in replies.values()) < policy.majority():
+        nonce = token_hex(16)
+        replies = request_members(config, policy, 'commit', {'request': proof, 'certificate': certificate, 'nonce': nonce})
+        if confirmed_admissions(replies, envelope, anchor, proof, certificate, nonce) < policy.majority():
             raise PeerError('OFFLINE', 'Waiting for a Grove majority to record admission')
         installed = mesh_enrollment.load_policy(state)
         if installed is not None and (installed.id != policy.id or not installed.bind_ip):

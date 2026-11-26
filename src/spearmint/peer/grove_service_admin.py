@@ -19,9 +19,9 @@ OPERATION_KEY = re.compile(r'grove-user-admin:([1-9][0-9]*):([a-f0-9]{64}):([a-f
 GROVE_REQUEST = "request_key GLOB 'grove-user-admin:*' AND substr(request_key,-32)=?"
 
 
-def require_member(db, local_id: str, pair: Pair):
+def require_member(db, local_id: str, pair: Pair, *, transport: bool = False):
     require_pair(db, pair)
-    members = trusted_members(db, local_id, operational=True)
+    members = trusted_members(db, local_id, operational=True, transport=transport)
     if (pair.legacy or not credentials_current(pair) or quarantine.contains(db, pair.node_id)
             or members is None or pair.node_id not in members.origins):
         error = PeerError('DENIED', 'Service setup requires an active Grove Mesh peer')
@@ -128,6 +128,11 @@ class GroveServiceAdmin:
 
     def require(self, db) -> None:
         require_admin_identity(db, self.local_id, self.peer, self.authorization, self.scope)
+
+    def require_current_identity(self, db) -> None:
+        members = require_member(db, self.local_id, self.peer, transport=True)
+        if self.identity != admin_revision(db, members.realm_id, self.identity[1]):
+            raise PeerError('DENIED', 'Grove account permissions changed')
 
     def operation_key(self, version: int, request_id: str) -> str:
         return f'grove-user-admin:{version}:{operation_revision(self.peer, self.identity)}:{request_id}'

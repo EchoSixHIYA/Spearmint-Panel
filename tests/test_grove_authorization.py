@@ -2,18 +2,24 @@
 import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from spearmint import auth, grove_authorization, grove_device_login
+from spearmint import auth, grove_authorization, grove_device_login, grove_quorum_join, mesh_enrollment
 from spearmint.peer.protocol import wire_b64
 from spearmint.peer.grove_service_admin import GroveServiceAdmin
-from spearmint.peer.pairing import configured
+from spearmint.peer.pairing import configured, set_enabled
+from spearmint.peer.services import PeerServices
+from spearmint.peer.reputation import Reputation, WINDOW
 from spearmint.peer.protocol import PeerError
 from spearmint.request_limits import AUTH_BODY_LIMIT, RequestBodyLimit
+from spearmint.state import State
+from spearmint.terminal_service import SESSIONS_PER_SOURCE, TerminalService
 from test_grove_voters import VoterFixture
 
 
@@ -64,6 +70,93 @@ class AuthorizationTest(unittest.TestCase):
                 grove_device_login.finish(state, proof, 'fixture')
             with state.connect(read_only=True) as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM grove_login_verifier').fetchone()[0], 0)
+
+
+    def test_admission_confirms_a_majority_for_the_current_request(self):
+        root = Path.cwd() / 'work/tmp/codex-grove-authorization'
+        root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=root) as directory:
+            fixture = VoterFixture(Path(directory))
+            voter = fixture.states[0]
+            policy = mesh_enrollment.load_policy(voter)
+            target = State(Path(directory) / 'requesting-panel')
+            target.initialize(lambda: fixture.password_hash)
+            origin = 'https://requesting-panel.example:18443'
+            proof = mesh_enrollment.request_for(target, SimpleNamespace(origin=origin), policy)
+            authorization = fixture.authorize(voter, scopes=['join'],
+                                              joining={'node_id': target.identity()[0], 'origin': origin})
+            certificate = [grove_quorum_join.vote(state, policy, proof, authorization)['ballot']
+                           for state in fixture.states[:2]]
+            nonce = '1' * 32
+            replies = {state.identity()[0]: grove_quorum_join.commit(state, policy, proof, certificate, nonce)
+                       for state in fixture.states[:2]}
+            def confirmed(attempt):
+                return grove_quorum_join.confirmed_admissions(
+                    replies, fixture.envelope, fixture.anchor, proof, certificate, attempt)
+            self.assertEqual(confirmed(nonce), policy.majority())
+            self.assertEqual(confirmed('2' * 32), 0)
+
+    def test_terminal_reaper_closes_sessions_when_a_member_is_removed(self):
+        root = Path.cwd() / 'work/tmp/codex-grove-authorization'
+        root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=root) as directory:
+            fixture = VoterFixture(Path(directory))
+            source, target = fixture.states[:2]
+            source_id = source.identity()[0]
+            proof = fixture.authorize(source, scopes=['terminal'])
+            with target.connect(read_only=True) as db:
+                pair = configured(db, source_id)
+            terminal = TerminalService(target, target.identity()[0])
+            self.addCleanup(terminal.shutdown)
+            def request(index):
+                return terminal.dispatch(pair, {'identity': proof, 'owner': 'a' * 32, 'session': f'{index:032x}',
+                                                'action': 'open', 'body': {'columns': 80, 'rows': 25}})
+            with patch('spearmint.terminal_service.open_terminal',
+                       side_effect=lambda *_: Mock(read=Mock(return_value=b''))) as open_backend:
+                for index in range(SESSIONS_PER_SOURCE):
+                    request(index)
+                with self.assertRaises(PeerError) as context:
+                    request(SESSIONS_PER_SOURCE)
+                self.assertEqual(context.exception.code, 'BUSY')
+                self.assertEqual(open_backend.call_count, SESSIONS_PER_SOURCE)
+            set_enabled(target, False, node_id=source_id)
+            terminal.reap()
+            self.assertFalse(terminal.sessions)
+
+
+    def test_package_details_require_deployment_authorization(self):
+        root = Path.cwd() / 'work/tmp/codex-grove-authorization'
+        root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=root) as directory:
+            fixture = VoterFixture(Path(directory))
+            source, target = fixture.states[:2]
+            with target.connect(read_only=True) as db:
+                pair = configured(db, source.identity()[0])
+            service = PeerServices.__new__(PeerServices)
+            service.local_id = target.identity()[0]
+            service.state = target
+            service.deployment_status = lambda: {'build': {'version': '0.4.0'},
+                'host': {'schema': 30}, 'web': {'status': 'ready', 'package_web_sha256': 'a' * 64},
+                'package_checksums_sha256': 'b' * 64}
+            query = {'realm_id': fixture.realm['id']}
+            self.assertEqual(service.deployment_reply(pair, query), {
+                'build': {'version': '0.4.0'}, 'web': {'status': 'ready'}})
+            proof = fixture.authorize(source, scopes=['deployment'])
+            details = service.deployment_reply(pair, {**query, 'authorization': proof}, details=True)
+            self.assertEqual(details['host']['schema'], 30)
+            self.assertEqual(details['package_checksums_sha256'], 'b' * 64)
+
+
+class AuthorizationReputationTest(unittest.TestCase):
+    def test_authorization_failures_count_while_audits_are_sampled(self):
+        clock = Mock(return_value=100.0)
+        reputation = Reputation(clock)
+        self.assertTrue(reputation.invalid_authorization('paired-node', 'grove.terminal.v1'))
+        self.assertFalse(reputation.invalid_authorization('paired-node', 'grove.terminal.v1'))
+        self.assertFalse(reputation.invalid_authorization('paired-node', 'grove.terminal.v1'))
+        self.assertEqual(reputation.status('paired-node')['state'], 'suspected')
+        clock.return_value += WINDOW
+        self.assertTrue(reputation.invalid_authorization('paired-node', 'grove.terminal.v1'))
 
 
 class BodyLimitTest(unittest.TestCase):

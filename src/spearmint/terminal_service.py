@@ -18,6 +18,9 @@ METHOD = 'grove.terminal.v1'
 BUFFER_SIZE = 1024 * 1024
 OUTPUT_SIZE = 32768
 IDLE_SECONDS = 60
+MAX_SESSIONS = 8
+SESSIONS_PER_SOURCE = 4
+SESSIONS_PER_ACCOUNT = 4
 
 
 def integer(value, minimum: int, maximum: int) -> bool:
@@ -28,6 +31,7 @@ def integer(value, minimum: int, maximum: int) -> bool:
 class TerminalSession:
     owner: tuple
     backend: object
+    authority: LocalAdmin | GroveServiceAdmin
     expires: float = field(default_factory=lambda: monotonic() + IDLE_SECONDS)
     buffer: bytearray = field(default_factory=bytearray)
     base: int = 0
@@ -39,6 +43,20 @@ class TerminalSession:
     serial: Lock = field(default_factory=Lock)
     files_lock: Lock = field(default_factory=Lock)
     uploads: dict = field(default_factory=dict)
+
+    @property
+    def account(self):
+        return self.owner[2][:2] if isinstance(self.authority, GroveServiceAdmin) else self.owner[2]
+
+    def authorized(self, db) -> bool:
+        try:
+            if isinstance(self.authority, GroveServiceAdmin):
+                self.authority.require_current_identity(db)
+            else:
+                self.authority.require(db)
+            return True
+        except PeerError:
+            return False
 
     def start(self):
         self.reader = Thread(target=self.read_output, name='terminal-output', daemon=True)
@@ -178,10 +196,13 @@ class TerminalService:
                     if body.keys() != {'columns', 'rows'} or not integer(body['columns'], 2, 500) or not integer(body['rows'], 2, 250):
                         raise PeerError('INVALID_REQUEST', 'Invalid terminal dimensions')
                     if session is None:
-                        if len(self.sessions) >= 8:
+                        account_key = account[:2] if isinstance(actor, GroveServiceAdmin) else account
+                        if (len(self.sessions) >= MAX_SESSIONS
+                                or sum(item.owner[0] == source for item in self.sessions.values()) >= SESSIONS_PER_SOURCE
+                                or sum(item.account == account_key for item in self.sessions.values()) >= SESSIONS_PER_ACCOUNT):
                             raise PeerError('BUSY', 'Close an existing terminal before opening another')
                         backend = open_terminal(body['columns'], body['rows'])
-                        session = TerminalSession(key, backend)
+                        session = TerminalSession(key, backend, actor)
                         session.start()
                         try:
                             with self.state.connect(write=True) as db:
@@ -219,7 +240,13 @@ class TerminalService:
 
     def reap(self):
         with self.lock:
-            expired = [identifier for identifier, session in self.sessions.items() if session.expires < monotonic()]
+            if not self.sessions:
+                return
+            now = monotonic()
+            with self.state.connect(read_only=True) as db:
+                db.execute('BEGIN')
+                expired = [identifier for identifier, session in self.sessions.items()
+                           if session.expires <= now or not session.authorized(db)]
             sessions = [self.sessions.pop(identifier) for identifier in expired]
         for session in sessions:
             session.close()

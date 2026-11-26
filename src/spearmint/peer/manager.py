@@ -572,9 +572,13 @@ class PeerManager:
         return any(self.address_allowed(pair, ip) and (not pair.legacy or self.local_id > pair.node_id)
                    for pair in self.admitted.values())
 
+    def established_source(self, ip: str) -> bool:
+        return (any(pair.source_ip == ip for pair in self.admitted.values())
+                or any(link.address == ip for link in self.neighbors.values()))
+
     async def listen(self, listener: socket.socket, tls) -> None:
         loop = asyncio.get_running_loop()
-        sources: set[str] = set()
+        sources: dict[str, bool] = {}
         failures: dict[str, float] = {}
         connections: set[asyncio.Task] = set()
 
@@ -587,7 +591,9 @@ class PeerManager:
             while True:
                 client, address = await loop.sock_accept(listener)
                 ip = str(ip_address(address[0]))
+                established = self.established_source(ip)
                 if (ip in sources or len(sources) >= DIRECTION_HANDSHAKES or self.handshakes >= HANDSHAKES
+                        or (not established and False in sources.values())
                         or failures.get(ip, 0) > loop.time() or not self.allowed_source(ip)):
                     client.close()
                     continue
@@ -595,10 +601,10 @@ class PeerManager:
                 if permit is None:
                     client.close()
                     continue
-                sources.add(ip)
+                sources[ip] = established
 
                 def released(ip=ip, permit=permit):
-                    sources.discard(ip)
+                    sources.pop(ip, None)
                     permit()
 
                 def rejected(ip=ip):

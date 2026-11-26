@@ -4,6 +4,8 @@ server {
     ssl_certificate /etc/ssl/spearmint/fullchain.pem;
     ssl_certificate_key /etc/ssl/spearmint/key.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
+    server_tokens off;
+    add_header Strict-Transport-Security "max-age=86400" always;
     client_max_body_size 256k;
 
     location / {

@@ -19,6 +19,7 @@ DEPLOYMENT_HOST_METHOD = 'grove.deployment.status.v2'
 DEPLOYMENT_WEB_METHOD = 'grove.deployment.status.v3'
 DEPLOYMENT_DIRECTORY_METHOD = 'grove.deployment.status.v4'
 DEPLOYMENT_PACKAGE_METHOD = 'grove.deployment.status.v5'
+DEPLOYMENT_DETAILS_METHOD = 'grove.deployment.status.v6'
 
 
 class BuildStatus(BaseModel):

@@ -1,6 +1,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from functools import partial
 import json
 import logging
@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from ..auth import Actor
 from .. import auth, grove, grove_accounts, grove_admission, grove_authorization, grove_availability, grove_continuity, grove_identity_changes, grove_login, grove_metadata, grove_password, grove_revocation, grove_roles, grove_web_join, seed_admission
-from ..build_info import (DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_HOST_METHOD, DEPLOYMENT_METHOD,
+from ..build_info import (DEPLOYMENT_DETAILS_METHOD, DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_HOST_METHOD, DEPLOYMENT_METHOD,
                           DEPLOYMENT_PACKAGE_METHOD, DEPLOYMENT_WEB_METHOD, DeploymentStatus)
 from ..catalog import Service, get_service
 from ..control import OBSERVATION_TTL, Controller, ControlError
@@ -25,7 +25,7 @@ from ..seeding import (
     CATALOG_METHOD as SEED_CATALOG, CATALOG_RECEIPTS_METHOD as SEED_RECEIPT_CATALOG, CATALOG_SETUP_METHOD as SEED_SETUP_CATALOG,
     CatalogReceiptTarget, CatalogSetupTarget, CatalogTarget, SeedCatalog, SeedDeployments, SeedReceiptCatalog, SeedSetupCatalog,
 )
-from ..state import State, StateError
+from ..state import State, StateError, audit
 from .approval_format import ACTIONS, operator_id
 from .credentials import NODE_ID, RANDOM_ID
 from .directory import (
@@ -433,10 +433,6 @@ class PeerServices:
             raise PeerError('UNAVAILABLE', 'The local Mesh catalog could not be updated') from error
 
     async def handle(self, pair: Pair, method: str, params: dict) -> dict:
-        if self.voter_service is not None:
-            from .. import grove_voters
-            if method == grove_voters.METHOD:
-                return await self.work(self.voter_service.handle, pair, params, rpc=True)
         node = pair.node_id
         group = OPTIONAL_RPC.get(method)
         current = pair.enabled and self.manager.pairs.get(node) == pair
@@ -446,11 +442,23 @@ class PeerServices:
         try:
             return await self.dispatch(pair, method, params, optional)
         except PeerError as error:
-            if error.code == 'INVALID_REQUEST' and current and self.manager.pairs.get(node) == pair:
-                self.reputation.invalid_request(node, method)
+            if current and self.manager.pairs.get(node) == pair:
+                if error.code == 'INVALID_REQUEST':
+                    self.reputation.invalid_request(node, method)
+                if error.code == grove_authorization.ERROR and self.reputation.invalid_authorization(node, method):
+                    with suppress(PeerError, OSError, sqlite3.Error, StateError):
+                        await self.work(self.audit_authorization_failure, node, method, rpc=True)
             raise
 
+    def audit_authorization_failure(self, node: str, method: str) -> None:
+        with self.state.connect(write=True) as db:
+            audit(db, node, node, 'grove.authorization_denied', method, reason='user_authorization_required')
+
     async def dispatch(self, pair: Pair, method: str, params: dict, optional: tuple[str, str] | None) -> dict:
+        if self.voter_service is not None:
+            from .. import grove_voters
+            if method == grove_voters.METHOD:
+                return await self.work(self.voter_service.handle, pair, params, rpc=True)
         if method == OBSERVE_METHOD and self.adaptive:
             link = self.manager.neighbors.get(pair.node_id)
             if link is None or link.pair != pair:
@@ -507,12 +515,10 @@ class PeerServices:
         if method in (SEED_CATALOG, SEED_RECEIPT_CATALOG, SEED_SETUP_CATALOG) and self.seed_deployments is not None:
             return await self.work(self.seed_catalog_reply, pair, params, method, rpc=True)
         if method in (DEPLOYMENT_METHOD, DEPLOYMENT_HOST_METHOD, DEPLOYMENT_WEB_METHOD,
-                      DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_PACKAGE_METHOD) and self.deployment_status is not None:
-            return await self.work(self.deployment_reply, pair, params, method != DEPLOYMENT_METHOD,
-                                   method in (DEPLOYMENT_WEB_METHOD, DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_PACKAGE_METHOD),
-                                   method in (DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_PACKAGE_METHOD),
-                                   method == DEPLOYMENT_PACKAGE_METHOD,
-                                   rpc=True, optional=optional)
+                      DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_PACKAGE_METHOD, DEPLOYMENT_DETAILS_METHOD) and self.deployment_status is not None:
+            return await self.work(self.deployment_reply, pair, params,
+                                   include_directory=method in (DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_PACKAGE_METHOD, DEPLOYMENT_DETAILS_METHOD),
+                                   details=method == DEPLOYMENT_DETAILS_METHOD, rpc=True, optional=optional)
         if method == GROVE_ENDPOINT_METHOD and self.grove_endpoints is not None:
             realm_id = await self.work(self.endpoint_realm, pair, params, rpc=True)
             trust = self.grove_endpoints.members
@@ -1133,33 +1139,52 @@ class PeerServices:
                 raise PeerError('DENIED', 'Deployment status requires an active Grove Mesh member')
             return trust.realm_id, trust.origins[pair.node_id]
 
-    def deployment_reply(self, pair: Pair, params: dict, include_host: bool = False, include_web_digest: bool = False,
-                         include_directory: bool = False, include_package: bool = False) -> dict:
+    @staticmethod
+    def public_deployment(status: dict) -> dict:
+        result = {key: status[key] for key in ('build', 'member_directory') if key in status}
+        result['web'] = {key: value for key, value in status['web'].items() if key != 'package_web_sha256'}
+        return result
+
+    def deployment_reply(self, pair: Pair, params: dict, *, include_directory: bool = False, details: bool = False) -> dict:
         member = self.deployment_member(pair)
-        if params != {'realm_id': member[0]}:
+        expected = {'realm_id', 'authorization'} if details else {'realm_id'}
+        if params.keys() != expected or params['realm_id'] != member[0]:
             raise PeerError('DENIED', 'Grove membership changed')
+        if details:
+            actor = GroveServiceAdmin.from_wire(self.local_id, pair, params['authorization'], 'deployment')
+            with self.state.connect(read_only=True) as db:
+                db.execute('BEGIN')
+                actor.require(db)
         status = self.deployment_status()
-        if not include_package and 'package_checksums_sha256' in status:
-            status = {key: value for key, value in status.items() if key != 'package_checksums_sha256'}
         if include_directory:
             status = status | {'member_directory': grove.cached_member_directory_version(self.state, member[0])}
         if self.deployment_member(pair) != member:
             raise PeerError('DENIED', 'Grove membership changed')
-        if not include_web_digest:
-            status = status | {'web': {key: value for key, value in status['web'].items() if key != 'package_web_sha256'}}
-        return status if include_host else {key: status[key] for key in ('build', 'web')}
+        return status if details else self.public_deployment(status)
 
-    async def peer_deployment(self, node_id: str) -> dict:
+    async def peer_deployment(self, node_id: str, actor: Actor | None = None) -> dict:
         pair = self.pair_for(node_id)
         realm, origin = await self.work(self.deployment_member, pair)
-        for method in (DEPLOYMENT_PACKAGE_METHOD, DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_WEB_METHOD,
-                       DEPLOYMENT_HOST_METHOD, DEPLOYMENT_METHOD):
+        basic = {'realm_id': realm}
+        authorization = None
+        if actor is not None:
+            with suppress(PeerError):
+                authorization = await self.work(source_grant, self.state, self.local_id, pair, actor, 'deployment')
+        methods = [(method, basic) for method in (DEPLOYMENT_PACKAGE_METHOD, DEPLOYMENT_DIRECTORY_METHOD,
+                                                   DEPLOYMENT_WEB_METHOD, DEPLOYMENT_HOST_METHOD, DEPLOYMENT_METHOD)]
+        if authorization is not None:
+            methods.insert(0, (DEPLOYMENT_DETAILS_METHOD, {**basic, 'authorization': authorization}))
+        for method, params in methods:
             try:
-                result, connection = await self.call_with_connection(node_id, method, {'realm_id': realm}, diagnostic=True)
+                result, connection = await self.call_with_connection(node_id, method, params, diagnostic=True)
                 break
             except PeerError as error:
-                if error.code != 'UNSUPPORTED_METHOD':
+                if error.code != 'UNSUPPORTED_METHOD' and not (
+                    method == DEPLOYMENT_DETAILS_METHOD and error.code == grove_authorization.ERROR
+                ):
                     raise
+                if method == DEPLOYMENT_DETAILS_METHOD and error.code != 'UNSUPPORTED_METHOD':
+                    authorization = None
         else:
             raise PeerError('DEPLOYMENT_UNSUPPORTED', 'This node does not report deployment status')
         try:
@@ -1170,8 +1195,10 @@ class PeerServices:
             raise PeerError('DENIED', 'Grove membership changed')
         if self.connection_for(node_id) is not connection:
             raise PeerError('ROUTE_LOST', 'The deployment status connection changed')
-        return {'node_id': node_id, 'origin': origin, 'connection_id': connection.connection_id,
-                **status.model_dump(exclude_unset=True, by_alias=True)}
+        result = status.model_dump(exclude_unset=True, by_alias=True)
+        if authorization is None:
+            result = self.public_deployment(result)
+        return {'node_id': node_id, 'origin': origin, 'connection_id': connection.connection_id, **result}
 
     def deployment_directory(self, realm_id: str, envelope: dict) -> dict:
         with self.state.connect(read_only=True) as db:
