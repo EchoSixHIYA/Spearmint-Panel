@@ -32,6 +32,9 @@ from .session import Session, close_stream
 
 logger = logging.getLogger(__name__)
 HANDSHAKES = 4
+DIRECTION_HANDSHAKES = HANDSHAKES - 1
+INBOUND_FAILURE_DELAY = 1.0
+INBOUND_FAILURE_SOURCES = 512
 MESH_CAPABILITY = "mesh.v2"
 RPC_CAPABILITIES = ("peer.ping", "catalog.sync", "service.status", "service.logs", POLICY_METHOD, "grove.identity.get")
 LEGACY_OPERATION_CAPABILITIES = ("operation.prepare", "operation.submit", "operation.get")
@@ -116,6 +119,7 @@ class PeerManager:
         self.neighbor_ready: Callable[[Neighbor], None] | None = None
         self.listener_error: str | None = None
         self.handshakes = 0
+        self.outbound_handshakes = 0
         self.peak_handshakes = 0
         self.runtime_path = self.state.directory / "peer-runtime.json"
 
@@ -503,19 +507,28 @@ class PeerManager:
 
         return release
 
-    async def accept(self, client: socket.socket, tls, release: Callable[[], None]) -> None:
+    async def accept(self, client: socket.socket, tls, release: Callable[[], None], rejected: Callable[[], None]) -> None:
         reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
         loop = asyncio.get_running_loop()
         started_at = loop.time()
         writer = None
+        established = False
+
+        def authenticated():
+            nonlocal established
+            established = True
+            release()
+
         try:
             transport, _ = await loop.connect_accepted_socket(
                 lambda: protocol, client, ssl=tls, ssl_handshake_timeout=DEADLINE, ssl_shutdown_timeout=1,
             )
             writer = asyncio.StreamWriter(transport, protocol, reader, loop)
-            await self.use_connection(reader, writer, None, release, started_at=started_at)
+            await self.use_connection(reader, writer, None, authenticated, started_at=started_at)
         except LINK_ERRORS as exc:
+            if not established:
+                rejected()
             logger.info("Incoming Peer: %s", error_message(exc))
         finally:
             release()
@@ -562,6 +575,7 @@ class PeerManager:
     async def listen(self, listener: socket.socket, tls) -> None:
         loop = asyncio.get_running_loop()
         sources: set[str] = set()
+        failures: dict[str, float] = {}
         connections: set[asyncio.Task] = set()
 
         def done(task: asyncio.Task, client: socket.socket, release: Callable[[], None]) -> None:
@@ -573,7 +587,8 @@ class PeerManager:
             while True:
                 client, address = await loop.sock_accept(listener)
                 ip = str(ip_address(address[0]))
-                if ip in sources or self.handshakes >= HANDSHAKES or not self.allowed_source(ip):
+                if (ip in sources or len(sources) >= DIRECTION_HANDSHAKES or self.handshakes >= HANDSHAKES
+                        or failures.get(ip, 0) > loop.time() or not self.allowed_source(ip)):
                     client.close()
                     continue
                 permit = self.scheduler.incoming(ip) if self.scheduler else lambda: None
@@ -586,8 +601,14 @@ class PeerManager:
                     sources.discard(ip)
                     permit()
 
+                def rejected(ip=ip):
+                    failures.pop(ip, None)
+                    if len(failures) >= INBOUND_FAILURE_SOURCES:
+                        failures.pop(next(iter(failures)))
+                    failures[ip] = loop.time() + INBOUND_FAILURE_DELAY
+
                 release = self.reserve(released)
-                task = asyncio.create_task(self.accept(client, tls, release))
+                task = asyncio.create_task(self.accept(client, tls, release, rejected))
                 connections.add(task)
                 task.add_done_callback(lambda result, sock=client, slot=release: done(result, sock, slot))
         finally:
@@ -603,7 +624,8 @@ class PeerManager:
             candidates = self.endpoints.get(pair.node_id, ())
             if pair.source_ip is not None and pair.port is not None:
                 candidates = ((pair.source_ip, pair.port),) + tuple(item for item in candidates if item != (pair.source_ip, pair.port))
-            if not candidates or pair.node_id in self.neighbors or self.handshakes >= HANDSHAKES - 1:
+            if (not candidates or pair.node_id in self.neighbors or self.handshakes >= HANDSHAKES
+                    or self.outbound_handshakes >= DIRECTION_HANDSHAKES):
                 await asyncio.sleep(0.5)
                 continue
             if self.scheduler and not self.scheduler.allow_dial(pair):
@@ -612,7 +634,12 @@ class PeerManager:
             address, port = candidates[attempt % len(candidates)]
             attempt += 1
             writer = None
-            release = self.reserve(lambda: None)
+            self.outbound_handshakes += 1
+
+            def released():
+                self.outbound_handshakes -= 1
+
+            release = self.reserve(released)
             established = False
 
             def authenticated() -> None:
@@ -652,7 +679,8 @@ class PeerManager:
         family = socket.AF_INET if ip_address(pair.bind_ip).version == 4 else socket.AF_INET6
         listener = socket.socket(family)
         try:
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            option = socket.SO_EXCLUSIVEADDRUSE if os.name == 'nt' else socket.SO_REUSEADDR
+            listener.setsockopt(socket.SOL_SOCKET, option, 1)
             listener.bind((pair.bind_ip, pair.listen_port))
             listener.listen(NEIGHBORS)
             listener.setblocking(False)

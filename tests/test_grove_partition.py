@@ -18,7 +18,6 @@ from spearmint import grove_roles
 class Coordinator:
     approve_identity_change = PeerServices.approve_identity_change
     revoke_grove_operator = PeerServices.revoke_grove_operator
-    change_grove_password = PeerServices.change_grove_password
     approve_grove_role = PeerServices.approve_grove_role
 
     def __init__(self, fixture, reachable):
@@ -39,8 +38,6 @@ class Coordinator:
             return grove_identity_changes.ballot(state, params['kind'], params['document'], params['actor'], self.local_id)
         if method == grove_revocation.APPLY:
             count = grove_revocation.apply(state, [params['revocation']], self.local_id)
-        elif method == grove_password.APPLY:
-            count = grove_password.apply(state, [params['change']], self.local_id)
         elif method == grove_roles.APPLY_METHOD:
             count = grove_roles.apply(state, [params['certificate']], self.local_id)
         else:

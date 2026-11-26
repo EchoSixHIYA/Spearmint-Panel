@@ -7,6 +7,7 @@ import { GroveCard } from './grove-auth'
 import { Sessions } from './sessions'
 import { GrovePasswordDialog } from './security-pages'
 import { GroveAccountDialog } from './grove-account-access'
+import { GroveAuthorizationDialog } from './grove-authorization'
 import { ServiceList } from './service-workspace'
 import { useWorkspace, returnRoute, withReturn } from './workspace-api'
 import { nodeResourcesTarget, groveServiceRegistrationHref, localServiceHref, savedRemoteOperationHref, savedRemoteOperationTarget } from './grove-navigation'
@@ -66,7 +67,8 @@ export function NodeInspector({ nodeId, onSave, embedded = false, initialTab }: 
 }
 
 export function IdentityWorkspace({ onFactors }: { onFactors: () => void }) {
-  const { session, onUnauthorized, groveDetails, groveError, directoryCurrent, admin } = useConsole()
+  const { session, onUnauthorized, groveDetails, groveError, directoryCurrent, admin, listedNodes } = useConsole()
+  const [authorizationOpen, setAuthorizationOpen] = useState(false)
   const [recoveryOpen, setRecoveryOpen] = useState(false)
   return <><PageHeading eyebrow="MANAGEMENT / IDENTITY" title="身份与安全" description="管理 Grove 账号、角色和登录访问。" />
     <div className="identity-workspace">
@@ -74,28 +76,37 @@ export function IdentityWorkspace({ onFactors }: { onFactors: () => void }) {
         : <Panel title="Grove 账号">{groveError ? <Notice tone="amber">{groveError}</Notice> : !groveDetails ? <Loading label="正在读取账号信息…" />
           : <div className="identity-local-state"><p className="muted">当前使用本机账号。创建或加入 Grove 后，可在这里管理 Grove 账号。</p><a className="btn btn-secondary" href="#/nodes?join=1">设置 Grove<Icon name="arrow-right" size={14} /></a></div>}</Panel>}
       <Panel title="登录与会话" className="identity-login-panel"><div className="identity-signed-in"><span className="avatar-circle">{(session.display_name || session.username).slice(0, 1).toUpperCase()}</span><div><strong>{session.display_name || session.username}</strong><small>{session.grove ? 'Grove 账号' : '本机账号'} · {admin ? '管理员' : '操作员'}</small></div></div>
-        <div className="identity-login-actions"><button type="button" onClick={onFactors}><Icon name="key" size={16} /><span>管理登录验证器</span><Icon name="arrow-right" size={14} /></button>
+        <div className="identity-login-actions">{session.grove && admin && groveDetails?.issuer_retired && <button type="button" onClick={() => setAuthorizationOpen(true)}>
+            <Icon name="shield-check" size={16} /><span>授权当前面板</span><Icon name="arrow-right" size={14} /></button>}
+          <button type="button" onClick={onFactors}><Icon name="key" size={16} /><span>管理登录验证器</span><Icon name="arrow-right" size={14} /></button>
           {session.grove && groveDetails?.account_management && <button type="button" onClick={() => setRecoveryOpen(true)}>
             <Icon name="key" size={16} /><span>生成密码恢复码</span><Icon name="arrow-right" size={14} /></button>}
           <a href="#/account/sessions"><Icon name="monitor" size={16} /><span>查看登录会话</span><Icon name="arrow-right" size={14} /></a></div>
       </Panel>
     </div>
     {recoveryOpen && <GroveAccountDialog action="recovery-code" session={session} onClose={() => setRecoveryOpen(false)} onUnauthorized={onUnauthorized} />}
+    {authorizationOpen && <GroveAuthorizationDialog session={session} nodes={listedNodes} onClose={() => setAuthorizationOpen(false)} onUnauthorized={onUnauthorized} />}
   </>
 }
 
 export function AccountWorkspace({ onFactors, onSave, section }: { onFactors: () => void; onSave: (preferences: Preferences) => void; section?: string }) {
   const { session, onUnauthorized } = useConsole()
   const [tab, setTab] = useState(section || 'identity')
+  const [authorizationOpen, setAuthorizationOpen] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
+  const [deviceOpen, setDeviceOpen] = useState(false)
   const [recoveryOpen, setRecoveryOpen] = useState(false)
-  const recovery = usePoll<{ available: boolean; configured: boolean }>(session.grove ? '/auth/grove/account/recovery-code' : null, onUnauthorized)
+  const recovery = usePoll<{ available: boolean; configured: boolean; device_bound?: boolean }>(session.grove ? '/auth/grove/account/recovery-code' : null, onUnauthorized)
   const password = usePoll<{ available: boolean }>(session.grove ? '/auth/grove/password' : null, onUnauthorized)
   return <><PageHeading eyebrow="ACCOUNT" title="我的账户" description="登录验证、个人会话和浏览器显示偏好。" /><Tabs label="个人账户" current={tab} onChange={setTab} items={[{ id: 'identity', label: '账户验证' }, { id: 'sessions', label: '会话' }, { id: 'settings', label: '显示偏好' }]} />
     {tab === 'identity' && <Panel title="当前登录身份"><strong>{session.display_name || session.username}</strong><p className="muted">{session.grove ? 'Grove 账号' : '本机账号'}</p><div className="button-row"><button className="btn btn-secondary" onClick={onFactors}>管理登录验证器</button>{password.data?.available && <button className="btn btn-secondary" onClick={() => setPasswordOpen(true)}>修改 Grove 密码</button>}
-      {recovery.data?.available && <button className="btn btn-secondary" onClick={() => setRecoveryOpen(true)}>{recovery.data.configured ? '重新生成密码恢复码' : '生成密码恢复码'}</button>}</div></Panel>}
+      {recovery.data?.available && <><button className="btn btn-secondary" onClick={() => setRecoveryOpen(true)}>{recovery.data.configured ? '重新生成密码恢复码' : '生成密码恢复码'}</button>
+      <button className="btn btn-secondary" onClick={() => setAuthorizationOpen(true)}>授权账号操作</button>
+      {!recovery.data.device_bound && <button className="btn btn-secondary" onClick={() => setDeviceOpen(true)}>绑定登录设备</button>}</>}</div></Panel>}
     {tab === 'sessions' && <Sessions session={session} onUnauthorized={onUnauthorized} />}{tab === 'settings' && <SettingsPage onSave={onSave} />}
-    {recoveryOpen && <GroveAccountDialog action="recovery-code" session={session} onClose={() => setRecoveryOpen(false)} onUnauthorized={onUnauthorized} />}
+    {recoveryOpen && <GroveAccountDialog action="recovery-code" deviceBound={recovery.data?.device_bound} session={session} onClose={() => setRecoveryOpen(false)} onUnauthorized={onUnauthorized} />}
+    {deviceOpen && <GroveAccountDialog action="bind-device" session={session} onClose={() => setDeviceOpen(false)} onUnauthorized={onUnauthorized} />}
+    {authorizationOpen && <GroveAuthorizationDialog session={session} nodes={[]} onClose={() => setAuthorizationOpen(false)} onUnauthorized={onUnauthorized} selfOnly />}
     {passwordOpen && <GrovePasswordDialog session={session} onUnauthorized={onUnauthorized} onClose={() => setPasswordOpen(false)} />}
   </>
 }

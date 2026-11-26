@@ -34,14 +34,16 @@ def export_verifiers(state: State, recipient: str, realm_id: str, authorize: Cal
         key = grove.issuer_key(state, realm)
         directory = grove.verified('directory', grove.publish(state, db, realm), realm['public_key'])
         records = verifier_records(state, db, directory)
+        content_digest = verifier_digest(records)
         verifiers = grove.signed('login-verifiers', {'realm_id': realm_id, 'recipient': recipient,
                                 'sequence': directory['sequence'], 'issued_at': directory['issued_at'],
-                                'expires_at': directory['issued_at'] + VERIFIER_TTL, 'records': records}, key)
+                                'expires_at': directory['issued_at'] + VERIFIER_TTL, 'records': [],
+                                'profiles_only': True, 'verifiers_sha256': content_digest}, key)
         if standby_members is None:
             return verifiers
         voters = active_non_issuer_members(directory)
         authorization = {'realm_id': realm_id, 'sequence': directory['sequence'], 'directory_sha256': snapshot_digest(directory),
-                         'verifiers_sha256': verifier_digest(records), 'voters': voters}
+                         'verifiers_sha256': content_digest, 'voters': voters}
         standby = None
         recovery = None
         complete = len(voters) >= 2 and len(records) == sum(user['enabled'] for user in directory['users'])
@@ -118,6 +120,10 @@ def import_snapshot(state: State, db, directory: dict, records: list[dict], dige
         raise PeerError('DENIED', 'Invalid Grove recovery verifier data') from error
     factors.initialize_vault(state)
     store_records(state, db, records, seen)
+    import_public_snapshot(db, directory, digest)
+
+
+def import_public_snapshot(db, directory, digest):
     db.execute('''INSERT INTO grove_login_replica(singleton,sequence,issued_at,expires_at,payload_digest,content_digest)
                   VALUES (1,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET sequence=excluded.sequence,
                   issued_at=excluded.issued_at,expires_at=0,payload_digest=excluded.payload_digest,
@@ -152,33 +158,26 @@ def apply_verifiers(state: State, envelope: dict, standby: dict | None = None, r
         data = grove.verified('login-verifiers', envelope, realm['public_key'])
         directory = grove.directory_data(json.loads(realm['manifest']), grove.realm_data(realm))
         try:
-            if (not isinstance(data, dict) or set(data) != {'realm_id', 'recipient', 'sequence', 'issued_at', 'expires_at', 'records'}
+            if (not isinstance(data, dict) or set(data) != {'realm_id', 'recipient', 'sequence', 'issued_at', 'expires_at', 'records',
+                        'profiles_only', 'verifiers_sha256'}
                     or data['realm_id'] != realm['id'] or data['recipient'] != local_id
                     or type(data['sequence']) is not int or data['sequence'] != realm['sequence']
                     or type(data['issued_at']) is not int or data['issued_at'] != directory['issued_at']
                     or type(data['expires_at']) is not int
                     or data['expires_at'] != directory['issued_at'] + VERIFIER_TTL
-                    or not isinstance(data['records'], list) or len(data['records']) > len(directory['users'])):
+                    or data['profiles_only'] is not True or data['records'] != []
+                    or not isinstance(data['verifiers_sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', data['verifiers_sha256'])):
                 raise ValueError('Verifier snapshot does not match the current directory')
-            profiles = {user['id']: user for user in directory['users']}
-            seen = set()
-            for record in data['records']:
-                verify_record(record)
-                user = record['profile']
-                if user['id'] in seen or user != profiles.get(user['id']):
-                    raise ValueError('Verifier identity does not match the directory')
-                seen.add(user['id'])
         except (KeyError, TypeError, ValueError, VerificationError) as error:
             raise PeerError('PROTOCOL', 'Invalid Grove login verifier snapshot') from error
 
         digest = sha256(grove.encoded(data)).hexdigest()
-        content_digest = verifier_digest(data['records'])
+        content_digest = data['verifiers_sha256']
         active = active_non_issuer_members(directory)
         expected = {'realm_id': realm['id'], 'sequence': directory['sequence'], 'directory_sha256': snapshot_digest(directory),
                     'verifiers_sha256': content_digest, 'voters': active}
         if standby is not None or recovery is not None:
-            if (len(expected['voters']) < 2 or local_id not in expected['voters']
-                    or len(seen) != sum(user['enabled'] for user in directory['users'])):
+            if len(expected['voters']) < 2 or local_id not in expected['voters']:
                 raise PeerError('PROTOCOL', 'Incomplete Grove login snapshot')
             if standby is not None:
                 selected = grove.verified('login-standby', standby, realm['public_key'])
@@ -194,15 +193,13 @@ def apply_verifiers(state: State, envelope: dict, standby: dict | None = None, r
         recovery_json = json.dumps(recovery) if recovery is not None else None
         previous = db.execute('SELECT * FROM grove_login_replica').fetchone()
         if previous and previous['sequence'] == data['sequence']:
-            if not secrets.compare_digest(previous['payload_digest'], digest):
+            if not secrets.compare_digest(previous['payload_digest'], digest) and previous['content_digest'] != content_digest:
                 raise PeerError('CONFLICT', 'Conflicting Grove login verifier snapshots')
             if previous['content_digest'] is None or previous['standby'] != standby_json or previous['recovery'] != recovery_json:
                 db.execute('''UPDATE grove_login_replica SET content_digest=?,recovery=?,
                               standby_lease_until=CASE WHEN standby IS ? THEN standby_lease_until ELSE 0 END,standby=?''',
                            (content_digest, recovery_json, standby_json, standby_json))
             return 'unchanged'
-        factors.initialize_vault(state)
-        store_records(state, db, data['records'], seen)
         db.execute('''INSERT INTO grove_login_replica(singleton,sequence,issued_at,expires_at,payload_digest,content_digest,standby,recovery)
                       VALUES (1,?,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET
                       sequence=excluded.sequence,issued_at=excluded.issued_at,expires_at=excluded.expires_at,
@@ -246,7 +243,9 @@ def login(state: State, username: str, password: str, code: str | None, address:
                              FROM grove_login_verifier v LEFT JOIN grove_login_password p ON p.user_id=v.user_id
                              LEFT JOIN grove_login_role r ON r.user_id=v.user_id WHERE v.username=?
                              AND NOT EXISTS (SELECT 1 FROM grove_login_revocation r WHERE r.user_id=v.user_id)''', (username,)).fetchone()
-        return dict(row) | {'account_password': grove_accounts.login_password(state, db, username)} if row else None
+        if row is not None and grove_accounts.device_key(db, row['user_id']) is None:
+            return dict(row) | {'account_password': grove_accounts.login_password(state, db, username)}
+        return None
 
     with auth.authentication_attempt(state, address, int(time.time()), username=username) as (db, _):
         verifier = read_verifier(db)
@@ -292,13 +291,13 @@ def login(state: State, username: str, password: str, code: str | None, address:
             db.execute('''INSERT INTO panel_account(id, username, password_hash, role, operation_actor)
                           VALUES (?,?,?,?,?)''', (account_id, '@' + verifier['user_id'], 'grove-only', verifier['effective_role'], account_id))
         account = db.execute('SELECT * FROM panel_account WHERE id=?', (account_id,)).fetchone()
-        if linked and (linked['identity_epoch'] != verifier['epoch'] or account['role'] != verifier['effective_role']
+        if linked and (linked['valid_until'] == -1 or linked['identity_epoch'] != verifier['epoch'] or account['role'] != verifier['effective_role']
                        or not account['enabled'] or bool(account['require_mfa']) != (totp is not None)):
             factors.revoke_account_sessions(db, account_id)
         db.execute('UPDATE panel_account SET enabled=1,role=?,require_mfa=? WHERE id=?',
                    (verifier['effective_role'], int(totp is not None), account_id))
         db.execute('''INSERT INTO grove_account VALUES (?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
-                      display_name=excluded.display_name,identity_epoch=excluded.identity_epoch''',
+                      display_name=excluded.display_name,identity_epoch=excluded.identity_epoch,valid_until=0''',
                    (account_id, verifier['user_id'], username, verifier['epoch'], 0))
         db.execute('DELETE FROM login_attempt WHERE address=? AND account_key=?', (address, auth.digest(username)))
         account = auth.account_for(db, account['username'])

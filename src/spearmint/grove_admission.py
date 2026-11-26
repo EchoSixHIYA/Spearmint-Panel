@@ -279,7 +279,8 @@ def join(state: State, actor: auth.Actor | None, origin: str, bundle: dict, sour
         raise PeerError('PROTOCOL', 'Invalid Grove admission response')
     realm_data = grove.invitation(bundle['realm'])
     snapshot = bundle['snapshot']
-    if not isinstance(snapshot, dict) or snapshot.keys() != {'authorization', 'manifest', 'records'}:
+    if (not isinstance(snapshot, dict) or snapshot.keys() != {'authorization', 'manifest', 'records', 'profiles_only'}
+            or snapshot['profiles_only'] is not True or snapshot['records'] != []):
         raise PeerError('PROTOCOL', 'Invalid Grove admission snapshot')
     document, governance = grove_continuity.split_document(snapshot['authorization'])
     recovered = isinstance(document, dict) and document.keys() == {'authorization', 'votes'}
@@ -311,7 +312,7 @@ def join(state: State, actor: auth.Actor | None, origin: str, bundle: dict, sour
         db.executemany('INSERT INTO grove_member VALUES (?,?,?)',
                        ((member['node_id'], member['origin'], member['enabled']) for member in directory['members']))
         admit(db, bundle['certificate'], anchor, envelope, source)
-        grove_login.import_snapshot(state, db, directory, snapshot['records'], anchor['verifiers_sha256'])
+        grove_login.import_public_snapshot(db, directory, anchor['verifiers_sha256'])
         db.execute('INSERT INTO grove_login_continuity(singleton,sequence,anchor,recovery_proof) VALUES (1,?,?,?)',
                    (anchor['sequence'], json.dumps(envelope), json.dumps(document['votes']) if recovered else None))
         grove_voters.install_history(db, base, governance, source)

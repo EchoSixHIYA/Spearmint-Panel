@@ -3,17 +3,26 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 import unittest
-from urllib.parse import parse_qs, urlsplit
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pyotp import TOTP
 
-from spearmint import auth, factors, grove, grove_accounts, grove_continuity, grove_login
+from spearmint import auth, grove, grove_accounts, grove_authorization, grove_continuity, grove_device_login, grove_login
 from spearmint.grove_account_service import GroveAccountService
 from spearmint.peer.grove_service_admin import source_identity
 from spearmint.peer.pairing import configured
-from spearmint.peer.protocol import PeerError
+from spearmint.peer.protocol import PeerError, wire_b64
 from spearmint.peer.services import PeerServices
 from test_grove_voters import VoterFixture
+
+
+def public_key(key):
+    return wire_b64(key.public_key().public_bytes_raw())
+
+
+def device_login(state, username, key):
+    challenge = grove_device_login.challenge(state, username, 'fixture')
+    return grove_device_login.finish(state, grove_authorization.issue(key, challenge, []), 'fixture')
 
 
 class AccountLink:
@@ -68,15 +77,13 @@ class GroveAccountTest(unittest.IsolatedAsyncioTestCase):
         invite = await self.one.grove_accounts.run('invite', 'invitee', 'fixture', role='remote_operator', actor=self.admin)
         users = grove.describe(self.two.state, private=True)['users']
         self.assertTrue(next(user for user in users if user['name'] == 'invitee')['pending'])
-        secret, _ = factors.new_totp('invitee', 'Grove')
-        code = TOTP(secret).now()
-        password = 'invitee-chosen-password'
+        key = Ed25519PrivateKey.generate()
         registered = await self.two.grove_accounts.run('register', 'invitee', 'fixture', code=invite['code'],
-                                                        password=password, totp=secret, otp=code)
+                                                        device_key=public_key(key))
         self.assertIn('recovery_code', registered)
         with self.assertRaises(PeerError) as error:
             await self.two.grove_accounts.run('register', 'invitee', 'fixture', code=invite['code'],
-                                              password=password, totp=secret, otp=code)
+                                              device_key=public_key(key))
         self.assertEqual(error.exception.code, 'DENIED')
 
         # A non-voter and a returning voter fetch the latest certified account
@@ -84,48 +91,55 @@ class GroveAccountTest(unittest.IsolatedAsyncioTestCase):
         self.network[self.three.local_id] = self.three
         self.assertTrue(await self.three.sync())
         self.assertTrue(await self.member.sync())
-        self.assertIsNotNone(grove_login.login(self.member.state, 'invitee', password, code, 'fixture'))
+        self.assertIsNotNone(device_login(self.member.state, 'invitee', key))
         with self.one.state.connect(read_only=True) as db:
             snapshot = grove_continuity.snapshot(self.one.state, db, self.fixture.realm['id'], self.member.local_id)
-        self.assertEqual([entry['profile']['name'] for entry in snapshot['records']], ['admin', 'operator'])
+        self.assertTrue(snapshot['profiles_only'])
+        self.assertEqual(snapshot['records'], [])
         with self.one.state.connect(write=True) as db:
             db.execute('DELETE FROM grove_login_verifier')
-            grove_login.import_snapshot(self.one.state, db, self.fixture.directory, snapshot['records'],
-                                        self.fixture.anchor['verifiers_sha256'])
-        self.assertIsNotNone(grove_login.login(self.one.state, 'invitee', password, code, 'fixture'))
+            grove_accounts.restore_verifiers(self.one.state, db)
+        self.assertIsNotNone(device_login(self.one.state, 'invitee', key))
+        self.network.clear()
+        self.fixture.expire_freshness()
+        with self.member.state.connect(write=True) as db:
+            db.execute('UPDATE grove_login_continuity SET lease_until=lease_until-900')
+            self.assertEqual(db.execute('SELECT count(*) FROM grove_login_verifier').fetchone()[0], 0)
+        offline_session = device_login(self.member.state, 'invitee', key)
+        self.assertEqual(auth.actor_for(self.member.state, offline_session[0], 'fixture').role, 'remote_operator')
 
     async def test_admin_creation_assisted_and_self_service_reset(self):
-        result = await self.one.grove_accounts.run('create', 'second-admin', 'fixture', role='node_admin',
-                                                    password='temporary-admin-password', actor=self.admin)
-        secret = parse_qs(urlsplit(result['provisioning_uri']).query)['secret'][0]
-        session = grove_login.login(self.two.state, 'second-admin', 'temporary-admin-password', TOTP(secret).now(), 'fixture')
+        second_key = Ed25519PrivateKey.generate()
+        await self.one.grove_accounts.run('create', 'second-admin', 'fixture', role='node_admin',
+                                          device_key=public_key(second_key), actor=self.admin)
+        session = device_login(self.two.state, 'second-admin', second_key)
         self.assertIsNotNone(session)
         second_admin = auth.actor_for(self.two.state, session[0], 'fixture')
         self.assertIsNotNone(source_identity(self.two.state, self.two.local_id, None, second_admin))
+        self.fixture.authorize(self.two.state, second_admin, 'second-admin', scopes=['accounts'], signer=second_key)
         assistance = await self.two.grove_accounts.run('assist', 'admin', 'fixture', actor=second_admin)
         reset = await self.two.grove_accounts.run('reset', 'admin', 'fixture', code=assistance['code'],
-                                                   password='new-fixture-password')
+                                                   device_key=public_key(Ed25519PrivateKey.generate()))
         with self.one.state.connect(read_only=True) as db:
             self.assertIsNone(auth.active_session(db, self.admin.token_hash, int(time.time())))
         self.assertIsNone(grove_login.login(self.three.state, 'admin', self.fixture.password, TOTP(self.fixture.secret).now(), 'fixture'))
+        key = Ed25519PrivateKey.generate()
         own_reset = await self.three.grove_accounts.run('reset', 'admin', 'fixture', code=reset['recovery_code'],
-                                                         password='second-new-fixture-password')
+                                                         device_key=public_key(key))
         self.assertNotEqual(reset['recovery_code'], own_reset['recovery_code'])
-        self.assertIsNotNone(grove_login.login(self.three.state, 'admin', 'second-new-fixture-password',
-                                              TOTP(self.fixture.secret).now(), 'fixture'))
+        self.assertIsNotNone(device_login(self.three.state, 'admin', key))
         for code in (assistance['code'], reset['recovery_code']):
             with self.assertRaises(PeerError) as error:
-                await self.one.grove_accounts.run('reset', 'admin', 'fixture', code=code, password='third-new-fixture-password')
+                await self.one.grove_accounts.run('reset', 'admin', 'fixture', code=code, device_key=public_key(key))
             self.assertEqual(error.exception.code, 'DENIED')
 
     async def test_recovery_code_can_be_generated_for_existing_grove_account(self):
         code = await self.one.grove_accounts.run('recovery-code', 'admin', 'fixture',
                                                   actor=self.admin, current_password=self.fixture.password)
         self.assertIn('recovery_code', code)
-        await self.two.grove_accounts.run('reset', 'admin', 'fixture', code=code['recovery_code'],
-                                           password='existing-admin-new-password')
-        self.assertIsNotNone(grove_login.login(self.three.state, 'admin', 'existing-admin-new-password',
-                                              TOTP(self.fixture.secret).now(), 'fixture'))
+        key = Ed25519PrivateKey.generate()
+        await self.two.grove_accounts.run('reset', 'admin', 'fixture', code=code['recovery_code'], device_key=public_key(key))
+        self.assertIsNotNone(device_login(self.three.state, 'admin', key))
 
     async def test_quorum_loss_leaves_account_unchanged(self):
         self.network.pop(self.two.local_id)

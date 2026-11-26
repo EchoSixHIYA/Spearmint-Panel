@@ -1,5 +1,9 @@
 """Authorize node host-service access from the Grove page over local SSH."""
+from base64 import b64decode, b64encode
 from dataclasses import dataclass, field
+from hashlib import sha256
+from hmac import compare_digest
+import stat
 from subprocess import SubprocessError
 import sys
 from pathlib import Path
@@ -14,6 +18,21 @@ from . import docker_access, host_service_access, seed_ssh
 from .host import HostError
 from .peer.protocol import PeerError
 from .state import audit
+
+
+def trusted_host_key(observed: str) -> str:
+    for path in Path('/etc/ssh').glob('ssh_host_*_key.pub'):
+        try:
+            valid = path.lstat()
+            if not stat.S_ISREG(valid.st_mode) or valid.st_uid != 0 or valid.st_mode & 0o022 or valid.st_size > 8192:
+                continue
+            fields = path.read_bytes().split(None, 2)
+            fingerprint = 'SHA256:' + b64encode(sha256(b64decode(fields[1], validate=True)).digest()).decode().rstrip('=')
+            if compare_digest(observed, fingerprint):
+                return fingerprint
+        except (IndexError, OSError, ValueError):
+            continue
+    raise PeerError('HOST_SSH_HOST_KEY', '本机 SSH 证书与系统信任的主机密钥不符。')
 
 
 class Authorization(BaseModel):
@@ -112,7 +131,7 @@ class HostServiceAuthorization:
             if not self.enabled(body.scope):
                 connection = seed_ssh.Connection('127.0.0.1', body.port)
                 self.change(job, status='authenticating')
-                connection.login(connection.fingerprint, body.username, body.secret, body.key)
+                connection.login(trusted_host_key(connection.fingerprint), body.username, body.secret, body.key)
                 connection.system()
                 with self.state.connect(read_only=True) as db:
                     actor.require(db)

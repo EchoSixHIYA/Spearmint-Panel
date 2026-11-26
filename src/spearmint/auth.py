@@ -23,7 +23,7 @@ RECENT_FACTOR_SECONDS = 300
 MAX_FLOW_FAILURES = 5
 ATTEMPT_WINDOW = 60
 SOURCE_ATTEMPTS = 8
-ACCOUNT_ATTEMPTS = 16
+ACCOUNT_SOURCE_ATTEMPTS = 5
 PASSWORD_SLOTS = BoundedSemaphore(8)
 PASSWORD = PasswordHasher(time_cost=2, memory_cost=19 * 1024, parallelism=1)
 
@@ -102,7 +102,7 @@ def account_for(db: sqlite3.Connection, username: str | None) -> sqlite3.Row | N
 def active_session(db: sqlite3.Connection, token_hash: bytes, now: int) -> sqlite3.Row | None:
     row = db.execute("""
         SELECT a.id, a.username, a.operation_actor, a.role, s.csrf_token, s.last_seen, s.mfa_at,
-               ga.user_id AS grove_user, ga.display_name, ga.valid_until, r.frozen, s.grove_replica,
+               ga.user_id AS grove_user, ga.display_name, ga.valid_until, ga.identity_epoch, r.frozen, s.grove_replica,
                EXISTS(SELECT 1 FROM grove_login_revocation rv WHERE rv.user_id=ga.user_id) AS grove_revoked,
                EXISTS(SELECT 1 FROM grove_login_replica lr JOIN grove_login_verifier lv ON lv.user_id=ga.user_id
                       LEFT JOIN grove_login_continuity c ON c.singleton=1
@@ -122,11 +122,18 @@ def active_session(db: sqlite3.Connection, token_hash: bytes, now: int) -> sqlit
         from . import grove_availability
         if not grove_availability.ordinary(db, now, check_sync=False):
             return None
-    if row is not None and row['grove_user'] is not None and (
-        (not row['replica_current'] if row['grove_replica'] else row['valid_until'] <= now)
-        or row['frozen'] != '' or not row['member_active'] or row['grove_revoked']
-    ):
-        return None
+    if row is not None and row['grove_user'] is not None:
+        if row['frozen'] != '' or not row['member_active'] or row['grove_revoked']:
+            return None
+        if not row['grove_replica'] and row['valid_until'] <= now:
+            return None
+        if row['grove_replica']:
+            if row['valid_until'] == -1:
+                from . import grove_device_login
+                if not grove_device_login.current_session(db, row):
+                    return None
+            elif not row['replica_current']:
+                return None
     return row
 
 
@@ -134,8 +141,10 @@ def record_attempt(db: sqlite3.Connection, address: str, now: int, account_key: 
     db.execute("DELETE FROM login_attempt WHERE attempted_at<=?", (now - ATTEMPT_WINDOW,))
     if db.execute("SELECT count(*) FROM login_attempt WHERE address=?", (address,)).fetchone()[0] >= SOURCE_ATTEMPTS:
         return "SOURCE_LIMIT"
-    if db.execute("SELECT count(*) FROM login_attempt WHERE account_key=?", (account_key,)).fetchone()[0] >= ACCOUNT_ATTEMPTS:
-        return "ACCOUNT_LIMIT"
+    if account_key is not None and db.execute(
+        "SELECT count(*) FROM login_attempt WHERE address=? AND account_key=?", (address, account_key),
+    ).fetchone()[0] >= ACCOUNT_SOURCE_ATTEMPTS:
+        return "ACCOUNT_SOURCE_LIMIT"
     db.execute("INSERT INTO login_attempt (address,attempted_at,account_key) VALUES (?,?,?)", (address, now, account_key))
     return None
 

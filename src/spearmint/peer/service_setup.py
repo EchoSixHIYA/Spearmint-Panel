@@ -112,7 +112,7 @@ class ServiceSetup:
         if params.keys() != {'identity', 'action', 'body'}:
             raise PeerError('INVALID_REQUEST', 'Invalid service setup request')
         identity, action, body = params['identity'], params['action'], params['body']
-        return self.setup(GroveServiceAdmin.from_wire(self.local_id, pair, identity), action, body)
+        return self.setup(GroveServiceAdmin.from_wire(self.local_id, pair, identity, 'services'), action, body)
 
     def setup(self, actor: GroveServiceAdmin | LocalAdmin, action: str, body: dict) -> dict:
         with self.state.connect() as db:

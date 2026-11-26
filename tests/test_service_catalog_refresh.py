@@ -28,10 +28,10 @@ class Renewal:
     async def call(self, node, method, params, **_):
         if node != self.remote.identity()[0]:
             raise PeerError('OFFLINE', 'Owned fixture is disconnected')
-        if method != grove_continuity.MEMBERS_VOTE_METHOD:
+        if method != grove_continuity.ACCOUNTS_VOTE_METHOD:
             raise AssertionError('Unexpected fixture method: ' + method)
         return grove_continuity.vote(self.remote, self.local_id, params['nonce'], params['anchor'],
-                                    params['revocations'], params['passwords'], params['roles'], params['members'])
+                                    params['revocations'], params['passwords'], params['roles'], params['members'], params['accounts'])
 
 
 class Catalog:

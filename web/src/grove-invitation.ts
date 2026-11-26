@@ -7,6 +7,7 @@ const basePrefix = 'grove1.'
 const memberPrefix = 'grove2.'
 export const MAX_GROVE_INVITATION_LENGTH = 128 * 1024
 const pendingJoinKey = 'spearmint-quorum-invitation'
+const pendingJoinAge = 15 * 60 * 1000
 
 export function isQuorumInvitation(value: string) {
   const code = value.trim()
@@ -19,14 +20,16 @@ export function isAutomaticQuorumInvitation(value: string) {
 }
 
 export function rememberQuorumInvitation(code: string) {
-  try { sessionStorage.setItem(pendingJoinKey, code.trim()) } catch { /* The code can be pasted again after setup. */ }
+  try { sessionStorage.setItem(pendingJoinKey, JSON.stringify({ code: code.trim(), expires: Date.now() + pendingJoinAge })) } catch { /* The code can be pasted again after setup. */ }
 }
 
 export function takeQuorumInvitation() {
   try {
-    const code = sessionStorage.getItem(pendingJoinKey) ?? ''
+    const raw = sessionStorage.getItem(pendingJoinKey)
     sessionStorage.removeItem(pendingJoinKey)
-    return isQuorumInvitation(code) ? code : ''
+    if (!raw) return ''
+    const { code, expires } = JSON.parse(raw)
+    return typeof code === 'string' && Date.now() < expires && isQuorumInvitation(code) ? code : ''
   } catch { return '' }
 }
 

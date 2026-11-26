@@ -1,23 +1,19 @@
 """Keep the verified native archive available until the seeding job finishes."""
 from dataclasses import dataclass
-from hashlib import file_digest, sha256
 import json
 import os
 from pathlib import Path
 import re
 from shutil import copyfile
 import tarfile
-from tempfile import NamedTemporaryFile, TemporaryDirectory
+from tempfile import TemporaryDirectory
 from threading import Lock
-from urllib.parse import urlsplit
-from urllib.request import ProxyHandler, build_opener
 from zipfile import BadZipFile, ZipFile
 
 from . import update_release
 from .peer.protocol import PeerError
 
 
-MAX_ARCHIVE = 300 * 1024 * 1024
 MANIFEST = 'spearmint/build-manifest.json'
 ARCHIVE_INDEX = 'seed-archives.json'
 PLATFORM_LOCKS = {target: Lock() for target in update_release.TARGETS}
@@ -121,65 +117,3 @@ def retain(state, source: Path, release: update_release.Release, platform: str) 
     return SeedArchive(path, {'name': name, 'sha256': asset.sha256, 'commit': release.commit, 'size': asset.size,
                              'host_services': manifest.get('host_services', 0),
                              'docker_authorization': manifest.get('docker_authorization', 0)}, directory)
-
-
-def acquire_local(state, platform: str) -> SeedArchive:
-    if platform not in PLATFORM_LOCKS:
-        raise PeerError('SEED_PACKAGE', 'No verified native package is available for the detected platform')
-    with PLATFORM_LOCKS[platform]:
-        package = acquire_indexed(state, platform)
-    try:
-        prune_local(state, platform)
-    except OSError:
-        # An older file may still be open during cleanup on Windows.
-        pass
-    return package
-
-
-def acquire_indexed(state, platform: str) -> SeedArchive:
-    root = state.directory / 'seed-packages'
-    try:
-        entry = local_index(root)[platform]
-        name, digest = entry['name'], entry['sha256']
-        if (not re.fullmatch(r'[\w.-]{1,180}\.(?:zip|tar\.gz)', name, re.ASCII)
-                or not re.fullmatch(r'[a-f0-9]{64}', digest)):
-            raise ValueError('Invalid native package settings')
-        path = root / name
-        if not path.exists():
-            url = entry['url']
-            if urlsplit(url).scheme != 'https':
-                raise ValueError('Native package origin must use HTTPS')
-            download = build_opener(ProxyHandler({})).open(url, timeout=12)
-            with download, NamedTemporaryFile(dir=root, suffix='.part', delete=False) as output:
-                incomplete = Path(output.name)
-                try:
-                    if urlsplit(download.url).scheme != 'https':
-                        raise ValueError('Native package redirects must use HTTPS')
-                    checksum = sha256()
-                    while block := download.read(1024 * 1024):
-                        if output.tell() + len(block) > MAX_ARCHIVE:
-                            raise ValueError('Native package is too large')
-                        checksum.update(block)
-                        output.write(block)
-                    if checksum.hexdigest() != digest:
-                        raise ValueError('Native package checksum mismatch')
-                    output.close()
-                    inspect_archive(incomplete, platform)
-                    incomplete.replace(path)
-                finally:
-                    if not output.closed:
-                        output.close()
-                    incomplete.unlink(missing_ok=True)
-        if not 0 < path.stat().st_size <= MAX_ARCHIVE:
-            raise ValueError('Invalid native package size')
-        with path.open('rb') as source:
-            if file_digest(source, 'sha256').hexdigest() != digest:
-                raise ValueError('Native package checksum mismatch')
-        manifest = inspect_archive(path, platform)
-        size = path.stat().st_size
-        pinned, directory = pin(state, path, name)
-    except (OSError, ValueError, KeyError, TypeError, BadZipFile, tarfile.TarError) as error:
-        raise PeerError('SEED_PACKAGE', 'No verified native package is available for the detected platform') from error
-    return SeedArchive(pinned, {'name': name, 'sha256': digest, 'commit': manifest['commit'], 'size': size,
-                               'host_services': manifest.get('host_services', 0),
-                               'docker_authorization': manifest.get('docker_authorization', 0)}, directory)

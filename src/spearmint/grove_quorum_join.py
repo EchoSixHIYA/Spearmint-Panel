@@ -5,7 +5,7 @@ import socket
 import time
 from urllib.parse import urlsplit
 
-from . import auth, grove, grove_admission, grove_continuity, grove_login, grove_voters, grove_web_join, mesh_enrollment, onboarding
+from . import grove, grove_admission, grove_authorization, grove_continuity, grove_login, grove_voters, grove_web_join, mesh_enrollment, onboarding
 from .peer import quarantine
 from .peer.mesh_policy import member_allowed
 from .peer.protocol import PeerError, decode_json, parse_b64, wire_b64
@@ -71,25 +71,26 @@ def read_invitation(code):
     return realm, data['anchor'], anchor, policy
 
 
-def vote(state, policy, proof, credentials, address):
+def vote(state, policy, proof, authorization):
     data = mesh_enrollment.request_data(policy, proof)
-    with state.connect(read_only=True) as db:
-        db.execute('BEGIN')
-        current_voter(db, state, policy)
-        if quarantine.contains(db, data['node_id']) or not member_allowed(db, policy.mesh, data['node_id']):
-            raise PeerError('DENIED', 'The panel is blocked by local Mesh policy')
-        grove_admission.eligible(db, data['node_id'], data['origin'])
-    session = grove_login.login(state, credentials.username, credentials.password, credentials.code, address)
-    if session is None:
-        raise PeerError('DENIED', 'Grove administrator credentials were rejected')
-    actor = auth.actor_for(state, session[0], address)
-    if actor is None:
-        raise PeerError('DENIED', 'Unable to confirm the Grove administrator')
     try:
-        ballot, _ = grove_admission.approve(state, actor, data['node_id'], data['origin'], before_mesh=True)
-        return {'ballot':ballot}
-    finally:
-        auth.logout(state, actor)
+        grant = grove_authorization.unsigned(authorization['grant'])
+        subject = {'node_id': data['node_id'], 'origin': data['origin']}
+        if grant['joining'] != subject:
+            raise ValueError
+        source = grant['source']
+    except (KeyError, ValueError, TypeError) as error:
+        raise PeerError(grove_authorization.ERROR, '加入授权不属于这台节点。') from error
+    with state.connect(write=True) as db:
+        envelope, anchor = current_voter(db, state, policy)
+        if any(quarantine.contains(db, node) or not member_allowed(db, policy.mesh, node)
+               for node in (data['node_id'], source)):
+            raise PeerError('DENIED', 'The panel is blocked by local Mesh policy')
+        if not db.execute('SELECT 1 FROM grove_member WHERE node_id=? AND enabled=1', (source,)).fetchone():
+            raise PeerError('DENIED', 'The joining authorization requires an active member')
+        identity = grove_authorization.verify(db, authorization, source, 'join')
+        ballot = grove_admission.record_ballot(db, state, data['node_id'], data['origin'], envelope, anchor, identity[1], source)
+    return {'ballot': ballot}
 
 
 def commit(state, policy, proof, certificate):
@@ -138,7 +139,7 @@ def choose_bind_ip(policy):
     raise PeerError('OFFLINE', 'No usable local Mesh interface was detected')
 
 
-def prepare(state, config, actor, code, credentials):
+def prepare(state, config, actor, code, authorization):
     realm, envelope, anchor, policy = read_invitation(code)
     digest = grove_continuity.anchor_digest(envelope)
     target = (state.identity()[0], config.origin)
@@ -156,9 +157,9 @@ def prepare(state, config, actor, code, credentials):
             if grove_admission.validate_certificate(certificate, anchor, digest) != target:
                 raise PeerError('CONFLICT', 'An approval is pending for a different Grove invitation')
         except FileNotFoundError:
-            if credentials is None:
-                raise PeerError('DENIED', 'Enter Grove administrator credentials to continue')
-            replies = request_members(config, policy, 'vote', {'request':proof, 'credentials':credentials})
+            if authorization is None:
+                raise PeerError(grove_authorization.ERROR, '粘贴管理员为此节点签名的加入授权。')
+            replies = request_members(config, policy, 'vote', {'request': proof, 'authorization': authorization})
             certificate = []
             for node, reply in replies.items():
                 try:

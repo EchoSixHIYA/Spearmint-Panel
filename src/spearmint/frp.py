@@ -51,7 +51,12 @@ def hostname(value, *, domain: bool = False) -> str:
 def file_path(directory: Path, value) -> Path:
     if not isinstance(value, str) or not value or not value.isprintable():
         raise StateError('Invalid FRP configuration file path')
-    return (directory / value).absolute()
+    path = Path(value)
+    root = directory.resolve()
+    resolved = (root / path).resolve()
+    if not path.is_absolute() and not resolved.is_relative_to(root):
+        raise StateError('Relative FRP paths must stay within the configuration directory')
+    return resolved
 
 
 def authority(host: str, number: int) -> str:

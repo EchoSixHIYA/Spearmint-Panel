@@ -1,11 +1,14 @@
 """Owned three-voter Grove snapshots for functional partition simulations."""
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import time
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from pyotp import TOTP
 
-from spearmint import auth, grove, grove_continuity, grove_login
+from spearmint import auth, grove, grove_authorization, grove_continuity, grove_login
 from spearmint.peer.protocol import wire_b64
 from spearmint.state import State
 
@@ -51,8 +54,34 @@ class GroveFixture:
 
     def login(self, index=0, username='admin'):
         state = self.states[index]
-        token, csrf = grove_login.login(state, username, self.password, TOTP(self.secret).now(), '127.0.0.1')
-        return auth.actor_for(state, token, '127.0.0.1')
+        token, _ = grove_login.login(state, username, self.password, TOTP(self.secret).now(), '127.0.0.1')
+        actor = auth.actor_for(state, token, '127.0.0.1')
+        if username == 'admin':
+            self.authorize(state, actor, username)
+        return actor
+
+    def authorize(self, state, actor=None, username='admin', scopes=None, signer=None, **kwargs):
+        from spearmint.peer.grove_service_admin import admin_revision
+
+        from spearmint import grove_accounts, grove_device_login
+        signer = signer or Ed25519PrivateKey.generate()
+        key = wire_b64(signer.public_key().public_bytes_raw())
+        owner = actor or SimpleNamespace(token_hash=b'owned-fixture-authorization')
+        if scopes is None:
+            scopes = sorted(grove_authorization.KINDS - {'join', 'signin'}) if username == 'admin' else ['self']
+        with state.connect(read_only=True) as db:
+            db.execute('BEGIN')
+            _, anchor = grove_authorization.context(db)
+            user = grove_device_login.profile_for(db, username)['id']
+            device = grove_accounts.device_key(db, user)
+            identity = admin_revision(db, self.realm['id'], user, require_admin=False)
+            request = grove_authorization.challenge(db, owner, state.identity()[0], identity, scopes, **kwargs)
+        approvals = [grove_authorization.key_vote(voter, username, key)
+                     for voter in getattr(self, 'all_states', self.states) if voter.identity()[0] in anchor['voters']] if not device else []
+        proof = grove_authorization.issue(signer, request, approvals)
+        if actor:
+            grove_authorization.enrollment(state, actor, proof)
+        return proof
 
     def expire_freshness(self, seconds=600):
         for state in self.states:

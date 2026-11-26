@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -79,6 +80,7 @@ class UpdateDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         self.updates.local_status = Mock(return_value=None)
         self.updates.local_path = None
         self.updates.target = 'windows-amd64'
+        self.updates.root = Path('fixture')
         self.updates.schema = 30
         self.updates.build = {'commit': self.latest.commit, 'version': '0.4.0'}
         self.updates.cached_seed_release.return_value = self.latest
@@ -141,13 +143,15 @@ class UpdateDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         supplier = 'spm1-' + '1' * 64
         self.updates.local_id = 'spm1-' + '2' * 64
         self.updates.local_path = 'local.json'
+        self.updates.root = Path('fixture')
+        self.updates.build = {'commit': self.previous.commit}
         self.updates.target = 'windows-amd64'
         self.updates.state = SimpleNamespace(directory='fixture')
         self.updates.verify_source = AsyncMock()
         offer = grove_updates.Offer(job='a' * 32, expires=int(grove_updates.time.time()) + 60,
-                                   release=self.latest, target=self.updates.local_id, identity=[])
+                                   release=self.latest, target=self.updates.local_id, identity={'fixture': 'verified elsewhere'})
         job = {'job': offer.job, 'release': self.latest.model_dump(), 'source': offer.identity,
-               'source_node': origin, 'expires': offer.expires, 'status': 'queued'}
+               'source_node': origin, 'accepted_at': int(grove_updates.time.time()), 'expires': offer.expires, 'status': 'queued'}
 
         async def acquire(asset, *, on_transfer):
             on_transfer(supplier)

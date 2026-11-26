@@ -12,6 +12,7 @@ from . import maintenance, update_release
 from .platforms import WINDOWS, replace_file, secure_private
 from .systemd_compat import literal_arguments
 
+INSTALLED_RELEASE = 'installed-release.json'
 
 def write_record(path: Path, value: dict) -> None:
     with NamedTemporaryFile(dir=path.parent, delete=False) as stream:
@@ -200,6 +201,7 @@ def main(state_directory: str, job_id: str) -> int:
                 secure_private(log)
                 subprocess.run(args, check=True, stdin=subprocess.DEVNULL, stdout=sink,
                                stderr=subprocess.STDOUT, env=installer_env())
+        write_record(root / INSTALLED_RELEASE, release.model_dump())
         write_record(result, {'status': 'succeeded', 'finished_at': int(time.time())})
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:

@@ -266,6 +266,8 @@ class PeerOperations:
             service = grove_service_for(db, service_id)
             if version is not None and version != service.version:
                 return {'actions': [], 'reason': 'registration-changed'}
+            if scoped.required_version(db, service_id) == 2:
+                return {'actions': [], 'reason': 'approval-required'}
             if not service.actions:
                 return {'actions': [], 'reason': 'observe'}
         if not self.host_ready(service):
@@ -290,6 +292,7 @@ class PeerOperations:
                     raise PeerError('CONFLICT', 'Idempotency key was used for another operation')
                 return grove_operation_receipt(db, row, request_id)
             grove_service_for(db, service_id)
+            scoped.require_version(db, service_id, 1)
             try:
                 result = self.controller.enqueue(db, service_id, action, actor.operation_key(version, request_id),
                                                  actor.operation_actor, actor.address, int(time.time()), remote=True,

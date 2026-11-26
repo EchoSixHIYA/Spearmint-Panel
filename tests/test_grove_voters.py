@@ -92,8 +92,9 @@ class VoterFixture(GroveFixture):
                 return target.handle(pair, params)
             remote.work, remote.call = work, call
             self.services[local] = VoterService(state, remote, SimpleNamespace(mesh_advertise_ip=None, mesh_advertise_port=None))
-        with self.states[0].connect(read_only=True) as db:
-            self.identity = admin_revision(db, self.realm['id'], self.users[0]['id'])
+    @property
+    def identity(self):
+        return self.authorize(self.states[0], scopes=['voters'])
 
     def service(self, index=0):
         return self.services[self.all_states[index].identity()[0]]
@@ -168,7 +169,7 @@ class GroveVoterTest(unittest.TestCase):
         f.reachable.remove(f.states[0].identity()[0])
         replacement = f.service(1)
         replacement.recover_request()
-        self.assertTrue(asyncio.run(replacement.change(f.new.identity()[0], True, f.identity)))
+        self.assertTrue(asyncio.run(replacement.change(f.new.identity()[0], True, f.authorize(f.states[1], scopes=['voters']))))
         self.assertEqual(grove_voters.status(f.states[1])['version'], 1)
         f.reachable.add(f.states[0].identity()[0])
         service.gather = gather
@@ -250,6 +251,10 @@ class GroveVoterTest(unittest.TestCase):
         target = f.new.identity()[0]
         self.assertTrue(asyncio.run(f.service().change(target, True, f.identity)))
         f.renew_all()
+        # Exercise the legacy password-change format against a previously cached verifier.
+        records = [{'profile': user, 'password_hash': f.password_hash, 'totp': f.secret} for user in f.users]
+        with f.new.connect(write=True) as db:
+            grove_login.import_snapshot(f.new, db, f.directory, records, f.anchor['verifiers_sha256'])
         token, _ = grove_login.login(f.new, 'admin', f.password, TOTP(f.secret).now(), '127.0.0.1')
         actor = auth.actor_for(f.new, token, '127.0.0.1')
         document, _ = grove_password.issue(f.new, actor, f.password, 'new-voter-fixture-password')
@@ -258,9 +263,7 @@ class GroveVoterTest(unittest.TestCase):
         document = grove_identity_changes.certify(f.new, 'password', document, ballots)
         for state in f.all_states:
             grove_password.apply(state, [document], target)
-        with f.new.connect(read_only=True) as db:
-            identity = admin_revision(db, f.realm['id'], f.users[0]['id'])
-        self.assertTrue(asyncio.run(f.service().change(target, False, identity)))
+        self.assertTrue(asyncio.run(f.service().change(target, False, f.identity)))
         f.renew_all()
         for state in f.all_states:
             self.assertFalse(grove_password.apply(state, [document], f.states[0].identity()[0]))
@@ -294,6 +297,9 @@ class GroveVoterTest(unittest.TestCase):
 
     def test_existing_password_survives_configuration_change(self):
         f = self.f
+        records = [{'profile': user, 'password_hash': f.password_hash, 'totp': f.secret} for user in f.users]
+        with f.new.connect(write=True) as db:
+            grove_login.import_snapshot(f.new, db, f.directory, records, f.anchor['verifiers_sha256'])
         actor = f.login()
         change, _ = grove_password.issue(f.states[0], actor, f.password, 'replacement-fixture-password')
         approvals = [grove_identity_changes.ballot(state, 'password', change, f.users[0]['id'], f.states[0].identity()[0] if index else None)
@@ -301,9 +307,7 @@ class GroveVoterTest(unittest.TestCase):
         change = grove_identity_changes.certify(f.states[0], 'password', change, approvals)
         for state in f.all_states:
             grove_password.apply(state, [change], f.states[0].identity()[0])
-        with f.states[0].connect(read_only=True) as db:
-            identity = admin_revision(db, f.realm['id'], f.users[0]['id'])
-        self.assertTrue(asyncio.run(f.service().change(f.new.identity()[0], True, identity)))
+        self.assertTrue(asyncio.run(f.service().change(f.new.identity()[0], True, f.identity)))
         f.renew_all()
         for state in f.all_states:
             grove_password.apply(state, [change], f.states[0].identity()[0])

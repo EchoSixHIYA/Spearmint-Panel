@@ -152,12 +152,13 @@ class Controller:
                 if current is None or current['role'] != 'node_admin' or current['id'] != grove_operation['account_id']:
                     self.finish(db, operation, 'failed', 'Grove authorization changed before dispatch', reason='POLICY_CHANGED')
                     return None
-            if operation['request_key'].startswith('grove-admin:'):
+            if operation['request_key'].startswith(('grove-admin:', 'grove-user-admin:')):
+                from .peer.operation_policy import required_version
                 version = OPERATION_KEY.fullmatch(operation['request_key'])
                 local_id = db.execute('SELECT node_id FROM node').fetchone()[0]
                 service = get_service(db, operation['service_id'])
                 authorized = (version is not None and service is not None and service.version == int(version[1])
-                              and operation_origin(db, operation, local_id))
+                              and required_version(db, service.id) == 1 and operation_origin(db, operation, local_id))
             else:
                 authorized = dispatch_authorized(db, operation)
             if not authorized:

@@ -9,7 +9,7 @@ from ..service_removal import unregister
 from ..service_mode import change_mode, ModeChangeError
 from ..state import StateError
 from ..deployment_location import owns_code
-from .grove_service_admin import GroveServiceAdmin
+from .grove_service_admin import GroveServiceAdmin, require_member
 from .service_setup import LocalAdmin
 from .protocol import PeerError
 
@@ -68,8 +68,18 @@ class Workspace:
     def dispatch(self, pair, params):
         if params.keys() != {'identity', 'action', 'body'}:
             raise PeerError('INVALID_REQUEST', 'Invalid workspace request')
-        actor = GroveServiceAdmin.from_wire(self.node_id, pair, params['identity'])
+        if params['action'] == 'host':
+            with self.state.connect(read_only=True) as db:
+                require_member(db, self.node_id, pair)
+            return self.host(params['body'])
+        actor = GroveServiceAdmin.from_wire(self.node_id, pair, params['identity'], 'services')
         return self.request(actor, params['action'], params['body'])
+
+    def host(self, body):
+        if not isinstance(body, dict) or body.keys() - {'trend'} or type(body.get('trend', False)) is not bool:
+            raise PeerError('INVALID_REQUEST', 'Invalid host metrics request')
+        return {'node_id': self.node_id, 'platform': capabilities(), 'metrics': self.metrics.snapshot(),
+                **({'trend': self.metrics.trend()} if body.get('trend') else {}), 'workspace': 1}
 
     def request(self, actor, action, body):
         if not isinstance(body, dict):
@@ -77,9 +87,8 @@ class Workspace:
         with self.state.connect(read_only=True) as db:
             actor.require(db)
         try:
-            if action == 'host' and body.keys() <= {'trend'} and type(body.get('trend', False)) is bool:
-                return {'node_id': self.node_id, 'platform': capabilities(), 'metrics': self.metrics.snapshot(),
-                        **({'trend': self.metrics.trend()} if body.get('trend') else {}), 'workspace': 1}
+            if action == 'host':
+                return self.host(body)
             if action == 'detail':
                 return self.detail(actor, Target.model_validate(body).service_id)
             if action in {'group-save', 'group-delete', 'group-run'} and self.groups is not None:

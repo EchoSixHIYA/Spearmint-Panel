@@ -6,7 +6,7 @@ import json
 import re
 import time
 
-from .. import auth, grove
+from .. import auth, grove, grove_authorization
 from . import quarantine
 from .grove_endpoints import trusted_members
 from .outbound import account_admin
@@ -15,8 +15,8 @@ from .policy import credentials_current, require_pair
 from .protocol import PeerError
 
 
-OPERATION_KEY = re.compile(r'grove-admin:([1-9][0-9]*):([a-f0-9]{64}):([a-f0-9]{32})')
-GROVE_REQUEST = "request_key GLOB 'grove-admin:*' AND substr(request_key,-32)=?"
+OPERATION_KEY = re.compile(r'grove-user-admin:([1-9][0-9]*):([a-f0-9]{64}):([a-f0-9]{32})')
+GROVE_REQUEST = "request_key GLOB 'grove-user-admin:*' AND substr(request_key,-32)=?"
 
 
 def require_member(db, local_id: str, pair: Pair):
@@ -34,7 +34,7 @@ def require_member(db, local_id: str, pair: Pair):
     return members
 
 
-def admin_revision(db, member_realm: str, user_id: str) -> list:
+def admin_revision(db, member_realm: str, user_id: str, *, require_admin=True) -> list:
     realm = db.execute('SELECT * FROM grove_realm WHERE id=?', (member_realm,)).fetchone()
     if realm is None:
         raise PeerError('DENIED', 'The Grove identity directory is unavailable')
@@ -50,7 +50,7 @@ def admin_revision(db, member_realm: str, user_id: str) -> list:
     user = next((entry for entry in users if entry['id'] == user_id and entry['enabled']), None)
     role = db.execute('SELECT role,generation FROM grove_login_role WHERE user_id=?', (user_id,)).fetchone()
     revoked = db.execute('SELECT 1 FROM grove_login_revocation WHERE user_id=?', (user_id,)).fetchone()
-    if user is None or revoked or (role['role'] if role else user['role']) != 'node_admin':
+    if user is None or revoked or (require_admin and (role['role'] if role else user['role']) != 'node_admin'):
         raise PeerError('DENIED', 'Grove administrator required')
     password = db.execute('SELECT generation FROM grove_login_password WHERE user_id=?', (user_id,)).fetchone()
     revision = grove_accounts.credential_version(db, user_id)
@@ -84,14 +84,26 @@ def parse_identity(identity) -> list:
     return identity
 
 
-def require_admin_identity(db, local_id: str, pair: Pair | None, identity) -> list:
-    identity = parse_identity(identity)
+def require_admin_identity(db, local_id: str, pair: Pair | None, identity, scope: str, *, delegated=False) -> list:
     members = require_member(db, local_id, pair) if pair else trusted_members(db, local_id, operational=True)
     if members is None:
         raise PeerError('OFFLINE', 'This panel is waiting for a current Grove directory')
+    if pair is not None or isinstance(identity, dict):
+        return grove_authorization.verify(db, identity, pair.node_id if pair else local_id, scope, delegated=delegated)
+    identity = parse_identity(identity)
     if identity != admin_revision(db, members.realm_id, identity[1]):
         raise PeerError('CONFLICT', 'Grove account permissions changed. Retry after the identity directory synchronizes')
     return identity
+
+
+def source_grant(state, local_id, pair, actor, scope):
+    identity = source_identity(state, local_id, pair, actor)
+    proof = grove_authorization.enrolled(state, actor)
+    with state.connect(read_only=True) as db:
+        db.execute('BEGIN')
+        if grove_authorization.verify(db, proof, local_id, scope, owner=actor) != identity:
+            raise PeerError(grove_authorization.ERROR, grove_authorization.MESSAGE)
+    return proof
 
 
 @dataclass(frozen=True)
@@ -99,10 +111,12 @@ class GroveServiceAdmin:
     local_id: str
     peer: Pair
     identity: list
+    authorization: dict
+    scope: str
 
     @classmethod
-    def from_wire(cls, local_id: str, peer: Pair, identity) -> "GroveServiceAdmin":
-        return cls(local_id, peer, parse_identity(identity))
+    def from_wire(cls, local_id: str, peer: Pair, proof, scope: str) -> "GroveServiceAdmin":
+        return cls(local_id, peer, grove_authorization.revision(proof), proof, scope)
 
     @property
     def operation_actor(self) -> str:
@@ -113,10 +127,10 @@ class GroveServiceAdmin:
         return self.peer.node_id
 
     def require(self, db) -> None:
-        require_admin_identity(db, self.local_id, self.peer, self.identity)
+        require_admin_identity(db, self.local_id, self.peer, self.authorization, self.scope)
 
     def operation_key(self, version: int, request_id: str) -> str:
-        return f'grove-admin:{version}:{operation_revision(self.peer, self.identity)}:{request_id}'
+        return f'grove-user-admin:{version}:{operation_revision(self.peer, self.identity)}:{request_id}'
 
 
 def operation_revision(peer: Pair, identity: list) -> str:

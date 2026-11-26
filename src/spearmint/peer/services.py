@@ -15,7 +15,7 @@ from cryptography.exceptions import InvalidSignature
 from pydantic import ValidationError
 
 from ..auth import Actor
-from .. import auth, grove, grove_accounts, grove_admission, grove_availability, grove_continuity, grove_identity_changes, grove_login, grove_metadata, grove_password, grove_revocation, grove_roles, grove_web_join, seed_admission
+from .. import auth, grove, grove_accounts, grove_admission, grove_authorization, grove_availability, grove_continuity, grove_identity_changes, grove_login, grove_metadata, grove_password, grove_revocation, grove_roles, grove_web_join, seed_admission
 from ..build_info import (DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_HOST_METHOD, DEPLOYMENT_METHOD,
                           DEPLOYMENT_PACKAGE_METHOD, DEPLOYMENT_WEB_METHOD, DeploymentStatus)
 from ..catalog import Service, get_service
@@ -34,7 +34,7 @@ from .directory import (
 )
 from .discovery import INTERVAL as PEX_INTERVAL, METHOD as PEX_METHOD, Discovery
 from .grove_endpoints import METHOD as GROVE_ENDPOINT_METHOD, GroveEndpoints, literal_endpoint, trusted_members
-from .grove_service_admin import GroveServiceAdmin, source_identity
+from .grove_service_admin import GroveServiceAdmin, source_grant, source_identity
 from .manager import Neighbor, PeerManager, diagnostic_rpc
 from . import evidence_exchange, frp_access, grove_pairing, mesh_policy, quarantine
 from .operations import (
@@ -464,12 +464,13 @@ class PeerServices:
             return await self.work(grove_pairing.attest,self.state,self.mesh_enrollment_policy,pair,params,rpc=True)
         if method in {grove_login.METHOD, grove_login.STANDBY_METHOD, grove_login.RECOVERY_METHOD}:
             return await self.work(self.grove_login_reply, pair, params, method, rpc=True)
-        if method in {grove_web_join.METHOD, grove_web_join.INVITATION_METHOD}:
+        if method == grove_web_join.METHOD:
+            raise PeerError('DENIED', 'The Grove issuer must verify the administrator directly')
+        if method == grove_web_join.INVITATION_METHOD:
             config = getattr(self, 'grove_config', None)
             if config is None:
-                raise PeerError('DENIED', 'Grove login verification is unavailable')
-            handler = grove_web_join.invitation_reply if method == grove_web_join.INVITATION_METHOD else grove_web_join.reply
-            return await self.work(handler, self.state, config, pair, params, rpc=True)
+                raise PeerError('DENIED', 'Grove browser invitations are unavailable')
+            return await self.work(grove_web_join.invitation_reply, self.state, config, pair, params, rpc=True)
         if method in {grove_continuity.METHOD, grove_continuity.VOTE_METHOD, grove_continuity.PASSWORD_VOTE_METHOD,
                       grove_continuity.ROLE_VOTE_METHOD, grove_continuity.MEMBERS_VOTE_METHOD,
                       grove_continuity.ACCOUNTS_VOTE_METHOD}:
@@ -489,7 +490,7 @@ class PeerServices:
         if method == grove_revocation.APPLY:
             return await self.work(self.grove_operator_revocations, pair, params, rpc=True)
         if method == grove_password.APPLY:
-            return await self.work(self.grove_password_change, pair, params, rpc=True)
+            raise PeerError('DENIED', 'Grove 不再同步可复用的密码凭据。')
         if method == grove_identity_changes.METHOD:
             return await self.work(self.grove_identity_approval, pair, params, rpc=True)
         if method in {grove_roles.BALLOT_METHOD, grove_roles.GET_METHOD, grove_roles.APPLY_METHOD}:
@@ -699,34 +700,17 @@ class PeerServices:
         await self.request_grove_sync()
         return {'confirmed': confirmed, 'members': len(voters)}
 
-    def grove_password_change(self, pair: Pair, params: dict) -> dict:
-        def authorize(db):
-            require_pair(db, pair)
-            if pair.legacy:
-                raise PeerError('DENIED', 'Grove password changes require an active Mesh peer')
-
-        if params.keys() != {'change'}:
-            raise PeerError('INVALID_REQUEST', 'Expected one Grove password change')
-        count = grove_password.apply(self.state, [params['change']], pair.node_id, authorize)
-        return {'accepted': True, 'applied': count}
-
-    async def change_grove_password(self, actor: Actor, current_password: str, new_password: str) -> dict:
-        document, voters = await self.work(grove_password.issue, self.state, actor, current_password, new_password)
-        document = await self.approve_identity_change('password', document, actor, voters)
-        await self.work(grove_password.apply, self.state, [document], self.local_id)
-        replies = await asyncio.gather(*(self.call(node, grove_password.APPLY, {'change': document}, diagnostic=True)
-                                       for node in voters if node != self.local_id), return_exceptions=True)
-        confirmed = 1 + sum(isinstance(reply, dict) and reply.get('accepted') is True for reply in replies)
-        await self.request_grove_sync()
-        return {'confirmed': confirmed, 'members': len(voters)}
-
     def grove_identity_approval(self, pair: Pair, params: dict) -> dict:
-        if params.keys() != {'kind', 'document', 'actor'}:
-            raise PeerError('INVALID_REQUEST', 'Expected a Grove identity proposal')
+        if params.keys() != {'kind', 'document', 'actor', 'authorization'} or params['kind'] not in ('role', 'revocation'):
+            raise PeerError('INVALID_REQUEST', 'Expected a Grove identity proposal and user authorization')
         with self.state.connect(read_only=True) as db:
+            db.execute('BEGIN')
             require_pair(db, pair)
             if pair.legacy or quarantine.contains(db, pair.node_id):
                 raise PeerError('DENIED', 'An active Grove voter is required')
+            identity = grove_authorization.verify(db, params['authorization'], pair.node_id, 'identity')
+            if identity[1] != params['actor']:
+                raise PeerError('DENIED', '此授权不属于提交的 Grove 账号。')
         return grove_identity_changes.ballot(self.state, params['kind'], params['document'], params['actor'], pair.node_id)
 
     async def approve_identity_change(self, kind, document, actor, voters):
@@ -735,10 +719,12 @@ class PeerServices:
             if session is None or session['id'] != actor.account_id or not session['grove_user']:
                 raise PeerError('SESSION_REQUIRED', 'Sign in with the Grove account')
             user = session['grove_user']
+        proof = await (self.work(grove_authorization.self_proof, self.state, actor) if kind == 'password'
+                       else self.work(source_grant, self.state, self.local_id, None, actor, 'identity'))
         bare = grove_identity_changes.envelope(document)
         own = await self.work(grove_identity_changes.ballot, self.state, kind, bare, user)
         replies = await asyncio.gather(*(self.call(node, grove_identity_changes.METHOD,
-            {'kind': kind, 'document': bare, 'actor': user}, diagnostic=True)
+            {'kind': kind, 'document': bare, 'actor': user, 'authorization': proof}, diagnostic=True)
             for node in voters if node != self.local_id), return_exceptions=True)
         approvals = [own, *(reply for reply in replies if isinstance(reply, dict) and reply.keys() == {'record', 'signature'})]
         return await self.work(grove_identity_changes.certify, self.state, kind, bare, approvals)
@@ -1021,7 +1007,7 @@ class PeerServices:
                 passwords = grove_continuity.password_digest(db, params['anchor'])
                 roles = grove_continuity.role_versions(db)
                 members = grove_continuity.admission_versions(db)
-                accounts = grove_accounts.versions(db)
+                accounts = grove_accounts.public_versions(db)
             roles_digest = grove_continuity.role_digest(roles)
             admissions_digest = grove_continuity.admission_digest(members)
             accounts_digest = grove_accounts.digest_of(accounts)
@@ -1088,14 +1074,14 @@ class PeerServices:
                             raise PeerError('PROTOCOL', 'Invalid Grove continuity vote')
                         # An unchanged lease renewal must not interrupt ordinary reads
                         # and controls while we wait for the other voters.
-                        if reply['revocations'] or reply.get('passwords'):
+                        if reply.get('passwords'):
+                            raise PeerError('PROTOCOL', 'Grove renewal cannot carry password verifiers')
+                        if reply['revocations']:
                             grove_availability.synchronize(self.state, nonce, True)
                         if reply.get('accounts'):
                             await synchronize_accounts(node_id, reply['accounts'])
                         if reply['revocations']:
                             await self.work(grove_revocation.apply, self.state, reply['revocations'], node_id)
-                        if reply.get('passwords'):
-                            await self.work(grove_password.apply, self.state, reply['passwords'], node_id)
                         if 'roles' in fields:
                             await synchronize_roles(node_id, reply['roles'])
                         if 'members' in fields:
@@ -1848,7 +1834,7 @@ class PeerServices:
     def grove_service_rpc(self, pair: Pair, params: dict) -> dict:
         if params.keys() != {'identity', 'action', 'body'} or not isinstance(params['body'], dict):
             raise PeerError('INVALID_REQUEST', 'Invalid Grove service request')
-        actor = GroveServiceAdmin.from_wire(self.local_id, pair, params['identity'])
+        actor = GroveServiceAdmin.from_wire(self.local_id, pair, params['identity'], 'services')
         action, body = params['action'], params['body']
         if action == 'catalog' and not body:
             with self.state.connect() as db:
@@ -1902,10 +1888,10 @@ class PeerServices:
                             connection_id: str | None = None, directory_generation: int | None = None) -> dict | None:
         pair = self.pair_for(node_id)
         try:
-            identity = await self.work(source_identity, self.state, self.local_id, pair, actor)
+            identity = await self.work(source_grant, self.state, self.local_id, pair, actor, 'services')
         except PeerError as error:
             PeerServices.record_failure(self, node_id, f'{GROVE_SERVICE}.{action}', 'local_identity', error)
-            if error.code in {'DENIED', 'OFFLINE'}:
+            if error.code in {'DENIED', 'OFFLINE'} or action == 'catalog' and error.code == grove_authorization.ERROR:
                 return None
             raise
         params = {'identity': identity, 'action': action, 'body': body}

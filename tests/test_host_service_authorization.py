@@ -50,6 +50,7 @@ class PageHostAuthorizationTest(unittest.TestCase):
             return {'enabled': True}
         self.patches = [patch('spearmint.host_service_authorization.sys.platform', 'linux'),
                         patch('spearmint.host_service_authorization.seed_ssh.Connection', Connection),
+                        patch('spearmint.host_service_authorization.trusted_host_key', return_value='local-fixture'),
                         patch('spearmint.host_service_authorization.host_service_access.account_name', return_value='panel-user'),
                         patch('spearmint.host_service_authorization.host_service_access.available', side_effect=lambda: self.enabled),
                         patch('spearmint.host_service_authorization.host_service_access.ssh_enable', side_effect=authorize)]

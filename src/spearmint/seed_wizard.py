@@ -18,6 +18,8 @@ from paramiko import SSHException
 from . import grove, grove_admission, grove_continuity, grove_quorum_join, grove_voters, mesh_enrollment, seed_admission, seed_packages, seed_ssh, seed_transport
 from .peer.credentials import NODE_ID, RANDOM_ID
 from .peer.grove_service_admin import require_admin_identity
+from . import grove_authorization
+from .grove_authorization import revision
 from .peer.pairing import configured
 from .peer.protocol import PeerError
 from .state import StateError, audit
@@ -69,7 +71,7 @@ class SSHInput(BaseModel):
 @dataclass
 class Job:
     owner: tuple[str, str]
-    identity: list
+    identity: dict
     host: str
     port: int
     status: str = 'host-check'
@@ -99,11 +101,11 @@ class Job:
 
     @property
     def actor(self) -> str:
-        return self.identity[1]
+        return revision(self.identity)[1]
 
     @property
     def realm(self) -> str:
-        return self.identity[0]
+        return revision(self.identity)[0]
 
     def view(self):
         return {'status': self.status, 'fingerprint': self.connection.fingerprint if self.connection else None,
@@ -139,7 +141,7 @@ class SeedWizard:
         with self.state.connect(read_only=True) as db:
             db.execute('BEGIN')
             try:
-                require_admin_identity(db, self.remote.local_id, pair, identity)
+                require_admin_identity(db, self.remote.local_id, pair, identity, 'seed')
             except PeerError as error:
                 if error.code == 'OFFLINE':
                     raise PeerError('SEED_GROVE_STATE', 'The executor is waiting for a current Grove directory') from error
@@ -147,7 +149,7 @@ class SeedWizard:
             current = db.execute('SELECT anchor,recovery_proof FROM grove_login_continuity').fetchone()
             if current is None:
                 raise PeerError('SEED_GROVE_STATE', 'The executor is waiting for its Grove quorum authorization')
-            realm = db.execute('SELECT * FROM grove_realm WHERE id=?', (identity[0],)).fetchone()
+            realm = db.execute('SELECT * FROM grove_realm WHERE id=?', (revision(identity)[0],)).fetchone()
             try:
                 kind = 'login-continuity' if current['recovery_proof'] is None else 'login-recovery'
                 directory = grove.directory_data(json.loads(realm['manifest']), grove.realm_data(realm), allow_expired=True)
@@ -166,12 +168,16 @@ class SeedWizard:
                 or not isinstance(job_id, str) or not RANDOM_ID.fullmatch(job_id)):
             raise PeerError('INVALID_REQUEST', 'Invalid SSH seed request')
         anchor = self.authorize(pair, identity)
+        if pair is not None and grove_authorization.unsigned(identity['grant'])['seed_executor'] != self.remote.local_id:
+            raise PeerError(grove_authorization.ERROR, '授权中需要选择这台播种发起节点。')
         key = (pair.node_id if pair else self.remote.local_id, owner)
         with self.lock:
             self.reap()
             job = self.jobs.get(job_id)
-            if job and (job.owner != key or job.identity != identity):
+            if job and (job.owner != key or revision(job.identity) != revision(identity)):
                 raise PeerError('DENIED', 'The seed request belongs to a different session')
+            if job is not None:
+                job.identity = identity
             if action == 'start' and job is None:
                 if len(self.jobs) >= 32 or sum(item.status not in ('failed', 'joined', 'uncertain') for item in self.jobs.values()) >= 8:
                     raise PeerError('BUSY', 'The seed executor is busy')
@@ -304,13 +310,6 @@ class SeedWizard:
         except TimeoutError as error:
             future.cancel()
             raise PeerError('SEED_PACKAGE_FETCH', 'Timed out acquiring the native deployment package') from error
-        except PeerError as error:
-            if error.code != 'SEED_PACKAGE_RELEASE':
-                raise
-            try:
-                package = seed_packages.acquire_local(self.state, platform)
-            except PeerError:
-                raise error from None
         host = f'[{job.host}]' if ':' in job.host else job.host
         start = '' if platform.startswith('windows') else home
         with self.lock:

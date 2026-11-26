@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock
 
-from spearmint import seed_ssh, seed_transport, seed_wizard
+from spearmint import grove_authorization, seed_ssh, seed_transport, seed_wizard
 from spearmint.state import State
 
 
@@ -94,7 +94,8 @@ class SeedDiagnosticsTest(unittest.TestCase):
         self.addCleanup(fixture.cleanup)
         wizard.state = State(Path(fixture.name) / 'state')
         wizard.state.initialize(lambda: 'fixture')
-        job = seed_wizard.Job(('source', 'actor'), ['realm', 'actor'], '192.0.2.1', 22, status='installing')
+        authorization = grove_authorization.issue(wizard.state.signing_key(), {'identity': ['realm', 'actor', 1, 0, 0]}, [])
+        job = seed_wizard.Job(('source', 'actor'), authorization, '192.0.2.1', 22, status='installing')
 
         def fail(job):
             raise CalledProcessError(42, 'seed', stderr=b'libm.so.6: GLIBC_2.38 not found')

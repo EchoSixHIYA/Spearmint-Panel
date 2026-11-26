@@ -67,7 +67,7 @@ class ServiceDeployments:
     def dispatch(self, pair, params):
         if params.keys() != {'identity', 'action', 'body'}:
             raise PeerError('INVALID_REQUEST', 'Invalid deployment request')
-        actor = GroveServiceAdmin.from_wire(self.node_id, pair, params['identity'])
+        actor = GroveServiceAdmin.from_wire(self.node_id, pair, params['identity'], 'deployment')
         return self.request(actor, params['action'], params['body'])
 
     def path(self, identifier):

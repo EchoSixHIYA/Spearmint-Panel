@@ -25,7 +25,7 @@ def handle(state, policy, pair, params):
         raise PeerError('INVALID_REQUEST', 'Invalid SSH deployment admission request')
     with state.connect(write=action == 'vote') as db:
         envelope, anchor = grove_quorum_join.current_voter(db, state, policy)
-        identity = require_admin_identity(db, local_id, pair, params['identity'])
+        identity = require_admin_identity(db, local_id, pair, params['identity'], 'seed', delegated=True)
         if quarantine.contains(db, node) or not member_allowed(db, policy.mesh, node):
             raise PeerError('DENIED', 'This Grove member cannot sponsor an SSH deployment')
         if action == 'vote':

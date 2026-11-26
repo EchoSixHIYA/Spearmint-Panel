@@ -16,10 +16,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, grove, grove_accounts, grove_updates, grove_admission, grove_login, grove_metadata, grove_password, grove_quorum_join, grove_voters, grove_voter_service, grove_web_join, mesh_enrollment, onboarding, passkeys, seed_admission, seed_wizard
+from . import auth, grove, grove_accounts, grove_authorization, grove_device_login, grove_updates, grove_admission, grove_login, grove_metadata, grove_quorum_join, grove_voters, grove_voter_service, grove_web_join, mesh_enrollment, onboarding, passkeys, seed_admission, seed_wizard
 from .build_info import deployment_host, deployment_web, running_build
 from .catalog import RegistrationError, TargetAlreadyRegistered, get_service, list_services
 from .config import Config
+from .request_limits import RequestBodyLimit
 from .grove_account_service import GroveAccountService
 from .control import ControlError, Controller, operation_data
 from .drivers import CONTAINER_REFERENCE, ContainerNotFound, DockerDriver, Driver, ProcessDriver, SystemUnitDriver
@@ -62,7 +63,7 @@ class GroveCredentials(BaseModel):
 class GroveQuorumJoin(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     invitation: str = Field(min_length=1, max_length=grove_quorum_join.LIMIT)
-    credentials: GroveCredentials | None = None
+    authorization: dict | None = None
 
 
 class GroveNodeNote(BaseModel):
@@ -75,12 +76,6 @@ class GroveNodeProfile(GroveNodeNote):
     icon: str = Field(max_length=32)
 
 
-class GrovePasswordChange(BaseModel):
-    model_config = ConfigDict(extra='forbid', strict=True)
-    current_password: str = Field(min_length=1, max_length=256)
-    new_password: str = Field(min_length=12, max_length=256)
-
-
 class GroveAccountName(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     username: str = Field(pattern=grove_accounts.USERNAME_PATTERN)
@@ -91,22 +86,17 @@ class GroveAccountInvitation(GroveAccountName):
 
 
 class GroveAccountCreate(GroveAccountInvitation):
-    password: str = Field(min_length=12, max_length=256)
+    device_key: str = Field(pattern=r'^[A-Za-z0-9_-]{43}$')
 
 
 class GroveAccountReset(GroveAccountName):
     code: str = Field(pattern=grove_accounts.CODE_PATTERN)
-    password: str = Field(min_length=12, max_length=256)
-
-
-class GroveAccountRegistration(GroveAccountReset):
-    totp: str = Field(pattern=grove_accounts.TOTP_PATTERN)
-    otp: str = Field(pattern=r'^[0-9]{6}$')
+    device_key: str = Field(pattern=r'^[A-Za-z0-9_-]{43}$')
 
 
 class GroveRecoveryCode(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
-    current_password: str = Field(min_length=1, max_length=256)
+    current_password: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class GroveRoleChange(BaseModel):
@@ -311,8 +301,14 @@ def require_admin(actor: auth.Actor = Depends(require_actor)) -> auth.Actor:
     return actor
 
 
-def require_admin_write(actor: auth.Actor = Depends(require_write)) -> auth.Actor:
-    return require_admin(actor)
+def require_admin_write(request: Request, actor: auth.Actor = Depends(require_write)) -> auth.Actor:
+    require_admin(actor)
+    if actor.grove:
+        scope = grove_authorization.http_scope(request.scope['path'])
+        if scope is not None:
+            store = request.app.state.store
+            grove_service_admin.source_grant(store, store.identity()[0], None, actor, scope)
+    return actor
 
 
 def idempotency_key(request: Request) -> str:
@@ -483,6 +479,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.store = store
     app.state.config = config
+    app.add_middleware(RequestBodyLimit)
 
     @app.middleware("http")
     async def control_headers(request: Request, call_next):
@@ -547,6 +544,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             "DEPLOY_FAILED": 409,
             "TERMINAL_CLOSED": 409, "TERMINAL_IO": 503, "FILE_UNAVAILABLE": 409,
             "REAUTHENTICATION_REQUIRED": 403, "APPROVAL_VERSION_REQUIRED": 409, "POLICY_CONFLICT": 409,
+            grove_authorization.ERROR: 428,
             "GROVE_INVITATION_EXPIRED": 410, 'GROVE_QUORUM_REQUIRED': 409, 'GROVE_SYNCHRONIZING': 503,
         }.get(error.code, 503)
         return JSONResponse({"detail": str(error), "code": error.code}, status_code=status)
@@ -628,6 +626,19 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             info['member_login'] = grove_login.available(store)
         return info
 
+    @app.post('/api/v1/auth/grove/device/challenge')
+    def grove_device_challenge(body: GroveAccountName, request: Request, response: Response):
+        require_origin(request)
+        response.headers['Cache-Control'] = 'no-store'
+        return grove_device_login.challenge(store, body.username, address_of(request))
+
+    @app.post('/api/v1/auth/grove/device/login')
+    async def grove_device_session(request: Request, response: Response):
+        require_origin(request)
+        proof = await read_grove_body(request, grove_authorization.LIMIT)
+        session = await run_in_threadpool(grove_device_login.finish, store, proof, address_of(request))
+        return set_session(store, request, response, session)
+
     @app.post('/api/v1/auth/grove/member-login')
     def grove_member_login(body: GroveCredentials, request: Request, response: Response):
         require_origin(request)
@@ -649,6 +660,36 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         response.headers['Cache-Control'] = 'no-store'
         return await accounts.run(action, address=address_of(request), actor=actor, **body.model_dump())
 
+    @app.post('/api/v1/grove/authorization/challenge')
+    def grove_authorization_challenge(body: dict = Depends(grove_body), actor: auth.Actor = Depends(require_write)):
+        scopes = body.get('scopes')
+        if (set(body) - {'scopes', 'seed_executor', 'joining'} or not isinstance(scopes, list) or not scopes
+                or any(not isinstance(scope, str) or scope not in grove_authorization.KINDS - {'signin'} for scope in scopes)):
+            raise PeerError('INVALID_REQUEST', '请选择要授权的 Grove 管理操作。')
+        executor = body.get('seed_executor')
+        if executor is not None and ('seed' not in scopes or not isinstance(executor, str) or not re.fullmatch(r'spm1-[a-f0-9]{64}', executor)):
+            raise PeerError('INVALID_REQUEST', '请选择有效的播种发起节点。')
+        joining = body.get('joining')
+        if ('join' in scopes) != (joining is not None) or joining is not None and not grove_authorization.valid_join(joining):
+            raise PeerError('INVALID_REQUEST', '填写待加入节点的标识和 HTTPS 地址。')
+        with store.connect(read_only=True) as db:
+            db.execute('BEGIN')
+            if set(scopes) == {'self'}:
+                session = auth.active_session(db, actor.token_hash, int(time()))
+                if session is None or not session['grove_replica']:
+                    raise PeerError('DENIED', '请使用 Grove 账号登录。')
+                _, anchor = grove_authorization.context(db)
+                identity = grove_service_admin.admin_revision(db, anchor['realm_id'], session['grove_user'], require_admin=False)
+            else:
+                identity = grove_service_admin.source_identity(store, node_id, None, actor)
+            return grove_authorization.challenge(db, actor, node_id, identity, sorted(set(scopes)), executor=executor, joining=joining)
+
+    @app.post('/api/v1/grove/authorization')
+    async def grove_authorization_import(request: Request, response: Response, actor: auth.Actor = Depends(require_write)):
+        proof = await read_grove_body(request, grove_authorization.LIMIT)
+        response.headers['Cache-Control'] = 'no-store'
+        return await run_in_threadpool(grove_authorization.enrollment, store, actor, proof)
+
     @app.post('/api/v1/grove/accounts/create')
     async def grove_create_account(body: GroveAccountCreate, request: Request, response: Response,
                                    actor: auth.Actor = Depends(require_admin_write)):
@@ -665,7 +706,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         return await grove_account_result('assist', body, request, response, actor)
 
     @app.post('/api/v1/auth/grove/account/register')
-    async def grove_register_account(body: GroveAccountRegistration, request: Request, response: Response):
+    async def grove_register_account(body: GroveAccountReset, request: Request, response: Response):
         return await grove_account_result('register', body, request, response)
 
     @app.post('/api/v1/auth/grove/account/reset')
@@ -675,7 +716,15 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     @app.get('/api/v1/auth/grove/account/recovery-code')
     def grove_recovery_status(actor: auth.Actor = Depends(require_actor)):
         name, entry = grove_session_account(actor)
-        return {'available': name is not None, 'configured': bool(entry and entry['recovery_configured'])}
+        return {'available': name is not None, 'configured': bool(entry and entry['recovery_configured']),
+                'device_bound': bool(entry and entry.get('device_key'))}
+
+    @app.post('/api/v1/auth/grove/device/bind')
+    async def grove_bind_login_device(actor: auth.Actor = Depends(require_write)):
+        name, _ = grove_session_account(actor)
+        if not name:
+            raise PeerError('DENIED', '请先登录 Grove。')
+        return await accounts.run('bind-device', name, actor.address, actor=actor)
 
     @app.post('/api/v1/auth/grove/account/recovery-code')
     async def grove_recovery_code(body: GroveRecoveryCode, request: Request, response: Response,
@@ -689,19 +738,12 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                                   current_password=body.current_password)
 
     @app.get('/api/v1/auth/grove/password')
-    def grove_password_status(actor: auth.Actor = Depends(require_actor)):
-        _, entry = grove_session_account(actor)
-        return {'available': bool(entry and entry['owns_password']) or grove_password.available(store, actor)}
+    def grove_password_status(_actor: auth.Actor = Depends(require_actor)):
+        return {'available': False}
 
     @app.post('/api/v1/auth/grove/password')
-    async def grove_change_password(body: GrovePasswordChange, actor: auth.Actor = Depends(require_write)):
-        if secrets.compare_digest(body.current_password.encode(), body.new_password.encode()):
-            raise HTTPException(422, 'Choose a different Grove password')
-        name, entry = grove_session_account(actor)
-        if entry and entry['owns_password']:
-            return await accounts.run('password', name, actor.address, actor=actor, current_password=body.current_password,
-                                      password=body.new_password)
-        return await remote.change_grove_password(actor, body.current_password, body.new_password)
+    async def grove_change_password(_actor: auth.Actor = Depends(require_write)):
+        raise PeerError('CONFLICT', '请在「我的账户」绑定登录设备。')
 
     @app.get('/api/v1/grove')
     def grove_details(_actor: auth.Actor = Depends(require_admin)):
@@ -767,10 +809,9 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
 
     @app.post('/api/v1/grove/join-with-quorum')
     async def join_grove_with_quorum(request: Request, actor: auth.Actor = Depends(require_admin_write)):
-        body = grove_model(GroveQuorumJoin, await read_grove_body(request, grove_quorum_join.LIMIT + 2048))
-        credentials = body.credentials.model_dump() if body.credentials else None
+        body = grove_model(GroveQuorumJoin, await read_grove_body(request, grove_quorum_join.LIMIT + grove_authorization.LIMIT))
         peers.use_system_egress = True
-        code = await run_in_threadpool(grove_quorum_join.prepare, store, config, actor, body.invitation, credentials)
+        code = await run_in_threadpool(grove_quorum_join.prepare, store, config, actor, body.invitation, body.authorization)
         deadline = asyncio.get_running_loop().time() + 18
         while True:
             try:
@@ -784,15 +825,15 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
                 return result
 
     @app.post('/api/v1/auth/grove/quorum-join/{action}')
-    def grove_quorum_join_action(action: str, request: Request, data: dict = Depends(grove_body)):
+    async def grove_quorum_join_action(action: str, request: Request):
+        data = await read_grove_body(request, grove_authorization.LIMIT + 8192)
         enrollment_policy = mesh_enrollment.load_policy(store)
         if enrollment_policy is None:
             raise PeerError('OFFLINE', 'Grove quorum admission is unavailable')
-        if action == 'vote' and data.keys() == {'request', 'credentials'}:
-            credentials = grove_model(GroveCredentials, data['credentials'])
-            return grove_quorum_join.vote(store, enrollment_policy, data['request'], credentials, address_of(request))
+        if action == 'vote' and data.keys() == {'request', 'authorization'}:
+            return await run_in_threadpool(grove_quorum_join.vote, store, enrollment_policy, data['request'], data['authorization'])
         if action == 'commit' and data.keys() == {'request', 'certificate'}:
-            return grove_quorum_join.commit(store, enrollment_policy, data['request'], data['certificate'])
+            return await run_in_threadpool(grove_quorum_join.commit, store, enrollment_policy, data['request'], data['certificate'])
         raise PeerError('INVALID_REQUEST', 'Invalid Grove admission request')
 
     @app.post('/api/v1/grove/sync-directory', responses={204: {'description': 'Checked without a report'}})
@@ -832,7 +873,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             raise PeerError('INVALID_REQUEST', 'Invalid seed wizard request body')
         pair = None if source == node_id else remote.pair_for(source)
         try:
-            identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+            identity = await remote.work(grove_service_admin.source_grant, store, node_id, pair, actor, 'seed')
         except PeerError as error:
             if error.code == 'OFFLINE':
                 raise PeerError('SEED_GROVE_STATE', 'This panel is waiting for a current Grove directory') from error
@@ -855,7 +896,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         if target in ('local', node_id):
             return await remote.work(deployments.request, service_setup.LocalAdmin(actor), action, body)
         pair = remote.pair_for(target)
-        identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+        identity = await remote.work(grove_service_admin.source_grant, store, node_id, pair, actor, 'deployment')
         params = {'identity': identity, 'action': action, 'body': body}
         try:
             return await remote.call(target, deployments.method, params, diagnostic=True)
@@ -877,7 +918,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             return await remote.work(deployments.write_bytes, service_setup.LocalAdmin(actor), identifier, offset, bytes(data), digest)
         from .peer.protocol import wire_b64
         pair = remote.pair_for(target)
-        identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+        identity = await remote.work(grove_service_admin.source_grant, store, node_id, pair, actor, 'deployment')
         return await remote.call(target, deployments.upload_method, {'identity': identity, 'action': 'write',
                                  'body': {'job': identifier, 'offset': offset, 'data': wire_b64(bytes(data)), 'sha256': digest}}, diagnostic=True)
 
@@ -888,7 +929,9 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             return await remote.work(workspace.request, service_setup.LocalAdmin(actor), action, body)
         pair = remote.pair_for(target)
         try:
-            identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+            # Read-only host observations are verified against membership on the target.
+            identity = (await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+                        if action == 'host' else await remote.work(grove_service_admin.source_grant, store, node_id, pair, actor, 'services'))
         except PeerError as error:
             remote.record_failure(target, f'workspace.{action}', 'local_identity', error)
             raise
@@ -903,7 +946,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         if target in ('local', node_id):
             return await remote.work(terminals.request, service_setup.LocalAdmin(actor), node_id, owner, identifier, action, body)
         pair = remote.pair_for(target)
-        identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+        identity = await remote.work(grove_service_admin.source_grant, store, node_id, pair, actor, 'terminal')
         return await remote.call(target, terminals.method, {'identity': identity, 'owner': owner, 'session': identifier,
                                                            'action': action, 'body': body}, diagnostic=True)
 
@@ -914,7 +957,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         if node_id in ('local', remote.local_id):
             return await remote.work(remote.service_setup.setup, service_setup.LocalAdmin(actor), action, body)
         pair = remote.pair_for(node_id)
-        identity = await remote.work(grove_service_admin.source_identity, store, remote.local_id, pair, actor)
+        identity = await remote.work(grove_service_admin.source_grant, store, remote.local_id, pair, actor, 'services')
         return await remote.call(node_id, service_setup.METHOD, {'identity': identity, 'action': action, 'body': body},
                                  diagnostic=True)
 
@@ -988,10 +1031,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             raise PeerError('NOT_FOUND', 'Grove is unavailable on this panel')
         if info.get('issuer_retired') or info['frozen'] or info['issuer_paused']:
             raise PeerError('OFFLINE', 'Grove browser joins are unavailable')
-        if not info['local_issuer'] and (
-            not await run_in_threadpool(grove_login.available, store) or remote.connection_for(realm['issuer_node']) is None
-        ):
-            raise PeerError('OFFLINE', 'This member is waiting for its verifier or issuer Mesh path')
+        if not info['local_issuer']:
+            raise PeerError('OFFLINE', 'The Grove issuer must verify the administrator directly')
         return JSONResponse({'realm_id': realm_id, 'public_key': public_key, 'origin': config.origin, 'ready': True},
                             headers={'Access-Control-Allow-Origin': '*'})
 
@@ -1004,7 +1045,9 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             invite = grove_web_join.read_invitation(body.invitation_code, config.origin)
             if body.kind != 'join' or body.realm != invite['realm'] or body.verification_origin not in invite['origins']:
                 raise PeerError('DENIED', 'Select a verifier advertised in the Grove invitation')
-            directory_origins = sorted(invite['origins'], key=lambda candidate: candidate != body.verification_origin)
+            directory_origins = invite['origins']
+        if body.verification_origin is not None and (body.realm is None or body.verification_origin != body.realm.get('issuer_origin')):
+            raise PeerError('DENIED', 'The Grove issuer must verify the administrator directly')
         actor = auth.actor_for(store, request.cookies.get(auth.COOKIE, ''), address_of(request))
         if actor is not None:
             require_write(request, actor)
@@ -1018,7 +1061,7 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     def grove_inspect(data: dict = Depends(grove_body), actor: auth.Actor = Depends(require_write)):
         body = grove_model(GroveRequest, data)
         if 'verification_origin' in grove.request_data(body.request):
-            return grove_web_join.inspect(store, config, body.request, actor)
+            raise PeerError('DENIED', 'Generate a fresh invitation for the original Grove issuer')
         return grove.inspect(store, body.request, actor)
 
     @app.post('/api/v1/auth/grove/join-destination')
@@ -1038,17 +1081,9 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     async def grove_approve(data: dict = Depends(grove_body), actor: auth.Actor = Depends(require_write)):
         body = grove_model(GroveRequest, data)
         parsed = grove.request_data(body.request)
-        if 'verification_origin' not in parsed:
-            return {'redirect_url': await run_in_threadpool(grove.approve, store, body.request, actor)}
-        realm, join_request, params = await run_in_threadpool(grove_web_join.verification, store, config, body.request, actor)
-        result = await remote.call(realm['issuer_node'], grove_web_join.METHOD, params, diagnostic=True)
-        redirect = result.get('redirect_url')
-        prefix = join_request['origin'] + '/#/grove-return/'
-        if not isinstance(redirect, str) or not redirect.startswith(prefix) or re.fullmatch(
-            r'[A-Za-z0-9_-]{1,12000}', redirect[len(prefix):]
-        ) is None:
-            raise PeerError('INVALID_REQUEST', 'Unexpected browser join response')
-        return {'redirect_url': redirect}
+        if 'verification_origin' in parsed:
+            raise PeerError('DENIED', 'Generate a fresh invitation for the original Grove issuer')
+        return {'redirect_url': await run_in_threadpool(grove.approve, store, body.request, actor)}
 
     @app.post('/api/v1/auth/grove/finish')
     def grove_finish(request: Request, response: Response, tasks: BackgroundTasks, data: dict = Depends(grove_body)):

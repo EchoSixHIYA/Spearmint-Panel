@@ -21,13 +21,12 @@ from .state import StateError, audit
 
 
 METHOD = 'grove.accounts.v1'
-PREPARED = 'grove-account-prepared'
-ACCEPTED = 'grove-account-accepted'
+PREPARED = 'grove-account-prepared-v2'
+ACCEPTED = 'grove-account-accepted-v2'
 EMPTY = '0' * 64
 MAX_ACCOUNTS = 128
 USERNAME_PATTERN = r'^[a-z0-9][a-z0-9._-]{0,63}$'
 DIGEST_PATTERN = r'^[a-f0-9]{64}$'
-TOTP_PATTERN = r'^[A-Z2-7]{32}$'
 CODE_PATTERN = r'^[A-Za-z0-9_-]{43}$'
 INVITE_AGE = 24 * 60 * 60
 RESET_AGE = 30 * 60
@@ -36,14 +35,13 @@ RESET_AGE = 30 * 60
 class Change(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid')
     username: str = Field(pattern=USERNAME_PATTERN)
-    action: str = Field(pattern=r'^(create|invite|register|assist|reset|recovery-code|password)$')
+    action: str = Field(pattern=r'^(create|invite|register|assist|reset|recovery-code|bind-device)$')
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
     issued: int = Field(gt=0, lt=2**53)
     role: str | None = Field(default=None, pattern=r'^(node_admin|remote_operator)$')
-    password_hash: str | None = Field(default=None, max_length=256)
     recovery_hash: str | None = Field(default=None, pattern=DIGEST_PATTERN)
     ticket_hash: str | None = Field(default=None, pattern=DIGEST_PATTERN)
-    totp: str | None = Field(default=None, pattern=TOTP_PATTERN)
+    device_key: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{43}$')
 
 
 def storage(db):
@@ -70,17 +68,26 @@ def profile_overlay(db, users):
 
 def credential_version(db, user_id):
     for entry in storage(db)['records'].values():
-        if entry['profile']['id'] == user_id and entry['owns_password']:
+        if entry['profile']['id'] == user_id and (entry['owns_password'] or entry.get('device_key')):
             return 2**40 + entry['credential_revision']
     return None
+
+
+def device_key(db, user_id):
+    return next((entry.get('device_key') for entry in storage(db)['records'].values() if entry['profile']['id'] == user_id), None)
 
 
 def versions(db):
     return {name: entry['revision'] for name, entry in storage(db)['records'].items()}
 
 
+def public_versions(db):
+    return {name: entry['revision'] for name, entry in storage(db)['records'].items()
+            if entry.get('public_only') or not entry['owns_password']}
+
+
 def version_digest(db):
-    return grove_voters.digest(versions(db))
+    return grove_voters.digest(public_versions(db))
 
 
 EMPTY_VERSION = grove_voters.digest({})
@@ -166,7 +173,11 @@ def data_for(state, db, username):
 
 def login_password(state, db, username):
     entry = record_for(db, username)
-    return data_for(state, db, username)['password_hash'] if entry and entry['owns_password'] else None
+    if entry and entry['owns_password']:
+        if local := entry.get('legacy_material'):
+            return decrypt(state, username, local)['password_hash']
+        return data_for(state, db, username)['password_hash']
+    return None
 
 
 def hash_code(value):
@@ -206,14 +217,12 @@ def verify_password(state, db, profile, proof):
         auth.PASSWORD_SLOTS.release()
 
 
-def proposal(state, db, change, proof, verify_admin):
+def proposal(state, db, change, proof, verify_authorization):
     raw = Change.model_validate(change)
     name, operation = raw.username, raw.action
     now = int(time.time())
     if abs(now - raw.issued) > 90:
         raise PeerError('CONFLICT', '请求已过期，请重新提交。')
-    if raw.password_hash:
-        grove_login.verify_password_hash(raw.password_hash)
     previous = record_for(db, name)
     record = data_for(state, db, name)
     legacy = legacy_profile(db, name)
@@ -221,7 +230,7 @@ def proposal(state, db, change, proof, verify_admin):
     anchor_digest, anchor = context(db)
     admin = None
     if operation in {'invite', 'create', 'assist'}:
-        admin = verify_admin(db, proof.get('identity'))
+        admin = verify_authorization(db, proof.get('identity'), 'accounts')
         if admin[0] != anchor['realm_id']:
             raise PeerError('DENIED', '需要 Grove 管理员账号。')
 
@@ -266,27 +275,33 @@ def proposal(state, db, change, proof, verify_admin):
         if not (token_ok or recovery_ok) or (operation == 'register' and profile['enabled']):
             raise PeerError('DENIED', '一次性凭据无效或已经使用。')
         next_account['ticket'] = None
-    if operation in {'recovery-code', 'password'}:
-        verify_password(state, db, profile, proof)
-    if operation in {'create', 'register'}:
-        if not raw.totp or (operation == 'register' and factors.matching_step(raw.totp, proof.get('otp', ''), now, -1) is None):
-            raise PeerError('DENIED', '请核对登录验证器的动态验证码。')
-        next_account['totp'] = raw.totp
+    if operation in {'recovery-code', 'bind-device'}:
+        authorization = proof.get('identity')
+        identity = verify_authorization(db, authorization, 'self')
+        if identity[1] != profile['id']:
+            raise PeerError('DENIED', '请使用此 Grove 账号授权变更。')
+        if operation == 'bind-device':
+            from . import grove_authorization
+            raw_key = device_key(db, profile['id']) or grove_authorization.unsigned(authorization['approvals'][0])['key']
+            next_account['device_key'] = raw_key
+            next_account['password_hash'] = None
+            next_account['totp'] = None
+            next_account['credential_revision'] += 1
+    if operation in {'create', 'register', 'reset'}:
+        if raw.device_key is None or len(parse_b64(raw.device_key, 32)) != 32:
+            raise PeerError('INVALID_REQUEST', '请提供有效的登录设备公钥。')
+        next_account['device_key'] = raw.device_key
         next_account['profile'] = {**profile, 'enabled': True}
-    if operation in {'create', 'register', 'reset', 'password'}:
-        if not raw.password_hash:
-            raise PeerError('INVALID_REQUEST', '需要新的密码。')
-        next_account['password_hash'] = raw.password_hash
         next_account['credential_revision'] += 1
-        if operation == 'password' and next_account['ticket'] and next_account['ticket']['purpose'] == 'assist':
-            next_account['ticket'] = None
     if operation in {'create', 'register', 'reset', 'recovery-code'}:
         if not raw.recovery_hash:
             raise PeerError('INVALID_REQUEST', '需要新的恢复凭据。')
         next_account['recovery_hash'] = raw.recovery_hash
+    next_account['password_hash'] = None
+    next_account['totp'] = None
 
     return {'anchor': anchor_digest, 'username': name, 'revision': (previous['revision'] if previous else 0) + 1,
-            'previous': previous['digest'] if previous else EMPTY, 'request_id': raw.request_id, 'action': operation, 'account': next_account, **grove_voters.stamp(anchor)}
+            'previous': previous['digest'] if previous else EMPTY, 'request_id': raw.request_id, 'action': operation, 'authorization_version': 2, 'account': next_account, **grove_voters.stamp(anchor)}
 
 
 def digest_of(value):
@@ -298,6 +313,8 @@ def slot(record):
 
 
 def require_slot(db, record, digest, anchor):
+    if record.get('authorization_version') != 2:
+        raise PeerError('DENIED', '此账号操作缺少独立用户授权。')
     name = record['username']
     if (not isinstance(name, str) or not USERNAME.fullmatch(name) or record['anchor'] != digest
             or record.get('configuration') != grove_voters.stamp(anchor).get('configuration')):
@@ -330,12 +347,12 @@ def prepare(state, db, change, proof, term, verify_admin):
     name = record['username']
     book = storage(db)
     prior = book['ballots'].get(name, {})
-    if prior.get('slot') != slot(record):
+    if prior.get('slot') != slot(record) or prior.get('authorization_version') != 2:
         prior = {}
     if prior.get('term', []) > term:
         return {'promised': prior['term']}
     old = decrypt(state, name, prior['accepted']) if 'accepted' in prior else None
-    ballot = {**prior, 'slot': slot(record), 'term': term}
+    ballot = {**prior, 'slot': slot(record), 'term': term, 'authorization_version': 2}
     book['ballots'][name] = ballot
     save(db, book)
     key = state.signing_key()
@@ -360,7 +377,7 @@ def accept(state, db, record, term, prepared, requested):
     name = record['username']
     book = storage(db)
     previous = book['ballots'].get(name) or {}
-    if previous.get('slot') != slot(record):
+    if previous.get('slot') != slot(record) or previous.get('authorization_version') != 2:
         previous = {}
     if previous.get('term', []) > term:
         raise PeerError('CONFLICT', '此账号正由另一节点处理。')
@@ -368,7 +385,7 @@ def accept(state, db, record, term, prepared, requested):
         old = decrypt(state, name, previous['accepted'])
         if old['term'] == term and old['proposal'] != record:
             raise PeerError('CONFLICT', '此确认轮次已经接受其他账号提案。')
-    book['ballots'][name] = {'slot': slot(record), 'term': term, 'accepted': seal(state, name, {'term': term, 'proposal': record})}
+    book['ballots'][name] = {'slot': slot(record), 'term': term, 'authorization_version': 2, 'accepted': seal(state, name, {'term': term, 'proposal': record})}
     save(db, book)
     key = state.signing_key()
     return grove.signed(ACCEPTED, {**slot(record), 'term': term, 'proposal': chosen,
@@ -398,13 +415,23 @@ def apply(state, db, approved, source):
             raise PeerError('CONFLICT', '该账号变更未包含在已确认的历史权限中。')
     validate_votes(ACCEPTED, votes, roster, {**slot(record), 'term': term, 'proposal': digest_of(record), 'configuration': configuration})
     account, profile = record['account'], record['account']['profile']
+    if account.get('password_hash') is not None or account.get('totp') is not None:
+        raise PeerError('DENIED', 'Grove 不再接收可复用的登录材料。')
+    private = None if account.get('device_key') else login_password(state, db, name)
     old_credential = previous['credential_revision'] if previous else 0
     book['records'][name] = {'revision': record['revision'], 'digest': digest_of(record), 'profile': profile,
-        'credential_revision': account['credential_revision'], 'owns_password': bool(account['password_hash']),
-        'recovery_configured': bool(account['recovery_hash']), 'certificate': seal(state, name, approved)}
+        'credential_revision': account['credential_revision'], 'owns_password': bool(private),
+        'recovery_configured': bool(account['recovery_hash']), 'device_key': account.get('device_key'), 'public_only': True,
+        'certificate': seal(state, name, approved)}
+    if private is not None:
+        book['records'][name]['legacy_material'] = seal(state, name, {'password_hash': private})
     book['ballots'].pop(name, None)
     save(db, book)
-    project_verifier(state, db, account)
+    if account.get('device_key'):
+        db.execute('DELETE FROM grove_login_verifier WHERE user_id=?', (profile['id'],))
+        db.execute('DELETE FROM grove_login_password WHERE user_id=?', (profile['id'],))
+    else:
+        project_verifier(state, db, account)
     if old_credential != account['credential_revision']:
         db.execute('DELETE FROM session WHERE account_id IN (SELECT account_id FROM grove_account WHERE user_id=?)', (profile['id'],))
     audit(db, 'grove', source, 'grove.account_changed', profile['id'], reason=record['action'])
@@ -413,6 +440,7 @@ def apply(state, db, approved, source):
 def project_verifier(state, db, account, *, restore=False):
     profile = account['profile']
     if profile['enabled'] and account['totp']:
+        factors.initialize_vault(state)
         if restore and db.execute('SELECT 1 FROM grove_login_verifier WHERE user_id=?', (profile['id'],)).fetchone():
             return
         db.execute('''INSERT INTO grove_login_verifier(user_id,username,role,epoch,verifier)

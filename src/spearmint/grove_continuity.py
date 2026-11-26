@@ -319,28 +319,15 @@ def snapshot(state: State, db, realm_id: str, recipient: str) -> dict:
     if current is None or state.identity()[0] not in current[1]['voters']:
         raise PeerError('NOT_FOUND', 'No installed Grove identity snapshot')
     authorization = retirement_document(db, realm_id, recipient)
-    realm = db.execute('SELECT public_key,manifest FROM grove_realm').fetchone()
-    manifest = json.loads(realm['manifest'])
-    directory = grove.verified('directory', manifest, realm['public_key'])
-    profiles = {profile['id']: profile for profile in directory['users']}
-    records = []
-    for row in db.execute('SELECT user_id,verifier FROM grove_login_verifier'):
-        if row['user_id'] not in profiles:
-            continue
-        password, totp = json.loads(factors.unseal(state, row['user_id'], row['verifier']))
-        records.append({'profile': profiles[row['user_id']], 'password_hash': password, 'totp': totp})
-    # The issuer exports verifier records in the order of the signed user directory.
-    profiles_order = {profile['id']: index for index, profile in enumerate(directory['users'])}
-    records.sort(key=lambda record: profiles_order[record['profile']['id']])
-    if grove_login.verifier_digest(records) != current[1]['verifiers_sha256']:
-        raise PeerError('CONFLICT', 'Local Grove verifier data does not match the authorization')
-    return {'authorization': authorization, 'manifest': manifest, 'records': records}
+    manifest = json.loads(db.execute('SELECT manifest FROM grove_realm').fetchone()[0])
+    return {'authorization': authorization, 'manifest': manifest, 'records': [], 'profiles_only': True}
 
 
 def import_snapshot(state: State, bundle: dict, source: str, origin: str, authorize, admission_certificate=None) -> None:
     from . import grove_admission
 
-    if not isinstance(bundle, dict) or bundle.keys() != {'authorization', 'manifest', 'records'}:
+    if (not isinstance(bundle, dict) or bundle.keys() != {'authorization', 'manifest', 'records', 'profiles_only'}
+            or bundle['profiles_only'] is not True or bundle['records'] != []):
         raise PeerError('PROTOCOL', 'Invalid Grove recovery snapshot')
     document, governance = split_document(bundle['authorization'])
     recovered = isinstance(document, dict) and document.keys() == {'authorization', 'votes'}
@@ -389,7 +376,7 @@ def import_snapshot(state: State, bundle: dict, source: str, origin: str, author
             current = profiles.get(linked['user_id'])
             if current is not None and current['epoch'] < linked['identity_epoch']:
                 raise PeerError('CONFLICT', 'Recovery would roll back a Grove credential version')
-        grove_login.import_snapshot(state, db, directory, bundle['records'], anchor['verifiers_sha256'])
+        grove_login.import_public_snapshot(db, directory, anchor['verifiers_sha256'])
         db.execute('DELETE FROM session WHERE account_id IN (SELECT account_id FROM grove_account)')
         db.execute('DELETE FROM grove_login_flow')
         db.execute('UPDATE grove_account SET valid_until=0')
@@ -473,10 +460,6 @@ def vote(state: State, requester: str, nonce: str, digest: str, known_revocation
             if known_passwords is not None:
                 payload['passwords'] = passwords
                 response['passwords'] = []
-                if known_passwords != passwords:
-                    documents = db.execute('SELECT user_id,document FROM grove_login_password WHERE anchor_digest=? ORDER BY user_id',
-                                           (digest,))
-                    response['passwords'] = [json.loads(factors.unseal(state, row['user_id'], row['document'])) for row in documents]
             elif passwords != EMPTY_PASSWORDS:
                 raise PeerError('CONFLICT', 'Synchronize Grove password changes before renewing')
             roles = role_versions(db)
@@ -493,7 +476,7 @@ def vote(state: State, requester: str, nonce: str, digest: str, known_revocation
             elif members:
                 raise PeerError('CONFLICT', 'Synchronize Grove admissions before renewing')
             from . import grove_accounts
-            accounts = grove_accounts.versions(db)
+            accounts = grove_accounts.public_versions(db)
             if known_accounts is not None:
                 payload['accounts'] = grove_accounts.digest_of(accounts)
                 response['accounts'] = accounts if known_accounts != payload['accounts'] else {}

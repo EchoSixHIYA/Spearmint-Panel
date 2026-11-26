@@ -3,6 +3,7 @@ from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path
 import re
+from secrets import token_urlsafe
 import ssl
 import tempfile
 
@@ -175,9 +176,11 @@ def tls_context(key: Ed25519PrivateKey, ca: bytes, leaf: bytes, directory: Path,
         context.num_tickets = 0
     else:
         context.hostname_checks_common_name = False
+    password = token_urlsafe(32).encode('ascii')
     with tempfile.NamedTemporaryFile(dir=directory, prefix=".peer-cert-", delete_on_close=False) as chain:
-        chain.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        chain.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                      serialization.BestAvailableEncryption(password)))
         chain.write(leaf)
         chain.flush()
-        context.load_cert_chain(chain.name)
+        context.load_cert_chain(chain.name, password=password)
     return context

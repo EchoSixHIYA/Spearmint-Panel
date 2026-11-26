@@ -13,6 +13,7 @@ import { AccessPage, OperationsPage } from './security-pages'
 import { Sessions } from './sessions'
 import { SignIn } from './sign-in'
 import { GroveAccountAccess } from './grove-account-access'
+import { GroveDeviceAccess } from './grove-device-access'
 import { FirstFactor, Setup, takeSetupEntry } from './onboarding'
 import { GroveAuthorize, GroveReturn, takeGroveDestination, takeGroveReturn } from './grove-auth'
 import { rememberQuorumInvitation } from './grove-invitation'
@@ -107,7 +108,7 @@ function App() {
   function signedIn(current: Session) {
     setError(''); setSession(current); setChangingFactors(false)
     if (route.page === 'grove-authorize' && route.id) setGroveRequestSignIn({ request: route.id, csrf: current.csrf_token })
-    if (['signin', 'auth-recover'].includes(route.page)) location.hash = '#/services'
+    if (['signin', 'auth-recover', 'grove-device-login'].includes(route.page)) location.hash = '#/services'
   }
   async function openFactors() {
     try {
@@ -135,6 +136,7 @@ function App() {
       if (completed) expireSession()
       location.hash = completed ? '#/signin' : '#/overview'
     }} />
+  if (!session && route.page === 'grove-device-login') return <GroveDeviceAccess onSession={signedIn} />
   if (!session && (route.page === 'grove-register' || route.page === 'grove-forgot')) return <GroveAccountAccess
     key={route.page} mode={route.page === 'grove-register' ? 'register' : 'reset'} />
   if (!session || changingFactors) return <SignIn key={changingFactors ? 'factor-change' : route.id ?? route.page} initialError={error}

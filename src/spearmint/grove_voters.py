@@ -381,11 +381,18 @@ def validate_term(term):
 
 
 def authorize(state, db, identity, pair, *, fresh=True):
-    from . import grove_availability
+    from . import grove_authorization, grove_availability
     from .peer.grove_service_admin import admin_revision, parse_identity, require_admin_identity
     if fresh:
         grove_availability.require_current(db)
-        return require_admin_identity(db, state.identity()[0], pair, identity)
+    if pair is not None or isinstance(identity, dict):
+        member = pair.node_id if pair else state.identity()[0]
+        if pair:
+            from .peer.grove_service_admin import require_member
+            require_member(db, state.identity()[0], pair)
+        return grove_authorization.verify(db, identity, member, 'voters', delegated=True)
+    if fresh:
+        return require_admin_identity(db, state.identity()[0], None, identity, 'voters')
     # Finishing an already requested configuration uses a live quorum instead
     # of an expiring identity lease; cached permission revisions must still match.
     identity = parse_identity(identity)
@@ -466,7 +473,7 @@ def accept(state, identity, proposal, term, bootstrap, pair=None):
     from . import grove_accounts, grove_continuity
     validate_term(term)
     with state.connect(write=True) as db:
-        authorize(state, db, identity, pair, fresh=False)
+        identity = authorize(state, db, identity, pair, fresh=False)
         grove_accounts.require_no_accepted_changes(db)
         current = grove_continuity.read_anchor(db)
         anchor = current[1]

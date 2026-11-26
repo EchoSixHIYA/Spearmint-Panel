@@ -6,8 +6,8 @@ from secrets import token_hex, token_urlsafe
 
 from pydantic import ValidationError
 
-from . import auth, factors, grove_accounts as account, grove_availability, grove_continuity, grove_voters
-from .peer.grove_service_admin import require_admin_identity, source_identity
+from . import auth, grove_accounts as account, grove_authorization, grove_availability, grove_continuity, grove_voters
+from .peer.grove_service_admin import require_admin_identity, source_grant
 from .peer import quarantine
 from .peer.policy import credentials_current, require_pair
 from .peer.protocol import PeerError
@@ -37,7 +37,13 @@ class GroveAccountService:
                         raise PeerError('DENIED', '此请求需要当前 Grove 成员。')
                 if (operation == 'get' and set(params) == {'action', 'username'}
                         and account.USERNAME.fullmatch(params['username'])):
-                    return {'certificate': account.certificate(self.state, db, params['username'])}
+                    name = params['username']
+                    document = account.certificate(self.state, db, name)
+                    if document is not None:
+                        credentials = document['proposal']['account']
+                        if credentials.get('password_hash') is not None or credentials.get('totp') is not None:
+                            raise PeerError('DENIED', '旧版凭据只供原节点迁移，由设备公钥替代后才会同步。')
+                    return {'certificate': document}
                 if operation == 'apply' and set(params) == {'action', 'certificate'}:
                     account.apply(self.state, db, params['certificate'], peer)
                     return {'applied': True}
@@ -47,7 +53,8 @@ class GroveAccountService:
                     if params['term'][1] != peer:
                         raise PeerError('DENIED', '账号确认轮次与成员身份不符。')
                     return account.prepare(self.state, db, params['change'], params['proof'], params['term'],
-                        lambda current, identity: require_admin_identity(current, self.remote.local_id, pair, identity))
+                        lambda current, identity, scope: grove_authorization.verify(current, identity, peer, scope)
+                        if scope == 'self' else require_admin_identity(current, self.remote.local_id, pair, identity, 'accounts'))
                 if operation == 'accept' and set(params) == {'action', 'proposal', 'term', 'prepared', 'requested'}:
                     if params['term'][1] != peer:
                         raise PeerError('DENIED', '账号确认轮次与成员身份不符。')
@@ -115,32 +122,20 @@ class GroveAccountService:
                     return saved
             raise PeerError('CONFLICT', '已有账号操作正在同步，请重试。')
 
-    @staticmethod
-    def password_hash(password):
-        if not auth.PASSWORD_SLOTS.acquire(blocking=False):
-            raise auth.LoginLimited(1)
-        try:
-            return auth.PASSWORD.hash(password)
-        finally:
-            auth.PASSWORD_SLOTS.release()
-
-    async def run(self, action, username, address, *, actor=None, role=None, password=None, current_password=None,
-                  code=None, totp=None, otp=None):
+    async def run(self, action, username, address, *, actor=None, role=None, current_password=None,
+                  code=None, device_key=None):
         change = {'username': username, 'action': action, 'request_id': token_hex(16), 'issued': int(time.time())}
         proof, result = {}, {}
         if actor is not None:
             if action in {'invite', 'create', 'assist'}:
-                proof['identity'] = await self.remote.work(source_identity, self.state, self.remote.local_id, None, actor)
+                proof['identity'] = await self.remote.work(source_grant, self.state, self.remote.local_id, None, actor, 'accounts')
             else:
-                await self.remote.work(self.require_self, actor, username)
+                await self.remote.work(self.require_self, actor, username, action, current_password)
+                proof['identity'] = await self.remote.work(grove_authorization.self_proof, self.state, actor)
         else:
             await self.remote.work(self.reserve_attempt, address, change['issued'], username)
-        if password is not None:
-            change['password_hash'] = await self.remote.work(self.password_hash, password)
         if role is not None:
             change['role'] = role
-        if current_password is not None:
-            proof['current_password'] = current_password
         if action in {'invite', 'assist'}:
             token = token_urlsafe(32)
             change['ticket_hash'] = account.hash_code(token)
@@ -149,15 +144,10 @@ class GroveAccountService:
             recovery = token_urlsafe(32)
             change['recovery_hash'] = account.hash_code(recovery)
             result['recovery_code'] = recovery
-        if action == 'create':
-            totp, uri = factors.new_totp(username, 'Grove')
-            result['provisioning_uri'] = uri
-        if totp is not None:
-            change['totp'] = totp
+        if device_key is not None:
+            change['device_key'] = device_key
         if code is not None:
             proof['code'] = code
-        if otp is not None:
-            proof['otp'] = otp
         result['confirmed'] = await self.propose(change, proof)
         return result
 
@@ -165,8 +155,11 @@ class GroveAccountService:
         with auth.authentication_attempt(self.state, address, now, username=username):
             pass
 
-    def require_self(self, actor, username):
+    def require_self(self, actor, username, action, password):
         with self.state.connect(read_only=True) as db:
+            db.execute('BEGIN')
             session = auth.active_session(db, actor.token_hash, int(time.time()))
             if not session or not session['grove_replica'] or session['display_name'] != username:
                 raise PeerError('DENIED', '请使用此 Grove 账号登录。')
+            if action != 'bind-device' and account.device_key(db, session['grove_user']) is None:
+                account.verify_password(self.state, db, {'name': username, 'id': session['grove_user']}, {'current_password': password})

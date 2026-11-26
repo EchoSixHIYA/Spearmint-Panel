@@ -2,6 +2,8 @@
 /work/tmp/
 /run/secrets/
 /run/private-console/
+/docs/handoffs/spearmint-server-handoff.zip
+/docs/handoffs/spearmint-server-handoff.passphrase.txt
 /web/node_modules/
 /web/dist/
 __pycache__/

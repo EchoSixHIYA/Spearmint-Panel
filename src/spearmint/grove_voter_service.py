@@ -8,7 +8,7 @@ import time
 from cryptography.hazmat.primitives.serialization import Encoding
 
 from . import grove_continuity, grove_voters as voters, mesh_enrollment, onboarding
-from .peer.grove_service_admin import source_identity
+from .peer.grove_service_admin import source_grant
 from .peer.pairing import configured
 from .peer.policy import require_pair
 from .peer.protocol import PeerError
@@ -117,7 +117,7 @@ class VoterService:
             raise PeerError('INVALID_REQUEST', 'Invalid Grove voter selection')
         request_id = request_id or token_hex(16)
         with self.state.connect(write=True) as db:
-            voters.authorize(self.state, db, identity, None, fresh=not recovering)
+            revision = voters.authorize(self.state, db, identity, None, fresh=not recovering)
             if not db.execute('SELECT 1 FROM grove_member WHERE node_id=? AND enabled=1', (node,)).fetchone():
                 raise PeerError('NOT_FOUND', '此节点尚未完成 Grove 入网。')
             old = voters.local_state(db)['jobs'].get(request_id)
@@ -134,12 +134,12 @@ class VoterService:
             voters.put_job(db, {'id': request_id, 'node_id': node, 'desired': int(desired), 'identity': json.dumps(identity),
                 'status': 'pending', 'reason': '正在等待同步并收集多数确认。', 'updated_at': int(time.time())})
             from .state import audit
-            audit(db, identity[1], 'local', 'grove.voter_requested', node, reason='promote' if desired else 'demote')
+            audit(db, revision[1], 'local', 'grove.voter_requested', node, reason='promote' if desired else 'demote')
         self.wake.set()
         return request_id
 
     async def request(self, actor, node, desired, request_id=None):
-        identity = await self.remote.work(source_identity, self.state, self.remote.local_id, None, actor)
+        identity = await self.remote.work(source_grant, self.state, self.remote.local_id, None, actor, 'voters')
         request_id = await self.remote.work(self.enqueue, node, desired, identity, request_id)
         return {'id': request_id, 'status': 'pending'}
 
@@ -161,7 +161,7 @@ class VoterService:
             if not voters.MIN_VOTERS <= len(anchor['voters']) + (1 if desired else -1) <= voters.MAX_VOTERS:
                 raise PeerError('GROVE_VOTER_LIMIT', f'投票节点数量须在 {voters.MIN_VOTERS} 至 {voters.MAX_VOTERS} 台之间。')
             with self.state.connect(read_only=True) as db:
-                voters.authorize(self.state, db, identity, None, fresh=False)
+                revision = voters.authorize(self.state, db, identity, None, fresh=False)
                 history = voters.rows(db)
                 bootstrap = history[0]['bootstrap'] if history else voters.base_policy(self.state)
                 snapshot = voters.checkpoint(self.state, db)
@@ -199,7 +199,7 @@ class VoterService:
                 retired = sorted({root.public_bytes(Encoding.PEM).decode() for root in policy.roots[1:]} - active_ca)
                 core = {**policy.core, 'voters': entries, 'retired_ca': retired}
                 proposal = {'version': anchor.get('_version', 0) + 1, 'previous': previous, 'policy': core,
-                    'checkpoint': snapshot, 'identity': identity, 'target': node, 'ready': ready}
+                    'checkpoint': snapshot, 'identity': revision, 'target': node, 'ready': ready}
             new = [entry['node_id'] for entry in proposal['policy']['voters']]
             results = await self.gather(set(anchor['voters']) | set(new), {'action': 'accept', 'identity': identity,
                 'proposal': proposal, 'term': term, 'bootstrap': bootstrap})

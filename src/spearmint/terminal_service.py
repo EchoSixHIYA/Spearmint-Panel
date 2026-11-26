@@ -158,7 +158,7 @@ class TerminalService:
     def dispatch(self, pair, params):
         if params.keys() != {'identity', 'owner', 'session', 'action', 'body'}:
             raise PeerError('INVALID_REQUEST', 'Invalid terminal request')
-        actor = GroveServiceAdmin.from_wire(self.local_id, pair, params['identity'])
+        actor = GroveServiceAdmin.from_wire(self.local_id, pair, params['identity'], 'terminal')
         return self.request(actor, pair.node_id, params['owner'], params['session'], params['action'], params['body'])
 
     def request(self, actor, source, owner, identifier, action, body):

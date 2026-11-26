@@ -16,10 +16,10 @@ from urllib.parse import urlsplit
 
 import uvicorn
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.serialization import load_pem_public_key
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-from . import accounts, auth, factors, frp, frp_runtime, grove, grove_admission, grove_continuity, grove_metadata, onboarding, passkeys, seed_admission
+from . import accounts, auth, factors, frp, frp_runtime, grove, grove_admission, grove_authorization, grove_continuity, grove_metadata, onboarding, passkeys, seed_admission
 from .app import create_app
 from .catalog import list_services, process_spec, register
 from .config import Config
@@ -37,8 +37,8 @@ from .peer.operation_policy import audit_export, protect_service
 from .peer.projection import export_service
 from .peer.policy_records import encoded, read_document, root_id
 from .peer.policy_workstation import read_public
-from .peer.protocol import PeerError
-from .peer.workstation import configure_approve, sign_approval, write_new
+from .peer.protocol import PeerError, wire_b64
+from .peer.workstation import configure_approve, init_operator, passphrase, sign_approval, write_new
 from .seeding import TARGETS_FILE, SeedDeployments, load_deployment_config
 from .service_mode import change_mode
 from .service_removal import unregister
@@ -668,6 +668,13 @@ def main() -> int:
     frp_parser(subparsers.add_parser("frp", help="Manage local FRP mappings"))
     peer_parser(subparsers.add_parser("peer", help="Manage the authenticated Peer link"))
     configure_approve(subparsers.add_parser("approve", help="Sign an operation challenge"))
+    subparsers.add_parser('init-grove-device', help='Create a local Grove device key').add_argument('directory', type=Path)
+    grant = subparsers.add_parser('sign-grove-authorization', help='Sign a Grove authorization on the independent user device')
+    grant.add_argument('challenge', type=Path)
+    grant.add_argument('output', type=Path)
+    grant.add_argument('--operator-key', type=Path, required=True)
+    grant.add_argument('--source-id', required=True)
+    grant.add_argument('--approval', type=Path, action='append', default=[])
     migrate = subparsers.add_parser("migrate", help="Back up and upgrade the SQLite schema with the panel stopped")
     migration = migrate.add_mutually_exclusive_group(required=True)
     migration.add_argument("--backup", type=Path, help="Directory for the verified pre-upgrade backup")
@@ -701,6 +708,10 @@ def main() -> int:
     seed_enrollment.add_argument('action', choices=('request', 'finish', 'status'))
     grove_commands = subparsers.add_parser('grove', help='Inspect Grove identity or perform local owner recovery').add_subparsers(dest='grove_command', required=True)
     grove_commands.add_parser('status')
+    key_vote = grove_commands.add_parser('approve-administrator-key', help='Locally approve an independent Grove signing key')
+    key_vote.add_argument('username')
+    key_vote.add_argument('public_key', type=Path)
+    key_vote.add_argument('output', type=Path)
     grove_commands.add_parser('sync-directory', help='Refresh the signed member directory directly from the configured HTTPS issuer')
     continuity = grove_commands.add_parser('install-continuity', help='Enroll this member using its Grove retirement authorization')
     continuity.add_argument('authorization', type=Path)
@@ -751,6 +762,31 @@ def main() -> int:
             return 0
         if args.command == "approve":
             sign_approval(args)
+            return 0
+        if args.command == 'init-grove-device':
+            init_operator(args.directory)
+            print('Grove public key', wire_b64(read_public(args.directory / 'operator.pub').public_bytes_raw()))
+            return 0
+        if args.command == 'sign-grove-authorization':
+            challenge = read_document(args.challenge, limit=4096)
+            if challenge.get('source') != args.source_id or not NODE_ID.fullmatch(args.source_id):
+                raise StateError('The authorization names a different source panel')
+            approvals = [read_document(path, limit=2048) for path in args.approval]
+            print(json.dumps({key: challenge.get(key) for key in ('source', 'identity', 'scopes', 'seed_executor', 'joining', 'expires_at')},
+                             ensure_ascii=False, indent=2))
+            key_path = args.operator_key.expanduser().absolute()
+            private_path(key_path, 0o600)
+            key = load_pem_private_key(read_pem(key_path), password=passphrase())
+            if not isinstance(key, Ed25519PrivateKey):
+                raise StateError('Use an independent Ed25519 operator key')
+            key_id = wire_b64(key.public_key().public_bytes_raw())
+            approved = []
+            for document in approvals:
+                raw = grove_authorization.unsigned(document)
+                if (raw['key'] != key_id or any(raw[field] != challenge[field] for field in ('identity', 'anchor', 'configuration'))):
+                    raise StateError('A voter approval belongs to a different key, account or Grove configuration')
+                approved.append(document)
+            write_new(args.output, grove.encoded(grove_authorization.issue(key, challenge, approved)))
             return 0
         if not WINDOWS and os.getuid() == 0:
             raise StateError("Run Spearmint as its dedicated non-root account")
@@ -818,7 +854,12 @@ def main() -> int:
         elif args.command == 'seed-enrollment':
             print(json.dumps(seed_admission.cli(state, config, args.action)))
         elif args.command == 'grove':
-            if args.grove_command == 'status':
+            if args.grove_command == 'approve-administrator-key':
+                state.verify()
+                public = read_public(args.public_key).public_bytes_raw()
+                vote = grove_authorization.key_vote(state, args.username, wire_b64(public))
+                write_new(args.output, grove.encoded(vote))
+            elif args.grove_command == 'status':
                 state.verify()
                 status = grove.describe(state, private=True)
                 with state.connect(read_only=True) as db:

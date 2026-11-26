@@ -83,6 +83,12 @@ Set up a browser-accessible HTTPS address and a local reverse proxy to `127.0.0.
    Windows targets need the SSH SFTP subsystem and the built-in `cmd.exe`, `certutil.exe`, and `tar.exe`. The deployment account must be able to register a startup task. The panel task runs with that account's limited privileges.
 3. In service management, choose the local or remote node where the service runs and register it. For an existing container or system service, use observe mode to check its status and logs before switching to manage mode.
 
+### Grove sign-in device
+
+Run `spearmint init-grove-device <key-directory>` on a device you control. Keep the encrypted `operator.key` with you. Share only the printed public key when an administrator provisions your account, or enter it when accepting a Grove account invitation. For the first enrollment of an existing account, a majority of the current voting nodes must each run `spearmint grove approve-administrator-key <account> <public-key-file> <approval-file>` on their local consoles for the same account and `operator.pub`.
+
+Choose device sign-in and download the request. Sign it using `spearmint sign-grove-authorization <request-file> <signed-file> --operator-key <key-file> --source-id <panel-id>`, then paste the signed result into the panel. For the first enrollment, request account authorization in Account and Sign-in. Add one `--approval <approval-file>` per voter approval when signing, then import the authorization and bind the device. Once bound, the same device can sign in at any panel that has synced the account. A synced panel can verify the signature locally during the 12-hour offline window. For cross-node controls, request a scoped authorization in Identity and Security and verify the scope and panel identity before signing. To replace a lost device, use your recovery code on the sign-in page or obtain a one-time reset code from another administrator.
+
 ### Adopt Linux system services
 
 SSH seeding enables node-wide system-service management by default. The initiator uses the existing SSH session for a one-time host installation. When sudo requires a password, it uses the SSH login password unless a separate sudo password is provided. Credentials are only used during installation. There is no per-service allowlist; the panel continues to run as its ordinary account with `NoNewPrivileges=true`.

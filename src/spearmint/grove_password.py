@@ -74,6 +74,9 @@ def data_for(document: dict, digest: str, anchor: dict, users: list[dict]) -> di
 
 
 def store(state: State, db, document: dict, record: dict, actor: str, source: str) -> bool:
+    from . import grove_accounts
+    if grove_accounts.device_key(db, record['user_id']):
+        return False
     user_id = record['user_id']
     change_digest = sha256(parse_b64(document['record'], 2048) + parse_b64(document['signature'], 64)).hexdigest()
     previous = db.execute('SELECT generation,change_digest FROM grove_login_password WHERE user_id=?', (user_id,)).fetchone()

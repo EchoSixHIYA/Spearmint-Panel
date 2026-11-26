@@ -332,14 +332,12 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
         ? '请重新登录后再确认。' : failure instanceof ApiError ? failure.message : '暂时无法处理成员申请。')
     } finally { setPending(false) }
   }
-  async function join(credentials?: FormData) {
+  async function join(authorization?: string) {
     if (!canJoin) return
     setPending(true); setJoinError('')
     try {
       if (quorumCode) {
-        const body = automaticJoin ? { invitation: invitation.trim(), credentials: credentials ? {
-          username: credentials.get('username'), password: credentials.get('password'), code: credentials.get('code'),
-        } : undefined } : { code: invitation.trim() }
+        const body = automaticJoin ? { invitation: invitation.trim(), authorization: authorization ? JSON.parse(authorization) : undefined } : { code: invitation.trim() }
         const joined = await api<GroveRealm>(automaticJoin ? '/grove/join-with-quorum' : '/grove/join-from-invitation',
           { method: 'POST', headers, body: JSON.stringify(body) })
         setRevocation(`已加入 ${joined.name}，正在同步多数续期后的 Grove 登录状态。`)
@@ -356,7 +354,7 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
     catch (failure) {
       if (automaticJoin && failure instanceof ApiError && ['OFFLINE', 'GROVE_PAIRING_REQUIRED'].includes(failure.code ?? '')) setResumeJoin(true)
       setJoinError(automaticJoin && failure instanceof ApiError && failure.code === 'GROVE_ADMISSION_PENDING'
-        ? '尚未取得多数批准。请检查管理员凭据和验证节点是否在线，使用下一组动态验证码重试。' : groveError(failure))
+        ? '尚未取得多数批准。请检查加入授权是否有效，以及多数投票节点是否在线。' : groveError(failure))
       setPending(false)
     }
   }
@@ -425,16 +423,14 @@ export function GroveCard({ session, data, error, directoryCurrent, onUnauthoriz
       </form>
       {(!openJoin || !session.grove) && <details className="grove-existing-join" open={openJoin || !!initialInvitation || undefined} ref={joinForm}>
         <summary>加入已有 Grove</summary>
-        <p className="muted">{automaticJoin ? '通过在线成员验证 Grove 管理员账号，获多数批准后自动完成 Mesh 配对。'
+        <p className="muted">{automaticJoin ? '粘贴管理员为此节点签名的加入授权。多数投票节点确认后会自动配对。'
           : quorumCode ? 'Spearmint 会通过已配对的成员核对多数批准。' : '粘贴邀请码后，Spearmint 会自动找到可用成员。'}</p>
         <GroveInvitationField code={invitation} realm={realm} disabled={pending}
           onChange={(value) => { setInvitation(value); setJoinError(''); setResumeJoin(false) }} />
         {automaticJoin ? <form className="auth-form" onSubmit={(event) => {
-          event.preventDefault(); const values = new FormData(event.currentTarget); event.currentTarget.reset(); void join(values)
+          event.preventDefault(); const values = new FormData(event.currentTarget); void join(String(values.get('authorization') || '').trim())
         }}>
-          <label className="field-label">Grove 管理员账号<input className="input" name="username" autoComplete="username" required maxLength={64} /></label>
-          <label className="field-label">Grove 密码<input className="input" name="password" type="password" autoComplete="current-password" required maxLength={256} /></label>
-          <label className="field-label">动态验证码<input className="input" name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required /></label>
+          <label className="field-label">签名加入授权<textarea className="input" name="authorization" autoComplete="off" required maxLength={32768} /></label>
           <button className="btn btn-primary" disabled={pending}>{pending ? '正在验证并配对…' : '验证并加入 Grove'}</button>
         </form> : <button className="btn btn-secondary" disabled={pending || !canJoin} onClick={() => void join()}>
           {pending ? '正在联系成员…' : quorumCode ? '检查审批并加入 Grove' : '前往 Grove 登录并确认加入'}<Icon name="arrow-right" size={14} />

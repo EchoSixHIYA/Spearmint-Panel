@@ -16,10 +16,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import grove, seed_packages, update_release as release, update_worker as worker
+from . import grove, grove_authorization, seed_packages, update_release as release, update_worker as worker
 from .peer.grove_endpoints import trusted_members
 from .peer import quarantine
-from .peer.grove_service_admin import admin_revision, parse_identity, require_member
+from .peer.grove_service_admin import admin_revision, require_member, source_grant
 from .peer.outbound import account_admin
 from .peer.pairing import configured
 from .peer.policy import credentials_current, require_pair
@@ -44,7 +44,7 @@ class Offer(BaseModel):
     release: release.Release
     expires: int = Field(gt=0, lt=2**53)
     target: str = Field(pattern=r'^spm1-[a-f0-9]{64}$')
-    identity: list
+    identity: dict | list
 
 
 class StartUpdate(BaseModel):
@@ -109,7 +109,7 @@ class UpdateCoordinator:
                 raise PeerError('DENIED', 'Sign in with a verified Grove administrator account')
             return admin_revision(db, trust.realm_id, user)
 
-    async def verify_source(self, offer: Offer, pair=None, source: str | None = None) -> None:
+    async def verify_source(self, offer: Offer, pair=None, source: str | None = None, *, accepted_at=None) -> list:
         def check():
             with self.state.connect(read_only=True) as db:
                 db.execute('BEGIN')
@@ -125,16 +125,12 @@ class UpdateCoordinator:
                 trust = trusted_members(db, self.local_id, operational=True)
                 if trust is None:
                     raise PeerError('GROVE_DIRECTORY_PENDING', 'Waiting for a current Grove directory')
-                identity = parse_identity(offer.identity)
-                if identity[0] != trust.realm_id or (peer is not None and peer.node_id not in trust.origins):
+                if peer is not None and peer.node_id not in trust.origins:
                     raise PeerError('DENIED', 'The update origin is outside this Grove')
-                current = admin_revision(db, trust.realm_id, identity[1])
-                if identity != current:
-                    if all(remote >= local for remote, local in zip(identity[2:], current[2:], strict=True)):
-                        raise PeerError('GROVE_DIRECTORY_PENDING', 'Waiting for newer Grove account revisions')
-                    raise PeerError('GROVE_REVISION_CHANGED', 'The initiating Grove administrator revision changed')
+                return grove_authorization.verify(db, offer.identity, peer.node_id if peer else self.local_id,
+                                                  'updates', at=accepted_at)
         try:
-            await self.remote.work(check, rpc=pair is not None)
+            return await self.remote.work(check, rpc=pair is not None)
         except PeerError as error:
             if error.code == 'GROVE_DIRECTORY_PENDING':
                 await self.remote.request_grove_sync()
@@ -142,6 +138,8 @@ class UpdateCoordinator:
 
     @staticmethod
     def authorization_result(error: PeerError) -> dict | None:
+        if error.code == grove_authorization.ERROR:
+            return {'status': 'failed', 'reason': 'user_authorization_required'}
         if error.code == 'GROVE_DIRECTORY_PENDING':
             return {'status': 'waiting_grove', 'reason': 'grove_sync_pending'}
         if error.code == 'DENIED':
@@ -298,7 +296,7 @@ class UpdateCoordinator:
             return None
 
     async def start(self, intent: StartUpdate, actor) -> dict:
-        identity = await self.remote.work(self.identity, actor)
+        identity = await self.remote.work(source_grant, self.state, self.local_id, None, actor, 'updates')
         members = await self.remote.work(self.members)
         if not members:
             raise PeerError('UNAVAILABLE', 'The Grove member directory is not current')
@@ -317,7 +315,7 @@ class UpdateCoordinator:
         worker.write_record(self.group_path, {'job': job, 'release': candidate.model_dump(), 'identity': identity,
                                              'expires': now + JOB_TTL, 'nodes': {node: {'status': 'queued'} for node in members}})
         self.prepare_group_archives(candidate)
-        await self.remote.work(self.audit_event, identity[1], actor.address, 'started', job)
+        await self.remote.work(self.audit_event, grove_authorization.revision(identity)[1], actor.address, 'started', job)
         return self.group_status()
 
     def group_status(self) -> dict:
@@ -340,10 +338,10 @@ class UpdateCoordinator:
         now = int(time.time())
         if offer.expires > now + JOB_TTL + 120:
             return {'status': 'expired'}
-        await self.verify_source(offer, pair)
         source = pair.node_id if pair is not None else self.local_id
         if existing := self.local_status(offer, source):
             return existing
+        revision = await self.verify_source(offer, pair)
         if offer.expires <= now:
             return {'status': 'expired'}
         runnable = self.target is not None and await self.remote.work(worker.supported)
@@ -360,20 +358,32 @@ class UpdateCoordinator:
         previous = worker.read_record(self.local_path)
         if previous and previous['status'] not in TERMINAL:
             return {'status': 'queued', 'reason': 'another_update'}
-        if previous and previous['status'] == 'succeeded' and previous['release']['sequence'] > offer.release.sequence:
-            return {'status': 'unsupported', 'reason': 'older_release'}
-        cached = self.cached_seed_release()
-        if cached is not None and cached.commit == self.build['commit'] and cached.sequence > offer.release.sequence:
+        if not self.newer_than_installed(offer.release, previous):
             return {'status': 'unsupported', 'reason': 'older_release'}
         config = {'origin': self.config.origin}
         if WINDOWS:
             config['windows'] = worker.windows_settings(self.config)
         worker.write_record(self.local_path, {'job': offer.job, 'release': offer.release.model_dump(), 'source': offer.identity,
-                                             'source_node': source,
+                                             'source_node': source, 'actor': revision[1], 'accepted_at': now,
                                              'expires': offer.expires, 'node': self.local_id, 'target': self.target,
                                              'previous': self.build['commit'], 'config': config, 'status': 'queued'})
-        await self.remote.work(self.audit_event, offer.identity[1], source, 'accepted', offer.job)
+        await self.remote.work(self.audit_event, revision[1], source, 'accepted', offer.job)
         return {'status': 'queued'}
+
+    def newer_than_installed(self, candidate, previous=None) -> bool:
+        if candidate.commit == self.build['commit']:
+            return True
+        installed = []
+        if previous and previous['status'] == 'succeeded':
+            installed.append(previous['release']['sequence'])
+        cached = self.cached_seed_release()
+        if cached is not None and cached.commit == self.build['commit']:
+            installed.append(cached.sequence)
+        with suppress(*IO_ERRORS, KeyError, TypeError):
+            document = worker.read_record(self.root / worker.INSTALLED_RELEASE)
+            if document is not None:
+                installed.append(release.Release.model_validate(document).sequence)
+        return not installed or candidate.sequence > max(installed)
 
     def archive(self, asset: release.Asset) -> Path:
         return self.root / (asset.sha256 + '.archive')
@@ -605,7 +615,13 @@ class UpdateCoordinator:
                 self.write_status(job, 'waiting_package', reason='source_unavailable')
                 self.node_retry = time.monotonic() + 15
                 return
-            await self.verify_source(offer, source=job['source_node'])
+            if 'accepted_at' not in job or not isinstance(offer.identity, dict):
+                self.write_status(job, 'failed', reason='user_authorization_required')
+                return
+            await self.verify_source(offer, source=job['source_node'], accepted_at=job['accepted_at'])
+            if not self.newer_than_installed(candidate):
+                self.write_status(job, 'unsupported', reason='older_release')
+                return
             if job['expires'] <= int(time.time()):
                 self.write_status(job, 'expired')
                 return
@@ -642,7 +658,7 @@ class UpdateCoordinator:
                 if self.build['commit'] != job['release']['commit'] and result['status'] == 'succeeded':
                     result = {'status': 'failed', 'reason': 'running_commit_mismatch'}
                 self.write_status(job, **result)
-                await self.remote.work(self.audit_event, job['source'][1], job['source_node'], result['status'], job['job'])
+                await self.remote.work(self.audit_event, job.get('actor', 'grove'), job['source_node'], result['status'], job['job'])
             return
         if self.node_retry <= time.monotonic():
             self.node_task = asyncio.create_task(self.run_node(job))

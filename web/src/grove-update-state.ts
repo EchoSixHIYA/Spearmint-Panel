@@ -10,6 +10,7 @@ const labels: Record<string, string> = {
 }
 const reasons: Record<string, string> = {
   waiting_node: '节点离线，上线后会自动继续', updater_missing: '此节点需要先手动安装支持群组更新的版本',
+  user_authorization_required: '请先在身份与安全中授权群组更新',
   native_install_required: '需先通过原生安装器接管现有面板', schema_change: '此版本需要先迁移数据',
   already_current_unmanaged: '版本已一致；自动更新功能尚未配置',
   installer_failed: '安装未完成，请检查该节点的安装日志后重试', installer_interrupted: '安装中断，请核对节点状态后重试',
