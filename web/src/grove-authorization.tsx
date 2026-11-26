@@ -8,11 +8,13 @@ const scopes = [
   ['self', '绑定本人登录设备与恢复码'], ['voters', '调整投票资格'], ['updates', 'Grove 群组更新'], ['join', '批准指定节点加入'],
 ]
 
-export function GroveAuthorizationDialog({ session, nodes, onClose, onUnauthorized, selfOnly = false }: {
-  session: Session; nodes: { id: string; name: string }[]; onClose: () => void; onUnauthorized: () => void; selfOnly?: boolean
+export function GroveAuthorizationDialog({ session, nodes, onClose, onUnauthorized, selfOnly = false, updateTag, onAuthorized }: {
+  session: Session; nodes: { id: string; name: string }[]; onClose: () => void; onUnauthorized: () => void
+  selfOnly?: boolean; updateTag?: string; onAuthorized?: () => void
 }) {
+  const requiredScope = updateTag ? 'updates' : selfOnly ? 'self' : undefined
   const [request, setRequest] = useState<Record<string, unknown>>()
-  const [selection, setSelection] = useState<string[]>(selfOnly ? ['self'] : [])
+  const [selection, setSelection] = useState<string[]>(requiredScope ? [requiredScope] : [])
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const [result, setResult] = useState<{ expires_at: number }>()
@@ -31,11 +33,14 @@ export function GroveAuthorizationDialog({ session, nodes, onClose, onUnauthoriz
       } else {
         const signed = String(form.get('authorization') || '').trim()
         try { JSON.parse(signed) } catch { throw new Error('请粘贴完整的授权文件内容。') }
-        setResult(await api<{ expires_at: number }>('/grove/authorization', { method: 'POST', headers, body: signed }))
+        const query = requiredScope ? `?required_scope=${requiredScope}` : ''
+        setResult(await api<{ expires_at: number }>(`/grove/authorization${query}`, { method: 'POST', headers, body: signed }))
         window.dispatchEvent(new Event('spearmint:refresh'))
       }
     } catch (failure) {
       if (failure instanceof ApiError && failure.status === 401) onUnauthorized()
+      else if (updateTag && failure instanceof ApiError && failure.code === 'GROVE_USER_AUTHORIZATION_REQUIRED')
+        setError('这份签名无法授权当前面板的群组更新。请使用本页生成的请求重新签名。')
       else setError(failure instanceof Error ? failure.message : '暂时无法验证授权。')
     } finally { setPending(false) }
   }
@@ -49,16 +54,18 @@ export function GroveAuthorizationDialog({ session, nodes, onClose, onUnauthoriz
     setTimeout(() => URL.revokeObjectURL(path), 1000)
   }
 
-  return <Modal title="授权当前面板" onClose={onClose}>
+  return <Modal title={updateTag ? '授权群组更新' : '授权当前面板'} onClose={onClose}>
     {result ? <div className="grove-account-form">
       <Notice tone="green">已授权，有效至 {new Date(result.expires_at * 1000).toLocaleTimeString()}。</Notice>
-      <button className="btn btn-primary" onClick={onClose}>完成</button>
+      <button className="btn btn-primary" onClick={onAuthorized ?? onClose}>{updateTag ? `继续更新 ${updateTag}` : '完成'}</button>
     </div> : <form className="grove-account-form" onSubmit={submit}>
       {!request ? <>
-        <p>选择允许当前面板执行的操作。授权由你持有的独立密钥签发，有效期 5 分钟。</p>
-        <div className="grove-authorization-scopes">{scopes.filter(([id]) => !selfOnly || id === 'self').map(([id, name]) =>
+        {updateTag ? <><p>使用登录设备给当前面板签发群组更新授权。授权有效期为 5 分钟。</p>
+          <p className="muted">首次升级且尚未准备好登录设备时，可从仍运行旧版的 Grove 面板发起群组更新。</p></> :
+          <p>选择允许当前面板执行的操作。授权由你持有的独立密钥签发，有效期 5 分钟。</p>}
+        {!updateTag && <div className="grove-authorization-scopes">{scopes.filter(([id]) => !selfOnly || id === 'self').map(([id, name]) =>
           <label key={id}><input type="checkbox" checked={selection.includes(id)} onChange={event =>
-            setSelection(event.target.checked ? [...selection, id] : selection.filter(item => item !== id))} />{name}</label>)}</div>
+            setSelection(event.target.checked ? [...selection, id] : selection.filter(item => item !== id))} />{name}</label>)}</div>}
         {selection.includes('seed') && <label className="field-label">播种发起节点<select className="input" name="seed_executor">
           <option value="">当前面板</option>{nodes.map(node => <option key={node.id} value={node.id}>{node.name}</option>)}
         </select></label>}

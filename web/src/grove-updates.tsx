@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, api, usePoll } from './api'
 import { useConsole, refreshConsole } from './console-data'
+import { GroveAuthorizationDialog } from './grove-authorization'
 import { Badge, Icon, Panel, shortId } from './ui'
 import { updateCounts, updateCoversMembers, updateNeedsAttention, updatePresentation, updateProgress,
   type GroveUpdate, type UpdateRelease } from './grove-update-state'
@@ -9,15 +10,18 @@ type Action = 'checking' | 'starting' | 'retrying' | 'refreshing'
 type Feedback = { text: string; error?: boolean }
 type ReleaseCheck = { release: UpdateRelease | null; source?: string }
 const actionLabels: Record<Action, string> = { checking: '正在检查…', starting: '正在提交…', retrying: '正在重试…', refreshing: '正在刷新…' }
+const needsAuthorization = 'GROVE_USER_AUTHORIZATION_REQUIRED'
 
 function failureMessage(error: unknown, action: Action) {
   if (error instanceof ApiError) {
+    if (error.code === needsAuthorization) return '群组更新需要当前面板的设备签名授权。'
     if (error.code === 'GROVE_SYNCHRONIZING') return 'Grove 权限正在同步，完成后可重试。'
     if (error.code === 'CONFLICT') return '更新状态已变化，请刷新进度或重新检查更新。'
     if (error.code === 'DENIED' || error.status === 403) return '请使用 Grove 管理员账号发起更新。'
     if (error.code === 'OFFLINE') return 'Grove 暂时不可达，连接恢复后可重试。'
   }
-  return action === 'checking' || action === 'retrying' ? '暂时无法检查更新，请稍后重试。' : '暂时无法刷新更新状态，稍后会自动重试。'
+  if (action === 'checking' || action === 'retrying') return '暂时无法检查更新，请稍后重试。'
+  return action === 'starting' ? '群组更新提交失败，请稍后重试。' : '暂时无法刷新更新状态，稍后会自动重试。'
 }
 
 export function GroveUpdatePanel() {
@@ -25,6 +29,7 @@ export function GroveUpdatePanel() {
   const realmId = grove.data?.realm?.id
   const status = usePoll<GroveUpdate>(realmId ? '/grove/updates' : null, onUnauthorized, 4000, undefined, realmId)
   const [candidate, setCandidate] = useState<UpdateRelease>()
+  const [authorizationTarget, setAuthorizationTarget] = useState<UpdateRelease>()
   const [action, setAction] = useState<Action>()
   const [feedback, setFeedback] = useState<Feedback>()
   const [attentionOnly, setAttentionOnly] = useState(false)
@@ -102,7 +107,8 @@ export function GroveUpdatePanel() {
   async function start(release: UpdateRelease, signal: AbortSignal) {
     try {
       const value = await api<GroveUpdate>('/grove/updates', { method: 'POST', signal,
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrf_token }, body: JSON.stringify(release) })
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrf_token },
+        body: JSON.stringify({ tag: release.tag, commit: release.commit }) })
       if (!value.job) throw new Error('Missing update receipt')
       setAccepted({ data: value, receivedAt: performance.now() })
       setCandidate(undefined)
@@ -110,6 +116,10 @@ export function GroveUpdatePanel() {
       setFeedback(undefined)
       refreshConsole()
     } catch (error) {
+      if (error instanceof ApiError && error.code === needsAuthorization) {
+        setAuthorizationTarget(release)
+        return
+      }
       if (error instanceof ApiError && error.status < 500 && ![408, 429].includes(error.status)) throw error
       setAwaiting({ release, previousJob: batch?.job })
       setFeedback({ text: '提交结果暂未确认，正在查询进度。请先核对任务，避免重复发起。' })
@@ -179,5 +189,11 @@ export function GroveUpdatePanel() {
       {!batch && status.error && <div className="maintenance-inline-actions"><span className="muted tiny">连接恢复后会继续刷新更新状态。</span>
         <button className="text-link plain-button" disabled={!!action} onClick={() => void perform('refreshing', async signal => { await refresh(signal) })}>刷新状态</button></div>}
     </>}
+    {authorizationTarget && <GroveAuthorizationDialog session={session} nodes={[]} onUnauthorized={onUnauthorized}
+      updateTag={authorizationTarget.tag} onClose={() => setAuthorizationTarget(undefined)} onAuthorized={() => {
+        const release = authorizationTarget
+        setAuthorizationTarget(undefined)
+        void perform('starting', signal => start(release, signal))
+      }} />}
   </Panel>
 }

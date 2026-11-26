@@ -162,12 +162,12 @@ def issue(private_key: Ed25519PrivateKey, challenge: dict, approvals: list[dict]
     return {'grant': grove.signed(GRANT, challenge, private_key), 'approvals': approvals}
 
 
-def enrollment(state, actor, payload):
+def enrollment(state, actor, payload, *, required_scope=None):
     from .peer.outbound import actor_account
 
     try:
         grant = unsigned(payload['grant'])
-        scope = grant['scopes'][0]
+        scope = required_scope if required_scope is not None else grant['scopes'][0]
     except (KeyError, ValueError, TypeError, IndexError) as error:
         raise PeerError(ERROR, MESSAGE) from error
     with state.connect(read_only=True) as db:

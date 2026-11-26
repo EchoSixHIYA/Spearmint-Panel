@@ -685,10 +685,13 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             return grove_authorization.challenge(db, actor, node_id, identity, sorted(set(scopes)), executor=executor, joining=joining)
 
     @app.post('/api/v1/grove/authorization')
-    async def grove_authorization_import(request: Request, response: Response, actor: auth.Actor = Depends(require_write)):
+    async def grove_authorization_import(request: Request, response: Response,
+                                         required_scope: Literal['self', 'updates'] | None = None,
+                                         actor: auth.Actor = Depends(require_write)):
         proof = await read_grove_body(request, grove_authorization.LIMIT)
         response.headers['Cache-Control'] = 'no-store'
-        return await run_in_threadpool(grove_authorization.enrollment, store, actor, proof)
+        return await run_in_threadpool(grove_authorization.enrollment, store, actor, proof,
+                                       required_scope=required_scope)
 
     @app.post('/api/v1/grove/accounts/create')
     async def grove_create_account(body: GroveAccountCreate, request: Request, response: Response,

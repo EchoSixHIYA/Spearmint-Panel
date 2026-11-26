@@ -72,6 +72,21 @@ class AuthorizationTest(unittest.TestCase):
                 self.assertEqual(db.execute('SELECT count(*) FROM grove_login_verifier').fetchone()[0], 0)
 
 
+    def test_update_authorization_does_not_accept_an_unrelated_grant(self):
+        root = Path.cwd() / 'work/tmp/codex-grove-authorization'
+        root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=root) as directory:
+            fixture = VoterFixture(Path(directory))
+            source = fixture.states[0]
+            actor = fixture.login()
+            original = grove_authorization.enrolled(source, actor)
+            terminal = fixture.authorize(source, actor, scopes=['terminal'])
+            grove_authorization.enrollment(source, actor, original)
+            with self.assertRaises(PeerError) as denied:
+                grove_authorization.enrollment(source, actor, terminal, required_scope='updates')
+            self.assertEqual(denied.exception.code, grove_authorization.ERROR)
+            self.assertEqual(grove_authorization.enrolled(source, actor), original)
+
     def test_admission_confirms_a_majority_for_the_current_request(self):
         root = Path.cwd() / 'work/tmp/codex-grove-authorization'
         root.mkdir(parents=True, exist_ok=True)
