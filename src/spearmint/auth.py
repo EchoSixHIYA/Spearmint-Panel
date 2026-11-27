@@ -169,14 +169,16 @@ def authentication_attempt(state: State, address: str, now: int, *, username: st
 
 
 def issue_session(db: sqlite3.Connection, account: sqlite3.Row, address: str, now: int,
-                  *, mfa_at: int | None = None, method: str = "password", grove_replica: bool = False) -> tuple[str, str]:
-    token, csrf_token = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+                  *, mfa_at: int | None = None, method: str = "password", grove_replica: bool = False,
+                  token: str | None = None, created_at: int | None = None) -> tuple[str, str]:
+    token, csrf_token = token or secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    created_at = now if created_at is None else created_at
     db.execute("DELETE FROM login_attempt WHERE address=? AND account_key=?", (address, digest(account["username"])))
     db.execute("DELETE FROM session WHERE created_at<=? OR last_seen<=?", (now - SESSION_SECONDS, now - IDLE_SECONDS))
     db.execute("""
         INSERT INTO session (token_hash, csrf_token, created_at, last_seen, account_id, auth_epoch, mfa_at, session_id, grove_replica)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (digest(token), csrf_token, now, now, account["id"], account["auth_epoch"], mfa_at, secrets.token_hex(16), int(grove_replica)))
+    """, (digest(token), csrf_token, created_at, now, account["id"], account["auth_epoch"], mfa_at, secrets.token_hex(16), int(grove_replica)))
     audit(db, account["operation_actor"], address, "session.login", reason=method)
     return token, csrf_token
 
@@ -440,6 +442,9 @@ def logout(state: State, actor: Actor) -> None:
     with state.connect(write=True) as db:
         db.execute("DELETE FROM session WHERE token_hash=?", (actor.token_hash,))
         audit(db, actor.operation_actor, actor.address, "session.logout")
+    if actor.grove:
+        from .grove_authorization import forget_service_session
+        forget_service_session(state, actor)
 
 
 def list_sessions(state: State, actor: Actor) -> list[dict] | None:

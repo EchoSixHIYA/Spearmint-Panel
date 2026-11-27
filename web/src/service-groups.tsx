@@ -9,7 +9,7 @@ export type GroupMember = { service_id: string; status_only: boolean }
 type GroupOperation = { request_id: string; version: string; action: 'start' | 'stop'; status: string;
   completed: number; total: number; current_service_id: string | null; reason?: string }
 export type ServiceGroup = { id: string; name: string; version: string; members: GroupMember[]; operation?: GroupOperation | null }
-export type GroupTarget = { id: string; label: string; available: boolean;
+export type GroupTarget = { id: string; label: string; available: boolean; canEdit?: boolean;
   services: { id: string; name: string; actions: readonly string[] }[] }
 
 function groupError(error: unknown) {
@@ -153,7 +153,7 @@ export function ServiceGroupActions({ group, target, onEdit }: { group: ServiceG
         aria-label={`启动整组 ${group.name}`} onClick={() => void run('start')}><Icon name="play" size={16} /></button>
       <button type="button" className="icon-button service-action-stop" disabled={blocked || !canControl} title="停止整组"
         aria-label={`停止整组 ${group.name}`} onClick={() => void run('stop')}><Icon name="stop" size={16} /></button>
-      <button type="button" className="icon-button" disabled={blocked} title="编辑服务组"
+      <button type="button" className="icon-button" disabled={blocked || target.canEdit === false} title={target.canEdit === false ? '编辑服务组需要远程服务管理授权' : '编辑服务组'}
         aria-label={`编辑服务组 ${group.name}`} onClick={onEdit}><Icon name="settings" size={16} /></button>
     </div>
     {current && <span className="service-group-progress" role="status"><StateBadge state={current.status} />

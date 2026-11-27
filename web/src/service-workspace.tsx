@@ -20,7 +20,7 @@ type ServiceResources = { pid: number | null; sampled_at: number | null; valid_u
   gpu: { utilization_percent: number | null; memory_used_bytes: number | null; valid_until?: number | null } }
 type Receipt = { id?: string; action: string; status: string; updated_at?: number; message?: string | null; reason?: string }
 type Detail = Service & { command?: string; managed: boolean; can_edit_details: boolean; can_unregister: boolean; can_deploy?: boolean;
-  access_links?: AccessLink[];
+  access_links?: AccessLink[]; controls_only?: boolean;
   deployment?: { source?: string; kind?: string; directory?: string };
   unregister_reason?: string; can_change_mode: boolean; resources?: ServiceResources; operations: Array<Receipt & { id: string; updated_at: number }> }
 
@@ -87,7 +87,11 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
   const selectedPeers = listedNodes.filter(item => !item.local && item.peer?.enabled
     && item.status !== 'quarantined' && item.status !== 'disabled' && (!node || item.id === node))
   const partialCatalog = selectedPeers.some(item => !remoteDirectoryCurrent(item, directories.get(item.id)))
-  const readOnlyCatalog = selectedPeers.some(item => directories.get(item.id)?.catalog_read_only)
+  const upgradeCatalog = selectedPeers.some(item => directories.get(item.id)?.catalog_upgrade_required)
+  const readOnlyCatalog = selectedPeers.some(item => {
+    const directory = directories.get(item.id)
+    return directory?.catalog_read_only && !directory.catalog_upgrade_required
+  })
   const rows = [
     ...(services.data || []).map(service => ({ service, node: localId, name: localName, local: true, stale: !!services.error || service.observation.stale, observation: service.observation })),
     ...entries.map(entry => ({ service: entry.service, node: entry.node.id, name: entry.node.name, local: false,
@@ -96,15 +100,16 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
   ].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN') || a.node.localeCompare(b.node)
     || a.service.name.localeCompare(b.service.name, 'zh-CN') || a.service.id.localeCompare(b.service.id))
   const targets = [
-    { node: localId, id: 'local', label: localName, available: !!localGroups.data && !localGroups.error && !services.error, groups: localGroups.data || [] },
+    { node: localId, id: 'local', label: localName, available: !!localGroups.data && !localGroups.error && !services.error, canEdit: true, groups: localGroups.data || [] },
     ...listedNodes.filter(item => !item.local && directories.get(item.id)?.service_groups !== undefined).map(item => {
       const directory = directories.get(item.id)
       return { node: item.id, id: item.id, label: item.name,
         available: !error && !directory?.catalog_read_only && remoteDirectoryCurrent(item, directory),
+        canEdit: !directory?.catalog_controls_only,
         groups: directory?.service_groups || [] }
     }),
   ].map(target => ({ ...target, services: rows.filter(row => row.node === target.node).map(row => row.service) }))
-  const selectableTargets = targets.filter(target => (!embedded || target.node === initialNode) && target.available && target.services.length)
+  const selectableTargets = targets.filter(target => (!embedded || target.node === initialNode) && target.available && target.canEdit && target.services.length)
   const preferredTarget = selectableTargets.find(target => target.node === node) ?? selectableTargets[0]
   const searchTerm = search.trim().toLowerCase()
   function statusMatches(row: typeof rows[number]) {
@@ -131,6 +136,7 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
   }
   function serviceRow(row: typeof rows[number], options?: { statusOnly: boolean; groupRunning: boolean }) {
     const href = withReturn(row.local ? localServiceHref(row.service.id) : remoteServiceHref(row.node, row.service.id))
+    const directory = directories.get(row.node)
     return <tr className={options ? 'service-group-child' : undefined} key={row.service.id}><td>
       {options?.statusOnly ? <strong>{row.service.name}</strong> : <a className="text-link" href={href}><strong>{row.service.name}</strong></a>}
       <small className="table-secondary">{row.service.driver === 'docker' ? 'Docker 容器' : '系统服务 / 程序'}</small>
@@ -141,7 +147,7 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
           path={row.local ? `/services/${row.service.id}` : `/peers/${row.node}/services/${row.service.id}`}
           name={row.service.name} status={row.observation?.status} allowed={options?.groupRunning ? [] : row.service.actions}
           version={row.service.version || 1} stale={row.stale}
-          blocked={options?.groupRunning || directories.get(row.node)?.catalog_read_only}
+          blocked={options?.groupRunning} readOnly={directory?.catalog_read_only} controlsOnly={directory?.catalog_controls_only}
           detailsHref={href} logsHref={withReturn(row.local ? localServiceHref(row.service.id, 'logs') : remoteServiceHref(row.node, row.service.id, true))} />}</td>
     </tr>
   }
@@ -154,6 +160,7 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
     {preferredTarget && <button type="button" className="btn btn-secondary" onClick={() => setEditor({ target: preferredTarget.id })}>新建服务组</button>}</div>}
     <div className="workspace-summary"><strong>{rows.length} 个{partialCatalog ? '已显示服务' : '已登记服务'}</strong><span>{rows.filter(row => !row.stale && row.observation?.status === 'running').length} 个运行中</span>
       <span role="status">{services.error || error || partialCatalog ? '部分节点的服务目录暂不可用' : ''}</span></div>
+    {upgradeCatalog && <Notice tone="amber">部分节点需要更新后才能使用本次登录的服务操作权限。<a href="#/maintenance">查看群组更新</a></Notice>}
     {readOnlyCatalog && <Notice tone="amber">管理远程服务或读取日志需要<a href="#/identity">授权当前面板</a>。</Notice>}
     <Panel><div className="workspace-filters"><label className="search-box"><Icon name="search" size={16} /><input aria-label="搜索服务" value={search} onChange={e => update('q', e.target.value)} placeholder="搜索服务、节点或程序名称…" /></label>
       <select className="input" aria-label="按节点筛选" value={node} disabled={embedded} onChange={e => update('node', e.target.value)}><option value="">全部节点</option>{listedNodes.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
@@ -191,32 +198,33 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
   </>
 }
 
-function ServiceRowActions({ target, serviceId, nodeName, path, name, status, allowed, version, stale, blocked, detailsHref, logsHref }: {
+function ServiceRowActions({ target, serviceId, nodeName, path, name, status, allowed, version, stale, blocked, readOnly, controlsOnly, detailsHref, logsHref }: {
   target: string; serviceId: string; nodeName: string
-  path: string; name: string; status?: string; allowed: readonly string[]; version: number; stale: boolean; blocked?: boolean; detailsHref: string; logsHref: string
+  path: string; name: string; status?: string; allowed: readonly string[]; version: number; stale: boolean; blocked?: boolean; readOnly?: boolean; controlsOnly?: boolean; detailsHref: string; logsHref: string
 }) {
   const { session } = useConsole()
   const flow = useServiceOperation(path, session, version, refreshConsole)
   const [confirmRemoval, setConfirmRemoval] = useState(false)
   const availableAction = status === 'running' ? 'stop' : status === 'stopped' || status === 'failed' ? 'start' : undefined
+  const actionBlock = flow.tracking ? '操作执行中，等待回执' : readOnly ? '当前会话尚未授权远程服务操作' : stale ? '状态待确认' : undefined
   return <div className="service-row-actions">
     <div className="service-action-icons" role="group" aria-label={`${name} 的操作`}>
       {(['start', 'stop'] as const).map(action => <button key={action} type="button"
         className={`icon-button service-action-${action}`} aria-label={`${actionNames[action]} ${name}`}
-        title={flow.tracking ? '操作执行中，等待回执' : stale ? '状态待确认' : !allowed.includes(action) ? '当前服务不支持此操作' : `${actionNames[action]} ${name}`}
-        disabled={flow.tracking || stale || availableAction !== action || !allowed.includes(action)} onClick={() => {
+        title={actionBlock ?? (!allowed.includes(action) ? '当前服务不支持此操作' : `${actionNames[action]} ${name}`)}
+        disabled={!!actionBlock || availableAction !== action || !allowed.includes(action)} onClick={() => {
           if (action === 'start' || confirm(`停止 ${name}？操作由所属节点执行。`)) void flow.submit(action)
         }}><Icon name={action === 'start' ? 'play' : 'stop'} size={16} /></button>)}
       <a className="icon-button" title={`查看 ${name} 详情`} aria-label={`查看 ${name} 详情`} href={detailsHref}><Icon name="info" size={16} /></a>
       <a className="icon-button" title={`查看 ${name} 日志`} aria-label={`查看 ${name} 日志`} href={logsHref}><Icon name="file-text" size={16} /></a>
       <button type="button" className="icon-button" aria-label={`重启 ${name}`}
-        title={flow.tracking ? '操作执行中，等待回执' : stale ? '状态待确认' : !allowed.includes('restart') ? '当前服务不支持重启' : `重启 ${name}`}
-        disabled={flow.tracking || stale || !availableAction || !allowed.includes('restart')} onClick={() => {
+        title={actionBlock ?? (!allowed.includes('restart') ? '当前服务不支持重启' : `重启 ${name}`)}
+        disabled={!!actionBlock || !availableAction || !allowed.includes('restart')} onClick={() => {
           if (confirm(`重启 ${name}？操作由所属节点执行。`)) void flow.submit('restart')
         }}><Icon name="refresh" size={16} /></button>
       <button type="button" className="icon-button service-action-unregister" aria-label={`取消登记 ${name}`}
-        title={flow.tracking ? '操作执行中，等待回执' : `取消登记 ${name}`}
-        disabled={flow.tracking || blocked} onClick={() => setConfirmRemoval(true)}><Icon name="x" size={16} /></button>
+        title={readOnly || controlsOnly ? '取消登记需要远程服务管理授权' : flow.tracking ? '操作执行中，等待回执' : `取消登记 ${name}`}
+        disabled={flow.tracking || blocked || readOnly || controlsOnly} onClick={() => setConfirmRemoval(true)}><Icon name="x" size={16} /></button>
     </div>
     {flow.tracking && (flow.intent?.operation?.status === 'uncertain'
       ? <button type="button" className="service-action-receipt" onClick={() => void flow.query()}>查询原请求</button>
@@ -341,7 +349,8 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
       </div>
     </div>}
     {current && tab === 'logs' && <ServiceLogs path={path} serviceId={id} onUnauthorized={onUnauthorized} remote={!local} active={!unavailable && current.logs_available !== false} />}
-    {current && tab === 'links' && <ServiceAccessLinks links={current.access_links} version={current.version ?? 1}
+    {current?.controls_only && tab === 'links' && <Notice tone="amber">查看访问链接需要远程服务管理授权。<a href="#/identity">授权当前面板</a></Notice>}
+    {current && !current.controls_only && tab === 'links' && <ServiceAccessLinks links={current.access_links} version={current.version ?? 1}
       canEdit={current.can_edit_details && !writeBlocked}
       onSave={async (links, version) => {
         const updated = await workspace<Detail>(target, session, 'edit',
@@ -352,15 +361,16 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
       }} />}
     {current && tab === 'history' && <Panel title="此服务的操作记录">{current.operations.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>动作</th><th>结果</th><th>时间</th><th>说明</th></tr></thead><tbody>{current.operations.map(item => <tr key={item.id}><td>{actionNames[item.action as keyof typeof actionNames] || item.action}</td><td><StateBadge state={item.status} /></td><td>{timestamp(item.updated_at)}</td><td>{item.message || receiptReason(item) || '—'}</td></tr>)}</tbody></table></div> : <EmptyState title="此服务暂无操作记录" />}</Panel>}
     {current && tab === 'settings' && <Panel className="service-settings-panel">
+      {current.controls_only && <Notice tone="amber">修改服务配置需要远程服务管理授权。<a href="#/identity">授权当前面板</a></Notice>}
       <div className="service-setting-row"><span className="service-setting-label">服务名称</span><strong className="service-setting-value">{current.name}</strong>
         <button className="btn btn-secondary btn-small" disabled={writeBlocked || !current.can_edit_details} onClick={() => setEditing(true)}>重命名</button></div>
       <div className="service-setting-row"><span className="service-setting-label">管理方式</span>
         <fieldset className="service-mode-options" aria-label="管理方式" disabled={runtimeBlocked || !current.can_change_mode}>
           <label><input type="radio" name="service-management-mode" value="manage" checked={current.managed} onChange={() => void mutate('mode', { mode: 'manage' })} />托管启停</label>
           <label><input type="radio" name="service-management-mode" value="observe" checked={!current.managed} onChange={() => void mutate('mode', { mode: 'observe' })} />观察模式</label>
-        </fieldset>{current.runtime === 'systemd-system' && !current.managed && <HostServiceAuthorization nodeId={target} session={session} onUnauthorized={onUnauthorized}
+        </fieldset>{!current.controls_only && current.runtime === 'systemd-system' && !current.managed && <HostServiceAuthorization nodeId={target} session={session} onUnauthorized={onUnauthorized}
           disabled={busy} onAuthorized={() => { void mutate('mode', { mode: 'manage' }) }} />}</div>
-      {current.driver === 'docker' && <div className="service-setting-row"><span className="service-setting-label">Docker 访问</span>
+      {!current.controls_only && current.driver === 'docker' && <div className="service-setting-row"><span className="service-setting-label">Docker 访问</span>
         <HostServiceAuthorization nodeId={target} session={session} onUnauthorized={onUnauthorized} scope="docker"
           disabled={busy} onAuthorized={() => { detail.reload(); refreshConsole() }} /></div>}
       {current.command && <details className="service-settings-command"><summary>启动命令</summary><pre className="command-block">{current.command}</pre></details>}

@@ -15,7 +15,7 @@ export function GroveDeviceAccess({ onSession }: { onSession: (session: Session)
     try {
       if (!request) {
         const value = await api<Record<string, unknown>>('/auth/grove/device/challenge', {
-          method: 'POST', headers, body: JSON.stringify({ username: String(form.get('username')).trim() }),
+          method: 'POST', headers, body: JSON.stringify({ username: String(form.get('username')).trim(), service_controls: true }),
         })
         setRequest(value)
       } else {
@@ -45,6 +45,8 @@ export function GroveDeviceAccess({ onSession }: { onSession: (session: Session)
         <button type="button" className="btn btn-secondary" onClick={download}>下载登录请求</button>
         <div className="grove-account-secret"><strong>面板标识</strong><CopyValue value={String(request.source)} /></div>
         <p>在持有 Grove 设备密钥的设备上签名，将签名文件内容粘贴到这里。</p>
+        {Array.isArray(request.scopes) && request.scopes.includes('service-control') &&
+          <p className="muted">本次设备登录同时开启远程服务启停、重启和日志访问，授权随登录会话结束。</p>}
         <label className="field-label">设备签名<textarea className="input" name="proof" maxLength={32768} autoComplete="off" required /></label>
       </>}
       {error && <Notice tone="red">{error}</Notice>}

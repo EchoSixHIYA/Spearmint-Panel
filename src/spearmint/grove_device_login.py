@@ -1,7 +1,7 @@
 """Authenticate a Grove user using a one-use challenge and a device-held key."""
 from hashlib import sha256
 import json
-from secrets import token_hex
+from secrets import token_urlsafe
 from threading import Lock
 import time
 from types import SimpleNamespace
@@ -22,7 +22,7 @@ def profile_for(db, username):
     return record['profile'] if record is not None else grove_accounts.legacy_profile(db, username)
 
 
-def challenge(state, username, address):
+def challenge(state, username, address, *, service_controls=False):
     now = int(time.time())
     with auth.authentication_attempt(state, address, now, username=username) as (db, _):
         if grove_login.usable_replica(db, now, operational=True) is None:
@@ -32,15 +32,19 @@ def challenge(state, username, address):
         if profile is None or not profile['enabled']:
             raise PeerError('DENIED', 'Grove 账号暂不可用。')
         identity = admin_revision(db, anchor['realm_id'], profile['id'], require_admin=False)
-        subject = SimpleNamespace(token_hash=auth.digest(token_hex(32)))
-        value = grove_authorization.challenge(db, subject, state.identity()[0], identity, ['signin'])
+        changed_role = db.execute('SELECT role FROM grove_login_role WHERE user_id=?', (profile['id'],)).fetchone()
+        effective_role = changed_role['role'] if changed_role else profile['role']
+        scopes = grove_authorization.SERVICE_SIGNIN if service_controls and effective_role == 'node_admin' else ['signin']
+        token = token_urlsafe(32)
+        subject = SimpleNamespace(token_hash=auth.digest(token))
+        value = grove_authorization.challenge(db, subject, state.identity()[0], identity, scopes)
     with _lock:
-        for key, current in tuple(_pending.items()):
+        for key, (current, _) in tuple(_pending.items()):
             if current['expires_at'] <= now:
                 del _pending[key]
         if len(_pending) >= CHALLENGE_LIMIT:
             raise PeerError('BUSY', '请稍后再申请登录验证。')
-        _pending[(state.directory, value['nonce'])] = value
+        _pending[(state.directory, value['nonce'])] = (value, token)
     return value
 
 
@@ -50,7 +54,7 @@ def finish(state, proof, address):
         nonce = grant['nonce']
         with _lock:
             pending = _pending.get((state.directory, nonce))
-        if pending is None or pending != grant:
+        if pending is None or pending[0] != grant:
             raise ValueError
     except (KeyError, TypeError, ValueError) as error:
         raise PeerError('DENIED', '登录请求已过期，请重新生成。') from error
@@ -83,7 +87,13 @@ def finish(state, proof, address):
         audit(db, account_id, address, 'grove.device_login', user_id)
         username = db.execute('SELECT username FROM panel_account WHERE id=?', (account_id,)).fetchone()[0]
         account = auth.account_for(db, username)
-        return auth.issue_session(db, account, address, now, mfa_at=now, method='grove-device', grove_replica=True)
+        service_session = 'service_until' in grant
+        session = auth.issue_session(db, account, address, now, mfa_at=now, method='grove-device', grove_replica=True,
+                                     token=pending[1], created_at=grant['issued_at'] if service_session else None)
+        if service_session:
+            owner = SimpleNamespace(token_hash=auth.digest(session[0]))
+            grove_authorization.remember_service_session(state, owner, proof, now)
+        return session
 
 
 def current_session(db, row):

@@ -57,6 +57,8 @@ export function retainServiceCatalog(previous: readonly NodeDirectory[], incomin
     for (const service of directory?.services ?? []) services.set(service.id, service)
     return [{ ...(directory ?? cached!), node_id: peer.node_id, stale: true, catalog_complete: false,
       catalog_read_only: directory?.catalog_read_only ?? cached?.catalog_read_only,
+      catalog_controls_only: directory?.catalog_controls_only ?? cached?.catalog_controls_only,
+      catalog_upgrade_required: directory?.catalog_upgrade_required ?? cached?.catalog_upgrade_required,
       services: [...services.values()], service_groups: directory?.service_groups ?? cached?.service_groups }]
   })
 }

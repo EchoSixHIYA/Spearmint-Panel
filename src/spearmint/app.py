@@ -81,6 +81,10 @@ class GroveAccountName(BaseModel):
     username: str = Field(pattern=grove_accounts.USERNAME_PATTERN)
 
 
+class GroveDeviceChallenge(GroveAccountName):
+    service_controls: bool = False
+
+
 class GroveAccountInvitation(GroveAccountName):
     role: Literal['node_admin', 'remote_operator']
 
@@ -627,10 +631,10 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         return info
 
     @app.post('/api/v1/auth/grove/device/challenge')
-    def grove_device_challenge(body: GroveAccountName, request: Request, response: Response):
+    def grove_device_challenge(body: GroveDeviceChallenge, request: Request, response: Response):
         require_origin(request)
         response.headers['Cache-Control'] = 'no-store'
-        return grove_device_login.challenge(store, body.username, address_of(request))
+        return grove_device_login.challenge(store, body.username, address_of(request), service_controls=body.service_controls)
 
     @app.post('/api/v1/auth/grove/device/login')
     async def grove_device_session(request: Request, response: Response):
@@ -932,14 +936,20 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         if target in ('local', node_id):
             return await remote.work(workspace.request, service_setup.LocalAdmin(actor), action, body)
         pair = remote.pair_for(target)
+        method = workspace.method
         try:
             # Read-only host observations are verified against membership on the target.
-            identity = (await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
-                        if action == 'host' else await remote.work(grove_service_admin.source_grant, store, node_id, pair, actor, 'services'))
+            if action == 'host':
+                identity = await remote.work(grove_service_admin.source_identity, store, node_id, pair, actor)
+            else:
+                scope = grove_authorization.SERVICE_CONTROL if action in grove_authorization.SERVICE_WORKSPACE else 'services'
+                identity = await remote.work(grove_service_admin.source_grant, store, node_id, pair, actor, scope)
+                if grove_authorization.has_service_session(identity):
+                    method = workspace.runtime_method
         except PeerError as error:
             remote.record_failure(target, f'workspace.{action}', 'local_identity', error)
             raise
-        return await remote.call(target, workspace.method, {'identity': identity, 'action': action, 'body': body}, diagnostic=True)
+        return await remote.call(target, method, {'identity': identity, 'action': action, 'body': body}, diagnostic=True)
 
     @app.post('/api/v1/peers/{target}/terminal/{identifier}/{action}')
     async def terminal_request(target: str, identifier: str, action: Literal['open', 'exchange', 'close', 'files'],

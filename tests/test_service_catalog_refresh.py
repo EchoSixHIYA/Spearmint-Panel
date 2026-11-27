@@ -5,15 +5,18 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pyotp import TOTP
 
 from grove_fixture import GroveFixture
-from spearmint import auth, grove_authorization, grove_availability, grove_continuity, grove_identity_changes, grove_login, grove_revocation
+from spearmint import auth, grove_authorization, grove_availability, grove_continuity, grove_device_login, grove_identity_changes, grove_login, grove_revocation
 from spearmint.catalog import register
 from spearmint.peer.directory import GROVE_CATALOG_METHOD
 from spearmint.peer.pairing import configured
-from spearmint.peer.protocol import PeerError
-from spearmint.peer.services import GROVE_SERVICE, PeerServices
+from spearmint.peer.grove_service_admin import source_grant
+from spearmint.peer.protocol import PeerError, wire_b64
+from spearmint.peer.services import GROVE_SERVICE, GROVE_SERVICE_RUNTIME, PeerServices
+from spearmint.peer.workspace import Workspace
 from test_grove_voters import VoterFixture
 
 
@@ -110,14 +113,16 @@ class ServiceCatalogRefreshTest(unittest.TestCase):
             token, _ = grove_login.login(source, 'admin', fixture.password, TOTP(fixture.secret).now(), '127.0.0.1')
             actor = auth.actor_for(source, token, '127.0.0.1')
 
-            register(target, 'process', 'Existing web service', 'owned.service', {
-                'runtime': 'systemd-system', 'log_path': '/private/service.log',
+            service = register(target, 'process', 'Existing web service', 'owned.service', {
+                'runtime': 'systemd-system', 'log_path': '/private/service.log', 'command': 'echo owned',
                 'service_groups': [{'id': 'a' * 32, 'name': 'Example group', 'position': 0, 'status_only': False}],
             }, managed=True)
             observed = {'status': 'running', 'source': 'process', 'checked_at': fixture.now,
                         'last_seen_at': fixture.now, 'last_status': 'running', 'stale': False, 'pid': 123}
-            recipient = SimpleNamespace(state=target, local_id=target_id, workspace=None,
-                                        controller=SimpleNamespace(describe=lambda _: {'observation': observed}))
+            controller = SimpleNamespace(describe=lambda _: {'observation': observed, 'endpoint': '/private'},
+                observe=lambda _: observed, service_metrics=SimpleNamespace(snapshot=lambda *_: {}))
+            workspace = Workspace(target, target_id, controller, None, Path(directory) / 'docker.sock')
+            recipient = SimpleNamespace(state=target, local_id=target_id, workspace=workspace, controller=controller)
             recipient.service_inventory = lambda *args, **kwargs: PeerServices.service_inventory(recipient, *args, **kwargs)
 
             with source.connect(read_only=True) as db:
@@ -129,6 +134,7 @@ class ServiceCatalogRefreshTest(unittest.TestCase):
                 state, local_id, adaptive = source, source_id, None
                 grove_service, grove_directory = PeerServices.grove_service, PeerServices.grove_directory
                 supported = True
+                runtime_supported = True
 
                 def pair_for(self, node):
                     assert node == target_id
@@ -146,6 +152,10 @@ class ServiceCatalogRefreshTest(unittest.TestCase):
                         if not self.supported:
                             raise PeerError('UNSUPPORTED_METHOD', 'Owned older panel')
                         return PeerServices.grove_inventory_rpc(recipient, source_pair, params)
+                    if method == GROVE_SERVICE_RUNTIME:
+                        if not self.runtime_supported:
+                            raise PeerError('UNSUPPORTED_METHOD', 'Owned panel still needs runtime service support')
+                        return PeerServices.grove_service_rpc(recipient, source_pair, params, grove_authorization.SERVICE_CONTROL)
                     assert method == GROVE_SERVICE
                     return PeerServices.grove_service_rpc(recipient, source_pair, params)
 
@@ -182,6 +192,54 @@ class ServiceCatalogRefreshTest(unittest.TestCase):
             self.assertTrue(signed['catalog_complete'])
             self.assertFalse(signed['catalog_read_only'])
             self.assertIn('stop', signed['services'][0]['actions'])
+
+            device = Ed25519PrivateKey.generate()
+            public = wire_b64(device.public_key().public_bytes_raw())
+            votes = [grove_authorization.key_vote(voter, 'admin', public) for voter in fixture.states[:2]]
+            legacy_challenge = grove_device_login.challenge(source, 'admin', '127.0.0.1')
+            self.assertEqual(legacy_challenge['scopes'], ['signin'])
+            challenge = grove_device_login.challenge(source, 'admin', '127.0.0.1', service_controls=True)
+            device_proof = grove_authorization.issue(device, challenge, votes)
+            token, _ = grove_device_login.finish(source, device_proof, '127.0.0.1')
+            actor = auth.actor_for(source, token, '127.0.0.1')
+            scope = grove_authorization.SERVICE_CONTROL
+            self.assertEqual(source_grant(source, source_id, target_pair, actor, scope), device_proof)
+
+            current = asyncio.run(panel.grove_directory(actor, snapshot))
+            self.assertTrue(current['catalog_controls_only'])
+            self.assertFalse(current['catalog_read_only'])
+            self.assertIn('restart', current['services'][0]['actions'])
+            self.assertTrue(current['services'][0]['logs'])
+
+            panel.runtime_supported = False
+            legacy = asyncio.run(panel.grove_directory(actor, snapshot))
+            self.assertTrue(legacy['catalog_complete'])
+            self.assertTrue(legacy['catalog_read_only'])
+            self.assertTrue(legacy['catalog_upgrade_required'])
+            self.assertEqual(legacy['services'][0]['name'], service.name)
+
+            detail = workspace.dispatch(source_pair, {'identity': device_proof, 'action': 'detail',
+                'body': {'service_id': service.id}}, scope)
+            self.assertTrue(detail['controls_only'])
+            self.assertFalse(detail['can_unregister'])
+            self.assertNotIn('command', detail)
+            self.assertNotIn('endpoint', detail)
+
+            with target.connect(read_only=True) as db:
+                expected = challenge['identity']
+                self.assertEqual(grove_authorization.verify(db, device_proof, source_id, scope,
+                    at=challenge['expires_at'] + 1), expected)
+                with self.assertRaises(PeerError):
+                    grove_authorization.verify(db, device_proof, source_id, scope, at=challenge['service_until'])
+                with self.assertRaises(PeerError):
+                    grove_authorization.verify(db, device_proof, source_id, 'services')
+
+            path = grove_authorization.service_session_path(source, actor)
+            self.assertTrue(path.is_file())
+            auth.logout(source, actor)
+            self.assertFalse(path.is_file())
+            with self.assertRaises(PeerError):
+                source_grant(source, source_id, target_pair, actor, scope)
 
     def test_failed_catalog_is_incomplete_and_cannot_remove_visible_rows(self):
         directory = {'node_id': 'owned', 'stale': False, 'services': [], 'connection_id': 'session', 'directory_generation': 1}

@@ -5,6 +5,7 @@ the current voters. Neither a Grove password nor a node key can enroll a
 delegate over RPC. A signed delegation explicitly lets its source panel act
 within the selected scope until it expires.
 """
+from contextlib import suppress
 from hashlib import sha256
 import json
 from secrets import token_hex
@@ -16,12 +17,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from . import auth, grove, grove_accounts, grove_continuity, grove_voters
 from .peer.credentials import NODE_ID
 from .peer.protocol import PeerError, parse_b64, wire_b64
+from .platforms import secure_private
 from .state import audit
 
 KINDS = {'services', 'terminal', 'deployment', 'seed', 'accounts', 'voters', 'updates', 'identity', 'join', 'self', 'signin'}
 KEY_VOTE = 'administrator-key'
 GRANT = 'administrator-delegation'
 LIFETIME = 300
+SERVICE_CONTROL = 'service-control'
+SERVICE_SIGNIN = [SERVICE_CONTROL, 'signin']
+SERVICE_WORKSPACE = {'detail', 'group-run'}
 LIMIT = 32 * 1024
 ERROR = 'GROVE_USER_AUTHORIZATION_REQUIRED'
 MESSAGE = '请先在「身份与安全」授权当前面板执行此项 Grove 管理操作。'
@@ -37,7 +42,12 @@ def http_scope(path):
         section = parts[1] if len(parts) > 1 else None
         return {'updates': 'updates', 'seed-wizard': 'seed', 'seed-targets': 'seed', 'voters': 'voters',
                 'accounts': 'accounts'}.get(section, 'identity')
+    if parts[0] == 'services' and len(parts) == 3 and parts[2] == 'actions':
+        return SERVICE_CONTROL
     if parts[0] == 'peers' and len(parts) > 2:
+        if (parts[2] == 'services' and len(parts) == 5 and parts[4] == 'actions'
+                or parts[2] == 'workspace' and len(parts) == 4 and parts[3] in SERVICE_WORKSPACE):
+            return SERVICE_CONTROL
         return {'terminal': 'terminal', 'service-deployment': 'deployment',
                 'service-deployment-upload': 'deployment'}.get(parts[2], 'services')
     return 'services'
@@ -76,7 +86,8 @@ def key_vote(state, username: str, public_key: str):
 def challenge(db, owner, node, identity, scopes, *, executor=None, joining=None):
     location, _ = context(db)
     now = int(time.time())
-    return {**location, 'identity': identity, 'source': node,
+    login_session = {'service_until': now + auth.SESSION_SECONDS} if scopes == SERVICE_SIGNIN else {}
+    return {**location, 'identity': identity, 'source': node, **login_session,
             'session': session_binding(owner), 'scopes': scopes, 'seed_executor': executor, 'joining': joining, 'issued_at': now,
             'expires_at': now + LIFETIME, 'nonce': token_hex(16)}
 
@@ -107,7 +118,7 @@ def revision(payload):
 
 
 def verify(db, payload, source, scope, *, owner=None, at=None, delegated=False):
-    """Validate an independently signed, short-lived grant for a specific source."""
+    """Validate a device signature for the specified source and permission."""
     from .peer.grove_service_admin import admin_revision, parse_identity
 
     try:
@@ -119,16 +130,29 @@ def verify(db, payload, source, scope, *, owner=None, at=None, delegated=False):
         scopes = grant['scopes']
         now = int(time.time()) if at is None else at
         issued, expires = grant['issued_at'], grant['expires_at']
-        if (set(grant) != {*location, 'identity', 'source', 'session', 'scopes', 'seed_executor', 'joining', 'issued_at', 'expires_at', 'nonce'}
+        fields = {*location, 'identity', 'source', 'session', 'scopes', 'seed_executor', 'joining', 'issued_at', 'expires_at', 'nonce'}
+        if type(issued) is not int or type(expires) is not int or not 0 < expires - issued <= LIFETIME:
+            raise ValueError
+        effective_expiry = expires
+        if 'service_until' in grant:
+            fields.add('service_until')
+            until = grant['service_until']
+            if (scopes != SERVICE_SIGNIN or type(until) is not int or until != issued + auth.SESSION_SECONDS
+                    or grant['seed_executor'] is not None or grant['joining'] is not None):
+                raise ValueError
+            if scope == SERVICE_CONTROL:
+                effective_expiry = until
+        elif not isinstance(scopes, list) or scopes != sorted(set(scopes)) or not scopes or not set(scopes) <= KINDS:
+            raise ValueError
+        accepted_scope = 'services' if scope == SERVICE_CONTROL and 'service_until' not in grant else scope
+        if (set(grant) != fields
                 or any(grant[key] != value for key, value in location.items())
-                or not isinstance(scopes, list) or scopes != sorted(set(scopes)) or not scopes or not set(scopes) <= KINDS
                 or ('join' in scopes) != (grant['joining'] is not None)
                 or grant['joining'] is not None and not valid_join(grant['joining'])
-                or scope not in scopes or not NODE_ID.fullmatch(grant['source'])
+                or accepted_scope not in scopes or not NODE_ID.fullmatch(grant['source'])
                 or grant['seed_executor'] is not None and not NODE_ID.fullmatch(grant['seed_executor'])
                 or source != grant['source'] and not (delegated and scope in {'seed', 'voters'} and source == grant['seed_executor'])
-                or type(issued) is not int or type(expires) is not int or not 0 < expires - issued <= LIFETIME
-                or not issued - grove.CLOCK_SKEW <= now < expires
+                or not issued - grove.CLOCK_SKEW <= now < effective_expiry
                 or owner is not None and grant['session'] != session_binding(owner)
                 or not isinstance(grant['session'], str) or len(grant['session']) != 64
                 or not isinstance(grant['nonce'], str) or len(grant['nonce']) != 32):
@@ -167,6 +191,8 @@ def enrollment(state, actor, payload, *, required_scope=None):
 
     try:
         grant = unsigned(payload['grant'])
+        if 'service_until' in grant:
+            raise ValueError
         scope = required_scope if required_scope is not None else grant['scopes'][0]
     except (KeyError, ValueError, TypeError, IndexError) as error:
         raise PeerError(ERROR, MESSAGE) from error
@@ -195,6 +221,44 @@ def self_proof(state, actor):
         if session is None or not session['grove_replica'] or identity[1] != session['grove_user']:
             raise PeerError(ERROR, MESSAGE)
     return proof
+
+
+def has_service_session(proof) -> bool:
+    return 'service_until' in unsigned(proof['grant'])
+
+
+def service_session_path(state, owner):
+    return state.directory / 'grove-service-sessions' / (session_binding(owner) + '.json')
+
+
+def remember_service_session(state, owner, proof, now):
+    from .update_worker import write_record
+
+    path = service_session_path(state, owner)
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    secure_private(path.parent, 0o700)
+    write_record(path, proof)
+    for expired in path.parent.glob('*.json'):
+        with suppress(OSError):
+            if expired != path and expired.stat().st_mtime <= now - auth.SESSION_SECONDS:
+                expired.unlink(missing_ok=True)
+
+
+def forget_service_session(state, owner):
+    with suppress(OSError):
+        service_session_path(state, owner).unlink(missing_ok=True)
+
+
+def service_session(state, owner):
+    from .update_worker import read_record
+
+    try:
+        data = read_record(service_session_path(state, owner))
+        if data is not None:
+            return data
+    except (OSError, ValueError):
+        pass
+    raise PeerError(ERROR, MESSAGE)
 
 
 def enrolled(state, actor):

@@ -1,6 +1,7 @@
 """Read and edit a Grove node's service workspace using its current login identity."""
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError, field_validator
 
+from .. import grove_authorization
 from ..catalog import get_service
 from ..control import ControlError, operation_data
 from ..platforms import capabilities
@@ -59,20 +60,23 @@ class Mode(Versioned):
 
 class Workspace:
     method = 'grove.workspace.v1'
+    runtime_method = 'grove.workspace.runtime.v1'
 
     def __init__(self, state, node_id, controller, metrics, docker_socket, groups=None):
         self.state, self.node_id, self.controller = state, node_id, controller
         self.metrics, self.docker_socket = metrics, docker_socket
         self.groups = groups
 
-    def dispatch(self, pair, params):
-        if params.keys() != {'identity', 'action', 'body'}:
+    def dispatch(self, pair, params, scope='services'):
+        if params.keys() != {'identity', 'action', 'body'} or not isinstance(params['action'], str):
             raise PeerError('INVALID_REQUEST', 'Invalid workspace request')
+        if scope == grove_authorization.SERVICE_CONTROL and params['action'] not in grove_authorization.SERVICE_WORKSPACE:
+            raise PeerError('INVALID_REQUEST', 'Invalid service session request')
         if params['action'] == 'host':
             with self.state.connect(read_only=True) as db:
                 require_member(db, self.node_id, pair)
             return self.host(params['body'])
-        actor = GroveServiceAdmin.from_wire(self.node_id, pair, params['identity'], 'services')
+        actor = GroveServiceAdmin.from_wire(self.node_id, pair, params['identity'], scope)
         return self.request(actor, params['action'], params['body'])
 
     def host(self, body):
@@ -135,10 +139,17 @@ class Workspace:
         described = self.controller.describe(service)
         foreground = service.driver == 'process' and not service.existing_system_service
         stopped = described['observation']['status'] in {'stopped', 'failed'} and not described['observation']['stale']
+        resources = self.controller.service_metrics.snapshot(service, observation)
+        if isinstance(actor, GroveServiceAdmin) and actor.scope == grove_authorization.SERVICE_CONTROL:
+            described.pop('endpoint', None)
+            described.pop('registered_target', None)
+            return {**described, 'node_id': self.node_id, 'operations': operations, 'resources': resources,
+                    'managed': service.managed, 'can_edit_details': False, 'can_change_mode': False, 'can_unregister': False,
+                    'controls_only': True}
         return {**described, 'node_id': self.node_id, 'operations': operations, 'command': service.spec.get('command'),
                 'access_links': service.spec.get('access_links', []),
                 'deployment': service.spec.get('deployment'), 'can_deploy': owns_code(service),
-                'resources': self.controller.service_metrics.snapshot(service, observation),
+                'resources': resources,
                 'can_edit_details': True, 'can_unregister': not protected and not mapped and (not foreground or stopped),
                 'unregister_reason': '请先撤销此服务的公网映射，再取消登记。' if mapped else '请先停止此程序，再取消登记。' if foreground and not stopped else None,
                 'can_change_mode': not foreground, 'managed': service.managed, 'approval_required': False}

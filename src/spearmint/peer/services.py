@@ -61,6 +61,7 @@ LOCAL_SLOTS = 8
 RECOVERABLE = {"NO_ROUTE", "ROUTE_LOST", "OFFLINE", "TIMEOUT"}
 HEALTH_METHODS = {"catalog.sync": CATALOG_HEALTH_METHOD, "service.status": STATUS_HEALTH_METHOD}
 GROVE_SERVICE = 'service.grove_admin'
+GROVE_SERVICE_RUNTIME = 'service.grove_runtime.v1'
 
 
 class PreparedDirectory(NamedTuple):
@@ -540,12 +541,16 @@ class PeerServices:
             return await self.work(self.grove_inventory_rpc, pair, params, rpc=True, optional=optional)
         if method == GROVE_SERVICE:
             return await self.work(self.grove_service_rpc, pair, params, rpc=True)
+        if method == GROVE_SERVICE_RUNTIME:
+            return await self.work(self.grove_service_rpc, pair, params, grove_authorization.SERVICE_CONTROL, rpc=True)
         if self.service_setup is not None and method == self.service_setup.method:
             return await self.work(self.service_setup.dispatch, pair, params, rpc=True)
         if self.terminals is not None and method == self.terminals.method:
             return await self.work(self.terminals.dispatch, pair, params, rpc=True)
         if self.workspace is not None and method == self.workspace.method:
             return await self.work(self.workspace.dispatch, pair, params, rpc=True)
+        if self.workspace is not None and method == self.workspace.runtime_method:
+            return await self.work(self.workspace.dispatch, pair, params, grove_authorization.SERVICE_CONTROL, rpc=True)
         if self.service_deployments is not None and method in self.service_deployments.methods:
             return await self.work(self.service_deployments.dispatch, pair, params, rpc=True)
         if method in frp_access.METHODS:
@@ -1882,10 +1887,10 @@ class PeerServices:
                                             OBSERVATION_TTL, include_health=True)}
                 for service in services]
 
-    def grove_service_rpc(self, pair: Pair, params: dict) -> dict:
+    def grove_service_rpc(self, pair: Pair, params: dict, scope: str = 'services') -> dict:
         if params.keys() != {'identity', 'action', 'body'} or not isinstance(params['body'], dict):
             raise PeerError('INVALID_REQUEST', 'Invalid Grove service request')
-        actor = GroveServiceAdmin.from_wire(self.local_id, pair, params['identity'], 'services')
+        actor = GroveServiceAdmin.from_wire(self.local_id, pair, params['identity'], scope)
         action, body = params['action'], params['body']
         if action == 'catalog' and not body:
             with self.state.connect() as db:
@@ -1935,7 +1940,9 @@ class PeerServices:
         pair = self.pair_for(node_id)
         method = GROVE_SERVICE
         try:
-            identity = await self.work(source_grant, self.state, self.local_id, pair, actor, 'services')
+            identity = await self.work(source_grant, self.state, self.local_id, pair, actor, grove_authorization.SERVICE_CONTROL)
+            if grove_authorization.has_service_session(identity):
+                method = GROVE_SERVICE_RUNTIME
             params = {'identity': identity, 'action': action, 'body': body}
         except PeerError as error:
             if action == 'catalog' and not body and error.code == grove_authorization.ERROR:
@@ -1954,21 +1961,37 @@ class PeerServices:
             if (selected is None or selected[0].connection_id != connection_id
                     or (directory_generation is not None and selected[1] != directory_generation)):
                 raise PeerError('DIRECTORY_CHANGED' if action == 'submit' else 'ROUTE_LOST', 'The service directory changed')
+        async def request(rpc, payload):
+            if selected is None:
+                return await self.call(node_id, rpc, payload, diagnostic=True)
+            if self.adaptive and self.adaptive.admitted(pair):
+                self.adaptive.touch(node_id)
+            result = await selected[0].call(rpc, payload)
+            if action != 'submit' and selected != self.directory_publication(node_id):
+                raise PeerError('ROUTE_LOST', 'The service directory changed')
+            return result
+
+        upgrade_required = False
         try:
-            if selected is not None:
-                if self.adaptive and self.adaptive.admitted(pair):
-                    self.adaptive.touch(node_id)
-                result = await selected[0].call(method, params)
-                if action != 'submit' and selected != self.directory_publication(node_id):
-                    raise PeerError('ROUTE_LOST', 'The service directory changed')
-            else:
-                result = await self.call(node_id, method, params, diagnostic=True)
+            if method == GROVE_SERVICE_RUNTIME and action == 'catalog':
+                try:
+                    return {**await request(method, params), 'catalog_controls_only': True}
+                except PeerError as error:
+                    if error.code != 'UNSUPPORTED_METHOD':
+                        raise
+                    # Older nodes still publish read-only inventory during a rolling update.
+                    method, params = GROVE_CATALOG_METHOD, {}
+                    upgrade_required = True
+            result = await request(method, params)
             if method == GROVE_CATALOG_METHOD:
-                return {**result, 'catalog_read_only': True}
+                return {**result, 'catalog_read_only': True, 'catalog_upgrade_required': upgrade_required}
             return result
         except PeerError as error:
             if error.code == 'UNSUPPORTED_METHOD':
-                return {'catalog_read_only': True} if method == GROVE_CATALOG_METHOD else None
+                if method == GROVE_CATALOG_METHOD:
+                    return {'catalog_read_only': True, 'catalog_upgrade_required': upgrade_required}
+                if method == GROVE_SERVICE:
+                    return None
             PeerServices.record_failure(self, node_id, f'{method}.{action}', 'remote_rpc', error)
             raise
 
@@ -1983,13 +2006,13 @@ class PeerServices:
             return {**directory, 'stale': True, 'catalog_complete': False}
         if result is None:
             return {**directory, 'catalog_complete': not actor.grove, 'stale': directory['stale'] or actor.grove}
-        read_only = result.get('catalog_read_only', False)
+        flags = {key: result.get(key, False) for key in ('catalog_read_only', 'catalog_controls_only', 'catalog_upgrade_required')}
         if 'services' not in result:
-            return {**directory, 'catalog_complete': False, 'stale': True, 'catalog_read_only': read_only}
+            return {**directory, **flags, 'catalog_complete': False, 'stale': True}
         services = {item['id']: item for item in directory['services']}
         for item in result['services']:
             services[item['id']] = item
-        return {**directory, 'catalog_complete': True, 'catalog_read_only': read_only,
+        return {**directory, **flags, 'catalog_complete': True,
                 **({'service_groups': result['service_groups']} if 'service_groups' in result else {}),
                 'services': sorted(services.values(), key=lambda item: (item['name'], item['id']))}
 

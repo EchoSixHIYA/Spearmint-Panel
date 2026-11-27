@@ -18,7 +18,8 @@ export type RemoteService = {
   observation: RemoteObservation | null
 }
 
-export type RemoteDirectory = { stale: boolean; catalog_complete?: boolean; catalog_read_only?: boolean;
+export type RemoteDirectory = { stale: boolean; catalog_complete?: boolean; catalog_read_only?: boolean; catalog_controls_only?: boolean;
+  catalog_upgrade_required?: boolean;
   connection_id?: string | null; directory_generation?: number | null;
   services: RemoteService[]; service_groups?: ServiceGroup[] }
 export type NodeDirectory = RemoteDirectory & { node_id: string }

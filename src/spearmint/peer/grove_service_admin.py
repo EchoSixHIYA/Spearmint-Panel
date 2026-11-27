@@ -98,10 +98,18 @@ def require_admin_identity(db, local_id: str, pair: Pair | None, identity, scope
 
 def source_grant(state, local_id, pair, actor, scope):
     identity = source_identity(state, local_id, pair, actor)
-    proof = grove_authorization.enrolled(state, actor)
     with state.connect(read_only=True) as db:
         db.execute('BEGIN')
-        if grove_authorization.verify(db, proof, local_id, scope, owner=actor) != identity:
+        try:
+            proof = grove_authorization.enrolled(state, actor)
+            verified = grove_authorization.verify(db, proof, local_id, scope, owner=actor)
+        except PeerError as error:
+            if scope != grove_authorization.SERVICE_CONTROL or error.code != grove_authorization.ERROR:
+                raise
+            account_admin(db, actor)
+            proof = grove_authorization.service_session(state, actor)
+            verified = grove_authorization.verify(db, proof, local_id, scope, owner=actor)
+        if verified != identity:
             raise PeerError(grove_authorization.ERROR, grove_authorization.MESSAGE)
     return proof
 
