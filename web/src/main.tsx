@@ -13,7 +13,7 @@ import { AccessPage, OperationsPage } from './security-pages'
 import { Sessions } from './sessions'
 import { SignIn } from './sign-in'
 import { GroveAccountAccess } from './grove-account-access'
-import { GroveDeviceAccess, GroveDeviceReturn } from './grove-device-access'
+import { GroveDeviceAccess } from './grove-device-access'
 import { FirstFactor, Setup, takeSetupEntry } from './onboarding'
 import { GroveAuthorize, GroveReturn, takeGroveDestination, takeGroveReturn } from './grove-auth'
 import { rememberQuorumInvitation } from './grove-invitation'
@@ -136,10 +136,6 @@ function App() {
       if (completed) expireSession()
       location.hash = completed ? '#/signin' : '#/overview'
     }} />
-  if (route.page === 'grove-device-login' && route.id) return <GroveDeviceReturn ticket={route.id} onSession={(current) => {
-    location.replace('#/services')
-    signedIn(current)
-  }} />
   if (!session && route.page === 'grove-device-login') return <GroveDeviceAccess onSession={signedIn} />
   if (!session && (route.page === 'grove-register' || route.page === 'grove-forgot')) return <GroveAccountAccess
     key={route.page} mode={route.page === 'grove-register' ? 'register' : 'reset'} />

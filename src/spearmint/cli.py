@@ -6,16 +6,13 @@ from ipaddress import ip_address
 import json
 import os
 from pathlib import Path
-import re
 from socket import socket
 import sqlite3
 import ssl
 import sys
 from threading import Thread
 import time
-from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 from urllib.parse import urlsplit
-import webbrowser
 
 import uvicorn
 from cryptography.exceptions import InvalidSignature
@@ -635,50 +632,6 @@ def service_cli(config: Config, state: State, args: Namespace) -> None:
                 unregister(state, args.id)
 
 
-def sign_grove_request(challenge, args):
-    if challenge.get('source') != args.source_id or not NODE_ID.fullmatch(args.source_id):
-        raise StateError('The request names a different Grove panel')
-    approvals = [read_document(path, limit=2048) for path in args.approval]
-    key_path = args.operator_key.expanduser().absolute()
-    private_path(key_path, 0o600)
-    key = load_pem_private_key(read_pem(key_path), password=passphrase())
-    if not isinstance(key, Ed25519PrivateKey):
-        raise StateError('Use an independent Ed25519 operator key')
-    key_id = wire_b64(key.public_key().public_bytes_raw())
-    for document in approvals:
-        raw = grove_authorization.unsigned(document)
-        if (raw['key'] != key_id or any(raw[field] != challenge[field] for field in ('identity', 'anchor', 'configuration'))):
-            raise StateError('A voter approval belongs to a different key, account or Grove configuration')
-    proof = grove_authorization.issue(key, challenge, approvals)
-    if rolling := grove_authorization.rolling_update_challenge(challenge):
-        proof['rolling_update'] = grove_authorization.issue(key, rolling, approvals)
-    return proof
-
-
-def grove_device_signin(args):
-    origin = grove.origin(args.panel)
-    if not onboarding.loopback_host(urlsplit(origin).hostname):
-        raise StateError('Use this shortcut with the local HTTPS panel')
-    context = ssl.create_default_context(cafile=args.ca)
-    opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context), mesh_enrollment.NoRedirect())
-
-    def post(path, body):
-        headers = {'Content-Type': 'application/json', 'Origin': origin}
-        request = Request(origin + '/api/v1/auth/grove/device/' + path, data=grove.encoded(body), headers=headers)
-        with opener.open(request, timeout=10) as response:
-            return json.loads(response.read(grove_authorization.LIMIT + 1))
-
-    challenge = post('challenge', {'username': args.username, 'session_authorization': True})
-    if challenge.get('scopes') not in (grove_authorization.ADMIN_SIGNIN, grove_authorization.ACCOUNT_SIGNIN):
-        raise StateError('The panel did not return a Grove login request')
-    proof = sign_grove_request(challenge, args)
-    ticket = post('start-browser', proof).get('ticket')
-    if not isinstance(ticket, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', ticket):
-        raise StateError('The panel did not return a valid browser login')
-    if not webbrowser.open(origin + '/#/grove-device-login/' + ticket):
-        raise StateError('Could not open the browser. Run Grove device sign-in again to retry')
-
-
 def main() -> int:
     parser = ArgumentParser(prog="spearmint")
     parser.add_argument("--state-dir", type=Path, help="Override SPEARMINT_STATE_DIR for this command")
@@ -724,13 +677,6 @@ def main() -> int:
     grant.add_argument('--operator-key', type=Path, required=True)
     grant.add_argument('--source-id', required=True)
     grant.add_argument('--approval', type=Path, action='append', default=[])
-    signin = subparsers.add_parser('grove-device-signin', help='Verify the Grove login on this device and open the signed-in panel')
-    signin.add_argument('panel', help='HTTPS origin of the panel')
-    signin.add_argument('username', help='Grove account name')
-    signin.add_argument('--operator-key', type=Path, required=True)
-    signin.add_argument('--source-id', required=True)
-    signin.add_argument('--approval', type=Path, action='append', default=[])
-    signin.add_argument('--ca', help='Trusted certificate file for the panel')
     migrate = subparsers.add_parser("migrate", help="Back up and upgrade the SQLite schema with the panel stopped")
     migration = migrate.add_mutually_exclusive_group(required=True)
     migration.add_argument("--backup", type=Path, help="Directory for the verified pre-upgrade backup")
@@ -825,12 +771,27 @@ def main() -> int:
             return 0
         if args.command == 'sign-grove-authorization':
             challenge = read_document(args.challenge, limit=4096)
+            if challenge.get('source') != args.source_id or not NODE_ID.fullmatch(args.source_id):
+                raise StateError('The authorization names a different source panel')
+            approvals = [read_document(path, limit=2048) for path in args.approval]
             print(json.dumps({key: challenge.get(key) for key in ('source', 'identity', 'scopes', 'seed_executor', 'joining', 'expires_at')},
                              ensure_ascii=False, indent=2))
-            write_new(args.output, grove.encoded(sign_grove_request(challenge, args)))
-            return 0
-        if args.command == 'grove-device-signin':
-            grove_device_signin(args)
+            key_path = args.operator_key.expanduser().absolute()
+            private_path(key_path, 0o600)
+            key = load_pem_private_key(read_pem(key_path), password=passphrase())
+            if not isinstance(key, Ed25519PrivateKey):
+                raise StateError('Use an independent Ed25519 operator key')
+            key_id = wire_b64(key.public_key().public_bytes_raw())
+            approved = []
+            for document in approvals:
+                raw = grove_authorization.unsigned(document)
+                if (raw['key'] != key_id or any(raw[field] != challenge[field] for field in ('identity', 'anchor', 'configuration'))):
+                    raise StateError('A voter approval belongs to a different key, account or Grove configuration')
+                approved.append(document)
+            proof = grove_authorization.issue(key, challenge, approved)
+            if rolling_update := grove_authorization.rolling_update_challenge(challenge):
+                proof['rolling_update'] = grove_authorization.issue(key, rolling_update, approved)
+            write_new(args.output, grove.encoded(proof))
             return 0
         if not WINDOWS and os.getuid() == 0:
             raise StateError("Run Spearmint as its dedicated non-root account")

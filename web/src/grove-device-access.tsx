@@ -1,25 +1,6 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import { api, type Session } from './api'
-import { AuthStory, CopyValue, Loading, Notice } from './ui'
-
-export function GroveDeviceReturn({ ticket, onSession }: { ticket: string; onSession: (session: Session) => void }) {
-  const [error, setError] = useState('')
-  useEffect(() => {
-    const controller = new AbortController()
-    api<Session>('/auth/grove/device/finish-browser', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ticket }), signal: controller.signal,
-    }).then(onSession, (failure) => {
-      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : '暂时无法完成登录。')
-    })
-    return () => controller.abort()
-  }, [ticket])
-  return <div className="auth-layout"><AuthStory /><div className="auth-form-wrap"><section className="auth-form-card">
-    <h1>登录 Grove</h1>
-    {error ? <><Notice tone="red">{error}</Notice><a href="#/signin" className="text-link">返回登录</a></>
-      : <Loading label="正在完成登录…" />}
-  </section></div></div>
-}
+import { AuthStory, CopyValue, Notice } from './ui'
 
 export function GroveDeviceAccess({ onSession }: { onSession: (session: Session) => void }) {
   const [request, setRequest] = useState<Record<string, unknown>>()
@@ -57,7 +38,7 @@ export function GroveDeviceAccess({ onSession }: { onSession: (session: Session)
   }
 
   return <div className="auth-layout"><AuthStory /><div className="auth-form-wrap"><section className="auth-form-card">
-    <h1>Grove 管理员登录</h1>
+    <h1>使用设备签名登录</h1>
     <form className="grove-account-form" onSubmit={submit}>
       {!request ? <label className="field-label">Grove 账号<input name="username" className="input" maxLength={64}
         autoComplete="username" autoCapitalize="none" required /></label> : <>

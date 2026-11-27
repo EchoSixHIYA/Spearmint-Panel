@@ -8,12 +8,9 @@ from unittest.mock import Mock, patch
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from spearmint import auth, grove_authorization, grove_device_login, grove_quorum_join, mesh_enrollment
-from spearmint.app import create_app
-from spearmint.config import Config
 from spearmint.peer.protocol import wire_b64
 from spearmint.peer.grove_service_admin import GroveServiceAdmin
 from spearmint.peer.pairing import configured, set_enabled
@@ -27,46 +24,6 @@ from test_grove_voters import VoterFixture
 
 
 class AuthorizationTest(unittest.TestCase):
-    def test_device_verification_finishes_in_browser_with_full_session(self):
-        root = Path.cwd() / 'work/tmp/codex-grove-authorization'
-        root.mkdir(parents=True, exist_ok=True)
-        with TemporaryDirectory(dir=root) as directory:
-            fixture = VoterFixture(Path(directory))
-            panel = fixture.states[0]
-            device = Ed25519PrivateKey.generate()
-            public = wire_b64(device.public_key().public_bytes_raw())
-            votes = [grove_authorization.key_vote(voter, 'admin', public) for voter in fixture.states[:2]]
-            origin = 'https://localhost:18443'
-            config = Config(panel.directory, origin, root / 'web', root / 'docker')
-            app = create_app(config, native_loopback_setup=True)
-            client = TestClient(app, base_url=origin, client=('127.0.0.1', 50001))
-            headers = {'Origin': origin}
-            challenge = client.post('/api/v1/auth/grove/device/challenge', headers=headers,
-                                    json={'username': 'admin', 'session_authorization': True}).json()
-            proof = grove_authorization.issue(device, challenge, votes)
-            rolling = grove_authorization.rolling_update_challenge(challenge)
-            proof['rolling_update'] = grove_authorization.issue(device, rolling, votes)
-            remote = TestClient(app, base_url=origin, client=('192.0.2.10', 50002))
-            self.assertEqual(remote.post('/api/v1/auth/grove/device/start-browser',
-                                         headers=headers, json=proof).status_code, 403)
-            remote.close()
-            native = client.post('/api/v1/auth/grove/device/start-browser', headers=headers, json=proof)
-            self.assertEqual(native.status_code, 200)
-            self.assertNotIn('set-cookie', native.headers)
-            ticket = native.json()
-            endpoint = '/api/v1/auth/grove/device/finish-browser'
-            self.assertEqual(client.post(endpoint, headers={'Origin': 'https://other.example'}, json=ticket).status_code, 403)
-            browser = client.post(endpoint, headers=headers, json=ticket)
-            self.assertEqual(browser.status_code, 200)
-            self.assertEqual(browser.json()['role'], 'node_admin')
-            self.assertEqual(client.post(endpoint, headers=headers, json=ticket).status_code, 403)
-            token = client.cookies[auth.COOKIE]
-            actor = auth.actor_for(panel, token, 'testclient')
-            proof = grove_authorization.service_session(panel, actor)
-            self.assertEqual(grove_authorization.unsigned(proof['grant'])['scopes'], grove_authorization.ADMIN_SIGNIN)
-            self.assertIsNotNone(grove_authorization.rolling_update_proof(panel, actor, panel.identity()[0]))
-            client.close()
-
     def test_known_member_has_only_user_approved_scopes(self):
         root = Path.cwd() / 'work/tmp/codex-grove-authorization'
         root.mkdir(parents=True, exist_ok=True)

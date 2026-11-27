@@ -86,11 +86,6 @@ class GroveDeviceChallenge(GroveAccountName):
     session_authorization: bool = False
 
 
-class GroveDeviceBrowserHandoff(BaseModel):
-    model_config = ConfigDict(extra='forbid', strict=True)
-    ticket: str = Field(pattern=r'^[A-Za-z0-9_-]{43}$')
-
-
 class GroveAccountInvitation(GroveAccountName):
     role: Literal['node_admin', 'remote_operator']
 
@@ -648,24 +643,6 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         require_origin(request)
         proof = await read_grove_body(request, grove_authorization.LIMIT)
         session = await run_in_threadpool(grove_device_login.finish, store, proof, address_of(request))
-        return set_session(store, request, response, session)
-
-    @app.post('/api/v1/auth/grove/device/start-browser')
-    async def grove_device_start_browser(request: Request, response: Response):
-        require_origin(request)
-        if not local_setup(request):
-            raise HTTPException(403, '此登录入口需在本机 HTTPS 面板上使用。')
-        proof = await read_grove_body(request, grove_authorization.LIMIT)
-        response.headers['Cache-Control'] = 'no-store'
-        ticket = await run_in_threadpool(grove_device_login.browser_handoff, store, proof, address_of(request))
-        return {'ticket': ticket}
-
-    @app.post('/api/v1/auth/grove/device/finish-browser')
-    def grove_device_finish_browser(body: GroveDeviceBrowserHandoff, request: Request, response: Response):
-        require_origin(request)
-        if not local_setup(request):
-            raise HTTPException(403, '此登录入口需在本机 HTTPS 面板上使用。')
-        session = grove_device_login.finish_browser_handoff(store, body.ticket, address_of(request))
         return set_session(store, request, response, session)
 
     @app.post('/api/v1/auth/grove/member-login')

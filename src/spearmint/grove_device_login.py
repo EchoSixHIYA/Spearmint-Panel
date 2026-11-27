@@ -13,9 +13,7 @@ from .state import audit
 
 
 CHALLENGE_LIMIT = 128
-BROWSER_HANDOFF_SECONDS = 60
 _pending = {}
-_handoffs = {}
 _lock = Lock()
 
 
@@ -109,30 +107,6 @@ def finish(state, proof, address):
             owner = SimpleNamespace(token_hash=auth.digest(session[0]))
             grove_authorization.remember_service_session(state, owner, proof, now, rolling_update=rolling_update)
         return session
-
-
-def browser_handoff(state, proof, address):
-    session = finish(state, proof, address)
-    now = int(time.time())
-    ticket = token_urlsafe(32)
-    with _lock:
-        for key, (_, _, expires) in tuple(_handoffs.items()):
-            if expires <= now:
-                del _handoffs[key]
-        if len(_handoffs) >= CHALLENGE_LIMIT:
-            _handoffs.pop(next(iter(_handoffs)))
-        _handoffs[(state.directory, auth.digest(ticket))] = (session, address, now + BROWSER_HANDOFF_SECONDS)
-    return ticket
-
-
-def finish_browser_handoff(state, ticket, address):
-    with _lock:
-        key = (state.directory, auth.digest(ticket))
-        pending = _handoffs.get(key)
-        if pending is None or pending[1] != address or pending[2] <= int(time.time()):
-            raise PeerError('DENIED', '登录链接已过期，请从登录设备重新打开。')
-        del _handoffs[key]
-    return pending[0]
 
 
 def current_session(db, row):
