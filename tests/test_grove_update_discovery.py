@@ -27,6 +27,8 @@ class UpdateDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         self.updates.cached_seed_release = Mock(return_value=None)
         self.updates.cached_group_release = Mock(return_value=None)
         self.updates.remote = SimpleNamespace(work=AsyncMock(return_value=['local', 'peer-a', 'peer-b']))
+        self.updates.group_version_check_at = 0.0
+        self.updates.group_version_cursor = 0
 
     def release(self, sequence):
         index = {
@@ -180,6 +182,54 @@ class UpdateDiscoveryTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(grove_updates.time, 'time', return_value=now + 10):
                 await self.updates.tick_group()
         self.assertEqual(self.updates.ask.await_count, 5)
+
+    async def test_completed_group_reconciles_manually_installed_target_versions(self):
+        self.updates.group_path = 'group.json'
+        self.updates.build = {'commit': self.latest.commit}
+        self.updates.ask = AsyncMock()
+        self.updates.prepare_group_archives = Mock()
+        failed = {'status': 'failed', 'reason': 'user_authorization_required'}
+        removed = {'status': 'unsupported', 'reason': 'member_removed'}
+        current = {'status': 'succeeded', 'reason': 'already_current'}
+        batch = {'job': 'b' * 32, 'release': self.latest.model_dump(), 'expires': int(grove_updates.time.time()) - 1,
+                 'nodes': {'local': failed, 'peer-a': failed, 'peer-b': failed, 'peer-c': failed, 'peer-d': removed}}
+        self.updates.remote.peer_deployment = AsyncMock(side_effect=[
+            {'build': {'commit': self.latest.commit}},
+            {'build': {'version': self.latest.version, 'commit': self.previous.commit}},
+            PeerError('OFFLINE', 'The panel is offline'),
+        ])
+        with patch.object(grove_updates.worker, 'read_record', return_value=batch), \
+                patch.object(grove_updates.worker, 'write_record') as saved:
+            await self.updates.tick_group()
+            self.assertEqual(batch['nodes'], {'local': current, 'peer-a': current, 'peer-b': failed,
+                                             'peer-c': failed, 'peer-d': removed})
+            self.assertEqual(saved.call_count, 1)
+            await self.updates.tick_group()
+            self.assertEqual(self.updates.remote.peer_deployment.await_count, 3)
+            self.assertEqual(saved.call_count, 1)
+            self.updates.remote.peer_deployment.side_effect = None
+            self.updates.remote.peer_deployment.return_value = {'build': {'commit': self.latest.commit}}
+            self.updates.group_version_check_at = 0
+            await self.updates.tick_group()
+            self.assertEqual(batch['nodes']['peer-b'], current)
+            self.assertEqual(batch['nodes']['peer-c'], current)
+            self.assertEqual(batch['nodes']['peer-d'], removed)
+            self.assertEqual(saved.call_count, 2)
+        self.updates.ask.assert_not_awaited()
+        self.updates.prepare_group_archives.assert_not_called()
+
+    async def test_late_version_reconciliation_leaves_a_new_group_job_intact(self):
+        self.updates.group_path = 'group.json'
+        batch = {'job': 'b' * 32, 'release': self.latest.model_dump(), 'expires': int(grove_updates.time.time()) + 60,
+                 'nodes': {'peer-a': {'status': 'failed', 'reason': 'user_authorization_required'}}}
+        replacement = {**batch, 'job': 'c' * 32, 'nodes': {'peer-a': {'status': 'queued'}}}
+        self.updates.remote.peer_deployment = AsyncMock(return_value={'build': {'commit': self.latest.commit}})
+        with patch.object(grove_updates.worker, 'read_record', side_effect=[batch, replacement]), \
+                patch.object(grove_updates.worker, 'write_record') as saved:
+            await self.updates.tick_group()
+        self.updates.remote.peer_deployment.assert_awaited_once_with('peer-a')
+        saved.assert_not_called()
+        self.assertEqual(replacement['nodes']['peer-a'], {'status': 'queued'})
 
     async def test_reports_the_selected_supplier_and_clears_it_before_trying_another(self):
         asset = self.latest.packages['windows-amd64']

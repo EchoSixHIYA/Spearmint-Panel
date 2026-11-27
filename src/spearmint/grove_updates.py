@@ -31,6 +31,9 @@ from .state import StateError, audit
 METHOD = 'grove.update.v1'
 JOB_TTL = 24 * 60 * 60
 GROVE_RETRY_SECONDS = 120
+GROUP_VERSION_CHECK_INTERVAL = 30
+GROUP_VERSION_CHECK_TIMEOUT = 8
+GROUP_BATCH_SIZE = 8
 TERMINAL = {'succeeded', 'failed', 'unsupported', 'expired'}
 LOG = logging.getLogger(__name__)
 IO_ERRORS = (OSError, ValueError, RuntimeError, sqlite3.Error, StateError, SubprocessError)
@@ -92,6 +95,8 @@ class UpdateCoordinator:
                     self.seed_archives.setdefault(asset.sha256, (platform, cached.sequence))
         self.node_task: asyncio.Task | None = None
         self.node_retry = 0.0
+        self.group_version_check_at = 0.0
+        self.group_version_cursor = 0
 
     def members(self) -> list[str]:
         with self.state.connect() as db:
@@ -752,13 +757,47 @@ class UpdateCoordinator:
         if self.node_retry <= time.monotonic():
             self.node_task = asyncio.create_task(self.run_node(job))
 
+    async def reconcile_group_versions(self, batch: dict) -> None:
+        nodes = batch['nodes']
+        commit = batch['release']['commit']
+        candidates = sorted(node for node, row in nodes.items()
+                            if row['status'] in TERMINAL and row['status'] != 'succeeded'
+                            and row.get('reason') != 'member_removed')
+        current = {'status': 'succeeded', 'reason': 'already_current'}
+        if self.local_id in candidates:
+            candidates.remove(self.local_id)
+            if self.build.get('commit') == commit:
+                nodes[self.local_id] = current
+        now = time.monotonic()
+        if not candidates or now < self.group_version_check_at:
+            return
+        # Rotate the bounded batch so offline members cannot keep later peers from being checked.
+        start = self.group_version_cursor % len(candidates)
+        selected = (candidates[start:] + candidates[:start])[:GROUP_BATCH_SIZE]
+        self.group_version_cursor = start + len(selected)
+        self.group_version_check_at = now + GROUP_VERSION_CHECK_INTERVAL
+
+        async def matches_target(node):
+            try:
+                async with asyncio.timeout(GROUP_VERSION_CHECK_TIMEOUT):
+                    status = await self.remote.peer_deployment(node)
+                return status['build'].get('commit') == commit
+            except (PeerError, TimeoutError):
+                return False
+
+        observations = await asyncio.gather(*(matches_target(node) for node in selected))
+        for node, matches in zip(selected, observations, strict=True):
+            if matches:
+                nodes[node] = current
+
     async def tick_group(self) -> None:
         batch = worker.read_record(self.group_path)
-        if not batch or all(row['status'] in TERMINAL for row in batch['nodes'].values()):
+        if not batch:
             return
         expires = batch['expires']
         nodes = batch['nodes']
         before = {node: dict(row) for node, row in nodes.items()}
+        await self.reconcile_group_versions(batch)
         now = int(time.time())
 
         def save(node, result):
@@ -779,7 +818,7 @@ class UpdateCoordinator:
             for node, row in nodes.items():
                 if row['status'] not in TERMINAL:
                     nodes[node] = {'status': 'expired'}
-        else:
+        elif any(row['status'] not in TERMINAL for row in nodes.values()):
             members = await self.remote.work(self.members)
             if not members:
                 return
@@ -797,8 +836,8 @@ class UpdateCoordinator:
                 return await self.ask(node, {'action': 'offer', 'intent': intent(node)})
 
             targets = [node for node, row in nodes.items() if node != self.local_id and row['status'] not in TERMINAL]
-            for start in range(0, len(targets), 8):
-                candidates = targets[start:start + 8]
+            for start in range(0, len(targets), GROUP_BATCH_SIZE):
+                candidates = targets[start:start + GROUP_BATCH_SIZE]
                 results = await asyncio.gather(*(offer(node)
                                                  if node in members else asyncio.sleep(0, result={'status': 'unsupported', 'reason': 'member_removed'})
                                                  for node in candidates))
