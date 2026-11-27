@@ -133,6 +133,41 @@ function Confirm-PackageFiles([string]$Verifier, [string]$Directory) {
     }
 }
 
+function Move-StagedRelease([string]$Source, [string]$Destination) {
+    $deadlineMs = 30000
+    $delayMs = 200
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            [IO.Directory]::Move($Source, $Destination)
+            if ($attempt -gt 1) {
+                Write-Output "Staged release published after $attempt rename attempts ($($elapsed.ElapsedMilliseconds) ms)."
+            }
+            return
+        } catch {
+            $failure = $_.Exception.GetBaseException()
+            $hresult = '0x{0:X8}' -f $failure.HResult
+            # An open staging file can cause access denied, sharing violation, or lock violation.
+            $retryable = $failure -is [UnauthorizedAccessException] -or
+                $failure.HResult -in @(0x80070005, 0x80070020, 0x80070021)
+            $remaining = $deadlineMs - $elapsed.ElapsedMilliseconds
+            $message = "Staged release rename attempt $attempt failed after $($elapsed.ElapsedMilliseconds) ms ($hresult): '$Source' -> '$Destination'. $($failure.Message)"
+            if (-not $retryable -or [IO.Directory]::Exists($Destination) -or [IO.File]::Exists($Destination)) {
+                throw [IO.IOException]::new($message, $failure)
+            }
+            if ($remaining -le 0) {
+                throw [IO.IOException]::new("$message The $deadlineMs ms retry window expired.", $failure)
+            }
+            $wait = [Math]::Min($delayMs, $remaining)
+            Write-Warning "$message Retrying in $wait ms."
+            Start-Sleep -Milliseconds $wait
+            $delayMs = [Math]::Min($delayMs * 2, 2000)
+        }
+    }
+}
+
 function Get-PanelTask {
     Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue
 }
@@ -643,10 +678,19 @@ try {
             Copy-PackageFiles $bundle $temporary $checksums
             Confirm-StagedPackage $temporary
             Confirm-PackageFiles $packageBinary $temporary
-            [IO.Directory]::Move($temporary, $release)
+            Move-StagedRelease $temporary $release
         } finally {
-            if (Test-Path -LiteralPath $temporary) {
-                Remove-Item -LiteralPath $temporary -Recurse -Force
+            try {
+                if (Test-Path -LiteralPath $temporary) {
+                    $stage = Get-Item -LiteralPath $temporary -Force
+                    if ($stage.FullName -ne $temporary -or $stage.Parent.FullName -ne $releases -or
+                        ($stage.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                        throw 'The staging directory changed during installation.'
+                    }
+                    Remove-Item -LiteralPath $stage.FullName -Recurse -Force
+                }
+            } catch {
+                Write-Warning "Could not clean up staged release '$temporary': $($_.Exception.GetBaseException().Message)"
             }
         }
     }
