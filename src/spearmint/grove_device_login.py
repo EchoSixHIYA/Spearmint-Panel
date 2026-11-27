@@ -22,7 +22,7 @@ def profile_for(db, username):
     return record['profile'] if record is not None else grove_accounts.legacy_profile(db, username)
 
 
-def challenge(state, username, address, *, service_controls=False):
+def challenge(state, username, address, *, service_controls=False, session_authorization=False):
     now = int(time.time())
     with auth.authentication_attempt(state, address, now, username=username) as (db, _):
         if grove_login.usable_replica(db, now, operational=True) is None:
@@ -34,7 +34,10 @@ def challenge(state, username, address, *, service_controls=False):
         identity = admin_revision(db, anchor['realm_id'], profile['id'], require_admin=False)
         changed_role = db.execute('SELECT role FROM grove_login_role WHERE user_id=?', (profile['id'],)).fetchone()
         effective_role = changed_role['role'] if changed_role else profile['role']
-        scopes = grove_authorization.SERVICE_SIGNIN if service_controls and effective_role == 'node_admin' else ['signin']
+        if session_authorization:
+            scopes = grove_authorization.ADMIN_SIGNIN if effective_role == 'node_admin' else grove_authorization.ACCOUNT_SIGNIN
+        else:
+            scopes = grove_authorization.SERVICE_SIGNIN if service_controls and effective_role == 'node_admin' else ['signin']
         token = token_urlsafe(32)
         subject = SimpleNamespace(token_hash=auth.digest(token))
         value = grove_authorization.challenge(db, subject, state.identity()[0], identity, scopes)
@@ -87,7 +90,7 @@ def finish(state, proof, address):
         audit(db, account_id, address, 'grove.device_login', user_id)
         username = db.execute('SELECT username FROM panel_account WHERE id=?', (account_id,)).fetchone()[0]
         account = auth.account_for(db, username)
-        service_session = 'service_until' in grant
+        service_session = grove_authorization.timed_session(grant)
         session = auth.issue_session(db, account, address, now, mfa_at=now, method='grove-device', grove_replica=True,
                                      token=pending[1], created_at=grant['issued_at'] if service_session else None)
         if service_session:

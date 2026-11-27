@@ -100,15 +100,8 @@ def source_grant(state, local_id, pair, actor, scope):
     identity = source_identity(state, local_id, pair, actor)
     with state.connect(read_only=True) as db:
         db.execute('BEGIN')
-        try:
-            proof = grove_authorization.enrolled(state, actor)
-            verified = grove_authorization.verify(db, proof, local_id, scope, owner=actor)
-        except PeerError as error:
-            if scope != grove_authorization.SERVICE_CONTROL or error.code != grove_authorization.ERROR:
-                raise
-            account_admin(db, actor)
-            proof = grove_authorization.service_session(state, actor)
-            verified = grove_authorization.verify(db, proof, local_id, scope, owner=actor)
+        account_admin(db, actor)
+        proof, verified = grove_authorization.session_grant(db, state, actor, local_id, scope)
         if verified != identity:
             raise PeerError(grove_authorization.ERROR, grove_authorization.MESSAGE)
     return proof

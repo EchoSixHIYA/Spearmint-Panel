@@ -241,6 +241,26 @@ class ServiceCatalogRefreshTest(unittest.TestCase):
             with self.assertRaises(PeerError):
                 source_grant(source, source_id, target_pair, actor, scope)
 
+            challenge = grove_device_login.challenge(source, 'admin', '127.0.0.1', session_authorization=True)
+            proof = grove_authorization.issue(device, challenge, votes)
+            token, _ = grove_device_login.finish(source, proof, '127.0.0.1')
+            actor = auth.actor_for(source, token, '127.0.0.1')
+            later = challenge['expires_at'] + 1
+            self.assertEqual(grove_authorization.self_proof(source, actor), proof)
+            with target.connect(read_only=True) as db:
+                for permission in ('updates', 'terminal', 'services', 'deployment', 'seed', 'accounts', 'voters'):
+                    self.assertEqual(source_grant(source, source_id, target_pair, actor, permission), proof)
+                    self.assertEqual(grove_authorization.verify(db, proof, source_id, permission, at=later), challenge['identity'])
+                with self.assertRaises(PeerError):
+                    grove_authorization.verify(db, proof, source_id, 'updates', at=challenge['session_until'])
+                with self.assertRaises(PeerError):
+                    grove_authorization.verify(db, proof, source_id, 'signin', at=later)
+                relay = grove_authorization.for_seed_executor(source, proof, target_id, 'a' * 32)
+                self.assertEqual(grove_authorization.verify(db, relay, source_id, 'seed'), challenge['identity'])
+                self.assertTrue(grove_authorization.seed_executor(relay, target_id, 'a' * 32))
+            auth.logout(source, actor)
+            self.assertFalse(grove_authorization.service_session_path(source, actor).is_file())
+
     def test_failed_catalog_is_incomplete_and_cannot_remove_visible_rows(self):
         directory = {'node_id': 'owned', 'stale': False, 'services': [], 'connection_id': 'session', 'directory_generation': 1}
         result = asyncio.run(Catalog(PeerError('ROUTE_LOST', 'Owned route changed')).grove_directory(SimpleNamespace(grove=True), directory))

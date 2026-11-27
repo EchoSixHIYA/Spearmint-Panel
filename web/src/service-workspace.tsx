@@ -161,7 +161,7 @@ export function ServiceList({ initialNode, embedded = false }: { initialNode?: s
     <div className="workspace-summary"><strong>{rows.length} 个{partialCatalog ? '已显示服务' : '已登记服务'}</strong><span>{rows.filter(row => !row.stale && row.observation?.status === 'running').length} 个运行中</span>
       <span role="status">{services.error || error || partialCatalog ? '部分节点的服务目录暂不可用' : ''}</span></div>
     {upgradeCatalog && <Notice tone="amber">部分节点需要更新后才能使用本次登录的服务操作权限。<a href="#/maintenance">查看群组更新</a></Notice>}
-    {readOnlyCatalog && <Notice tone="amber">管理远程服务或读取日志需要<a href="#/identity">授权当前面板</a>。</Notice>}
+    {readOnlyCatalog && <Notice tone="amber">使用 Grove 登录设备重新登录后，即可管理远程服务和查看日志。</Notice>}
     <Panel><div className="workspace-filters"><label className="search-box"><Icon name="search" size={16} /><input aria-label="搜索服务" value={search} onChange={e => update('q', e.target.value)} placeholder="搜索服务、节点或程序名称…" /></label>
       <select className="input" aria-label="按节点筛选" value={node} disabled={embedded} onChange={e => update('node', e.target.value)}><option value="">全部节点</option>{listedNodes.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
       <select className="input" aria-label="按状态筛选" value={status} onChange={e => update('status', e.target.value)}><option value="">全部状态</option><option value="running">运行中</option><option value="stopped">已停止</option><option value="failed">失败</option><option value="stale">状态待确认</option></select>
@@ -349,7 +349,7 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
       </div>
     </div>}
     {current && tab === 'logs' && <ServiceLogs path={path} serviceId={id} onUnauthorized={onUnauthorized} remote={!local} active={!unavailable && current.logs_available !== false} />}
-    {current?.controls_only && tab === 'links' && <Notice tone="amber">查看访问链接需要远程服务管理授权。<a href="#/identity">授权当前面板</a></Notice>}
+    {current?.controls_only && tab === 'links' && <Notice tone="amber">请使用 Grove 登录设备重新登录后查看访问链接。</Notice>}
     {current && !current.controls_only && tab === 'links' && <ServiceAccessLinks links={current.access_links} version={current.version ?? 1}
       canEdit={current.can_edit_details && !writeBlocked}
       onSave={async (links, version) => {
@@ -361,7 +361,7 @@ function ServiceDetail({ target, id, initialTab }: { target: string; id: string;
       }} />}
     {current && tab === 'history' && <Panel title="此服务的操作记录">{current.operations.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>动作</th><th>结果</th><th>时间</th><th>说明</th></tr></thead><tbody>{current.operations.map(item => <tr key={item.id}><td>{actionNames[item.action as keyof typeof actionNames] || item.action}</td><td><StateBadge state={item.status} /></td><td>{timestamp(item.updated_at)}</td><td>{item.message || receiptReason(item) || '—'}</td></tr>)}</tbody></table></div> : <EmptyState title="此服务暂无操作记录" />}</Panel>}
     {current && tab === 'settings' && <Panel className="service-settings-panel">
-      {current.controls_only && <Notice tone="amber">修改服务配置需要远程服务管理授权。<a href="#/identity">授权当前面板</a></Notice>}
+      {current.controls_only && <Notice tone="amber">请使用 Grove 登录设备重新登录后修改服务配置。</Notice>}
       <div className="service-setting-row"><span className="service-setting-label">服务名称</span><strong className="service-setting-value">{current.name}</strong>
         <button className="btn btn-secondary btn-small" disabled={writeBlocked || !current.can_edit_details} onClick={() => setEditing(true)}>重命名</button></div>
       <div className="service-setting-row"><span className="service-setting-label">管理方式</span>

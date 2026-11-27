@@ -89,7 +89,7 @@ export function GroveAccountDialog({ action, username, role, session, onClose, o
         <p>生成后，之前的账号恢复码会失效。</p>
         {!deviceBound && <label className="field-label">当前 Grove 密码<input name="password" className="input" type="password" autoComplete="current-password" maxLength={256} required /></label>}
       </>}
-      {action === 'bind-device' && <><p>使用「授权账号操作」时签名的设备完成绑定。账号将改用设备签名登录。</p>
+      {action === 'bind-device' && <><p>绑定本次 Grove 登录使用的设备公钥。</p>
         <label><input type="checkbox" required /> 我已保存账号恢复码</label></>}
       {error && <Notice tone="red">{error}</Notice>}
       <div className="button-row"><button className="btn btn-primary" disabled={pending}>{pending ? '正在等待 Grove 确认…' : actionLabels[action]}</button></div>

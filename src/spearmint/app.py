@@ -83,6 +83,7 @@ class GroveAccountName(BaseModel):
 
 class GroveDeviceChallenge(GroveAccountName):
     service_controls: bool = False
+    session_authorization: bool = False
 
 
 class GroveAccountInvitation(GroveAccountName):
@@ -634,7 +635,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
     def grove_device_challenge(body: GroveDeviceChallenge, request: Request, response: Response):
         require_origin(request)
         response.headers['Cache-Control'] = 'no-store'
-        return grove_device_login.challenge(store, body.username, address_of(request), service_controls=body.service_controls)
+        return grove_device_login.challenge(store, body.username, address_of(request), service_controls=body.service_controls,
+                                            session_authorization=body.session_authorization)
 
     @app.post('/api/v1/auth/grove/device/login')
     async def grove_device_session(request: Request, response: Response):
@@ -886,6 +888,8 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
             if error.code == 'OFFLINE':
                 raise PeerError('SEED_GROVE_STATE', 'This panel is waiting for a current Grove directory') from error
             raise
+        if pair is not None:
+            identity = await remote.work(grove_authorization.for_seed_executor, store, identity, source, job)
         params = body | {'action': action, 'job': job, 'identity': identity,
                          'owner': auth.digest(actor.token_hash.hex()).hex()[:32]}
         if pair is None:

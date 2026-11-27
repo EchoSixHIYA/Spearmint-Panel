@@ -170,8 +170,8 @@ class SeedWizard:
                 or not isinstance(job_id, str) or not RANDOM_ID.fullmatch(job_id)):
             raise PeerError('INVALID_REQUEST', 'Invalid SSH seed request')
         anchor = self.authorize(pair, identity)
-        if pair is not None and grove_authorization.unsigned(identity['grant'])['seed_executor'] != self.remote.local_id:
-            raise PeerError(grove_authorization.ERROR, '授权中需要选择这台播种发起节点。')
+        if pair is not None and not grove_authorization.seed_executor(identity, self.remote.local_id, job_id):
+            raise PeerError('DENIED', '播种请求与所选发起节点或任务不一致。')
         key = (pair.node_id if pair else self.remote.local_id, owner)
         with self.lock:
             self.reap()
