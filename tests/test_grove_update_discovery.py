@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from spearmint import grove_updates, update_release
+from spearmint import grove_authorization, grove_updates, update_release
 from spearmint.peer.protocol import PeerError, wire_b64
 
 
@@ -153,6 +153,33 @@ class UpdateDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         result = await self.updates.ask('peer-a', {'action': 'offer', 'intent': {'identity': {'grant': 'fixture'}}})
         self.assertEqual(result, {'status': 'unsupported', 'reason': 'upgrade_from_older_panel'})
         self.assertEqual([call.args[2]['action'] for call in self.updates.remote.call.await_args_list], ['offer', 'catalog'])
+
+    async def test_mixed_version_retains_the_proof_an_old_recipient_accepted(self):
+        self.updates.group_path = 'group.json'
+        self.updates.prepare_group_archives = Mock()
+        now = int(grove_updates.time.time())
+        login = {'fixture': 'session'}
+        rolling = grove_authorization.issue(self.key, {'expires_at': now + 5}, [])
+        batch = {'job': 'b' * 32, 'release': self.latest.model_dump(), 'identity': login,
+                 'rolling_update': rolling, 'rolling_nodes': [], 'expires': now + 60,
+                 'nodes': {'local': {'status': 'succeeded'}, 'peer-a': {'status': 'queued'}, 'peer-b': {'status': 'queued'}}}
+
+        async def ask(node, params):
+            identity = params['intent']['identity']
+            if node == 'peer-a' and identity == login:
+                return {'status': 'failed', 'reason': 'user_authorization_required'}
+            self.assertEqual(identity, rolling if node == 'peer-a' else login)
+            return {'status': 'installing'}
+
+        self.updates.ask = AsyncMock(side_effect=ask)
+        with patch.object(grove_updates.worker, 'read_record', return_value=batch), \
+                patch.object(grove_updates.worker, 'write_record'):
+            await self.updates.tick_group()
+            self.assertEqual(batch['rolling_nodes'], ['peer-a'])
+            self.assertEqual(batch['nodes']['peer-a']['status'], 'installing')
+            with patch.object(grove_updates.time, 'time', return_value=now + 10):
+                await self.updates.tick_group()
+        self.assertEqual(self.updates.ask.await_count, 5)
 
     async def test_reports_the_selected_supplier_and_clears_it_before_trying_another(self):
         asset = self.latest.packages['windows-amd64']

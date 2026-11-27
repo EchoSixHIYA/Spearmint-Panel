@@ -788,7 +788,10 @@ def main() -> int:
                 if (raw['key'] != key_id or any(raw[field] != challenge[field] for field in ('identity', 'anchor', 'configuration'))):
                     raise StateError('A voter approval belongs to a different key, account or Grove configuration')
                 approved.append(document)
-            write_new(args.output, grove.encoded(grove_authorization.issue(key, challenge, approved)))
+            proof = grove_authorization.issue(key, challenge, approved)
+            if rolling_update := grove_authorization.rolling_update_challenge(challenge):
+                proof['rolling_update'] = grove_authorization.issue(key, rolling_update, approved)
+            write_new(args.output, grove.encoded(proof))
             return 0
         if not WINDOWS and os.getuid() == 0:
             raise StateError("Run Spearmint as its dedicated non-root account")

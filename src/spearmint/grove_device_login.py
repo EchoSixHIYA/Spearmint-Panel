@@ -53,7 +53,15 @@ def challenge(state, username, address, *, service_controls=False, session_autho
 
 def finish(state, proof, address):
     try:
+        if not isinstance(proof, dict):
+            raise ValueError
+        rolling_update = proof.get('rolling_update')
+        proof = {key: value for key, value in proof.items() if key != 'rolling_update'}
         grant = grove_authorization.unsigned(proof['grant'])
+        expected_update = grove_authorization.rolling_update_challenge(grant)
+        if rolling_update is not None and (
+                expected_update is None or grove_authorization.unsigned(rolling_update['grant']) != expected_update):
+            raise ValueError
         nonce = grant['nonce']
         with _lock:
             pending = _pending.get((state.directory, nonce))
@@ -67,6 +75,8 @@ def finish(state, proof, address):
         if grove_login.usable_replica(db, now, operational=True) is None:
             raise PeerError('OFFLINE', '此面板尚未同步 Grove 账号目录。')
         realm_id, user_id, epoch, _, _ = grove_authorization.verify(db, proof, state.identity()[0], 'signin')
+        if rolling_update is not None:
+            grove_authorization.verify(db, rolling_update, state.identity()[0], 'updates')
         with _lock:
             if _pending.pop((state.directory, nonce), None) != pending:
                 raise PeerError('DENIED', '此登录请求已经使用。')
@@ -95,7 +105,7 @@ def finish(state, proof, address):
                                      token=pending[1], created_at=grant['issued_at'] if service_session else None)
         if service_session:
             owner = SimpleNamespace(token_hash=auth.digest(session[0]))
-            grove_authorization.remember_service_session(state, owner, proof, now)
+            grove_authorization.remember_service_session(state, owner, proof, now, rolling_update=rolling_update)
         return session
 
 

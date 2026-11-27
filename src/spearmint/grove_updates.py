@@ -319,8 +319,12 @@ class UpdateCoordinator:
                 return self.group_status()
             raise PeerError('CONFLICT', 'A Grove update is already in progress')
         job = token_hex(16)
-        worker.write_record(self.group_path, {'job': job, 'release': candidate.model_dump(), 'identity': identity,
-                                             'expires': now + JOB_TTL, 'nodes': {node: {'status': 'queued'} for node in members}})
+        batch = {'job': job, 'release': candidate.model_dump(), 'identity': identity,
+                 'expires': now + JOB_TTL, 'nodes': {node: {'status': 'queued'} for node in members}}
+        if rolling := await self.remote.work(grove_authorization.rolling_update_proof, self.state, actor, self.local_id):
+            batch['rolling_update'] = rolling
+            batch['rolling_nodes'] = []
+        worker.write_record(self.group_path, batch)
         self.prepare_group_archives(candidate)
         await self.remote.work(self.audit_event, grove_authorization.revision(identity)[1], actor.address, 'started', job)
         return self.group_status()
@@ -780,15 +784,38 @@ class UpdateCoordinator:
             if not members:
                 return
             self.prepare_group_archives(release.Release.model_validate(batch['release']))
+            rolling = batch.get('rolling_update')
+            rolling_nodes = batch.get('rolling_nodes', [])
+            rolling_until = grove_authorization.unsigned(rolling['grant'])['expires_at'] if rolling else 0
+
             def intent(node):
-                return {'job': batch['job'], 'release': batch['release'], 'identity': batch['identity'],
+                identity = rolling if node in rolling_nodes else batch['identity']
+                return {'job': batch['job'], 'release': batch['release'], 'identity': identity,
                         'expires': expires, 'target': node}
+
+            async def offer(node):
+                return await self.ask(node, {'action': 'offer', 'intent': intent(node)})
+
             targets = [node for node, row in nodes.items() if node != self.local_id and row['status'] not in TERMINAL]
             for start in range(0, len(targets), 8):
                 candidates = targets[start:start + 8]
-                results = await asyncio.gather(*(self.ask(node, {'action': 'offer', 'intent': intent(node)})
+                results = await asyncio.gather(*(offer(node)
                                                  if node in members else asyncio.sleep(0, result={'status': 'unsupported', 'reason': 'member_removed'})
                                                  for node in candidates))
+                retry = [index for index, (node, result) in enumerate(zip(candidates, results, strict=True))
+                         if result and result.get('reason') == 'user_authorization_required'
+                         and node not in rolling_nodes and rolling_until > int(time.time())]
+                if retry:
+                    # Stick to the same proof on subsequent polls. A recipient
+                    # rejects reuse of an accepted job ID with a different proof.
+                    latest = worker.read_record(self.group_path)
+                    if not latest or latest['job'] != batch['job']:
+                        return
+                    rolling_nodes.extend(candidates[index] for index in retry)
+                    worker.write_record(self.group_path, {**batch, 'rolling_nodes': rolling_nodes})
+                    answers = await asyncio.gather(*(offer(candidates[index]) for index in retry))
+                    for index, answer in zip(retry, answers, strict=True):
+                        results[index] = answer
                 for node, result in zip(candidates, results, strict=True):
                     if result and result.get('status') in STATUSES:
                         save(node, result)

@@ -243,11 +243,19 @@ class ServiceCatalogRefreshTest(unittest.TestCase):
 
             challenge = grove_device_login.challenge(source, 'admin', '127.0.0.1', session_authorization=True)
             proof = grove_authorization.issue(device, challenge, votes)
-            token, _ = grove_device_login.finish(source, proof, '127.0.0.1')
+            compatibility = grove_authorization.rolling_update_challenge(challenge)
+            rolling = grove_authorization.issue(device, compatibility, votes)
+            token, _ = grove_device_login.finish(source, proof | {'rolling_update': rolling}, '127.0.0.1')
             actor = auth.actor_for(source, token, '127.0.0.1')
             later = challenge['expires_at'] + 1
             self.assertEqual(grove_authorization.self_proof(source, actor), proof)
+            self.assertEqual(grove_authorization.rolling_update_proof(source, actor, source_id), rolling)
             with target.connect(read_only=True) as db:
+                self.assertEqual(compatibility['scopes'], ['updates'])
+                self.assertNotIn('session_until', compatibility)
+                self.assertEqual(grove_authorization.verify(db, rolling, source_id, 'updates'), challenge['identity'])
+                with self.assertRaises(PeerError):
+                    grove_authorization.verify(db, rolling, source_id, 'updates', at=later)
                 for permission in ('updates', 'terminal', 'services', 'deployment', 'seed', 'accounts', 'voters'):
                     self.assertEqual(source_grant(source, source_id, target_pair, actor, permission), proof)
                     self.assertEqual(grove_authorization.verify(db, proof, source_id, permission, at=later), challenge['identity'])
@@ -260,6 +268,7 @@ class ServiceCatalogRefreshTest(unittest.TestCase):
                 self.assertTrue(grove_authorization.seed_executor(relay, target_id, 'a' * 32))
             auth.logout(source, actor)
             self.assertFalse(grove_authorization.service_session_path(source, actor).is_file())
+            self.assertIsNone(grove_authorization.rolling_update_proof(source, actor, source_id))
 
     def test_failed_catalog_is_incomplete_and_cannot_remove_visible_rows(self):
         directory = {'node_id': 'owned', 'stale': False, 'services': [], 'connection_id': 'session', 'directory_generation': 1}

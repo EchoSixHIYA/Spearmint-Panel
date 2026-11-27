@@ -256,6 +256,13 @@ def issue(private_key: Ed25519PrivateKey, challenge: dict, approvals: list[dict]
     return {'grant': grove.signed(GRANT, challenge, private_key), 'approvals': approvals}
 
 
+def rolling_update_challenge(challenge: dict) -> dict | None:
+    if challenge.get('scopes') != ADMIN_SIGNIN or 'session_until' not in challenge:
+        return None
+    # Old recipients accept the original five-minute, updates-only grant.
+    return {key: value for key, value in challenge.items() if key != 'session_until'} | {'scopes': ['updates']}
+
+
 def enrollment(state, actor, payload, *, required_scope=None):
     from .peer.outbound import actor_account
 
@@ -316,13 +323,13 @@ def service_session_path(state, owner):
     return state.directory / 'grove-service-sessions' / (session_binding(owner) + '.json')
 
 
-def remember_service_session(state, owner, proof, now):
+def remember_service_session(state, owner, proof, now, *, rolling_update=None):
     from .update_worker import write_record
 
     path = service_session_path(state, owner)
     path.parent.mkdir(mode=0o700, exist_ok=True)
     secure_private(path.parent, 0o700)
-    write_record(path, proof)
+    write_record(path, proof if rolling_update is None else {'login': proof, 'rolling_update': rolling_update})
     for expired in path.parent.glob('*.json'):
         with suppress(OSError):
             if expired != path and expired.stat().st_mtime <= now - auth.SESSION_SECONDS:
@@ -334,7 +341,7 @@ def forget_service_session(state, owner):
         service_session_path(state, owner).unlink(missing_ok=True)
 
 
-def service_session(state, owner):
+def read_session_proof(state, owner):
     from .update_worker import read_record
 
     try:
@@ -344,6 +351,25 @@ def service_session(state, owner):
     except (OSError, ValueError):
         pass
     raise PeerError(ERROR, MESSAGE)
+
+
+def service_session(state, owner):
+    data = read_session_proof(state, owner)
+    return data.get('login', data)
+
+
+def rolling_update_proof(state, owner, source):
+    try:
+        proof = read_session_proof(state, owner).get('rolling_update')
+        if proof is not None:
+            with state.connect(read_only=True) as db:
+                db.execute('BEGIN')
+                verify(db, proof, source, 'updates', owner=owner)
+            return proof
+    except PeerError as error:
+        if error.code != ERROR:
+            raise
+    return None
 
 
 def enrolled(state, actor):
