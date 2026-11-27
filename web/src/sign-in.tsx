@@ -159,7 +159,7 @@ export function SignIn({ onSession, initialError, enrollmentSession, onEnrollmen
     <p className="auth-subtitle">{recoveryCodes ? '每个恢复码只能使用一次，请保存在只有你能访问的安全位置。' : flow ? '完成验证后，继续进入你的 Grove。' : enrolling ? '核对本机授权，继续登记验证器。' : mode === 'enroll' ? '先用账号和密码登录，再在网页扫码设置验证器。首次登记无需控制台令牌。' : '欢迎回来，继续照看你的基础设施。'}</p>
     {!flow && !enrolling && !localLogin && mode === 'signin' && <GroveLoginButton onSession={onSession} onInfo={setLoginInfo} />}
     {!showLocal && loginInfo?.account_management && <div className="auth-links grove-auth-links">
-      <a className="text-link" href="#/grove-device-login">设备签名登录</a>
+      <a className="text-link" href="#/grove-device-login">Grove 管理员登录</a>
       <a className="text-link" href="#/grove-forgot">找回账号</a>
       <a className="text-link" href="#/grove-register">接受账号邀请</a>
     </div>}

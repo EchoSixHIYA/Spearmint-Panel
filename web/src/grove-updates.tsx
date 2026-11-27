@@ -13,7 +13,7 @@ const needsAuthorization = 'GROVE_USER_AUTHORIZATION_REQUIRED'
 
 function failureMessage(error: unknown, action: Action) {
   if (error instanceof ApiError) {
-    if (error.code === needsAuthorization) return '请使用 Grove 登录设备重新登录，再发起群组更新。'
+    if (error.code === needsAuthorization) return '请使用「Grove 管理员登录」。群组管理权限会在登录时自动生效。'
     if (error.code === 'GROVE_SYNCHRONIZING') return 'Grove 权限正在同步，完成后可重试。'
     if (error.code === 'CONFLICT') return '更新状态已变化，请刷新进度或重新检查更新。'
     if (error.code === 'DENIED' || error.status === 403) return '请使用 Grove 管理员账号发起更新。'
