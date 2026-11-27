@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from . import auth, grove, grove_accounts, grove_authorization, grove_device_login, grove_updates, grove_admission, grove_login, grove_metadata, grove_quorum_join, grove_voters, grove_voter_service, grove_web_join, mesh_enrollment, onboarding, passkeys, seed_admission, seed_wizard
+from . import grove_password_session
 from .build_info import deployment_host, deployment_web, running_build
 from .catalog import RegistrationError, TargetAlreadyRegistered, get_service, list_services
 from .config import Config
@@ -646,12 +647,13 @@ def create_app(config: Config, *, drivers: dict[str, Driver] | None = None, nati
         return set_session(store, request, response, session)
 
     @app.post('/api/v1/auth/grove/member-login')
-    def grove_member_login(body: GroveCredentials, request: Request, response: Response):
+    async def grove_member_login(body: GroveCredentials, request: Request, response: Response):
         require_origin(request)
-        session = grove_login.login(store, body.username, body.password, body.code, address_of(request))
+        session = await run_in_threadpool(grove_login.login, store, body.username, body.password, body.code, address_of(request))
         if session is None:
             raise HTTPException(401, 'Invalid Grove account or authentication factor')
-        return set_session(store, request, response, session)
+        management_ready = await grove_password_session.authorize(store, remote, session[0], body.username, body.password, body.code)
+        return {**set_session(store, request, response, session), 'grove_management_ready': management_ready}
 
     def grove_session_account(actor):
         with store.connect(read_only=True) as db:

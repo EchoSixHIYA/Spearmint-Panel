@@ -76,7 +76,7 @@ export function IdentityWorkspace({ onFactors }: { onFactors: () => void }) {
         <div className="identity-login-actions">
           <button type="button" onClick={onFactors}><Icon name="key" size={16} /><span>管理登录验证器</span><Icon name="arrow-right" size={14} /></button>
           {session.grove && groveDetails?.account_management && <a href="#/account/identity">
-            <Icon name="key" size={16} /><span>登录设备与账号恢复</span><Icon name="arrow-right" size={14} /></a>}
+            <Icon name="key" size={16} /><span>账号恢复</span><Icon name="arrow-right" size={14} /></a>}
           <a href="#/account/sessions"><Icon name="monitor" size={16} /><span>查看登录会话</span><Icon name="arrow-right" size={14} /></a></div>
       </Panel>
     </div>
@@ -87,18 +87,14 @@ export function AccountWorkspace({ onFactors, onSave, section }: { onFactors: ()
   const { session, onUnauthorized } = useConsole()
   const [tab, setTab] = useState(section || 'identity')
   const [passwordOpen, setPasswordOpen] = useState(false)
-  const [deviceOpen, setDeviceOpen] = useState(false)
   const [recoveryOpen, setRecoveryOpen] = useState(false)
   const recovery = usePoll<{ available: boolean; configured: boolean; device_bound?: boolean }>(session.grove ? '/auth/grove/account/recovery-code' : null, onUnauthorized)
   const password = usePoll<{ available: boolean }>(session.grove ? '/auth/grove/password' : null, onUnauthorized)
   return <><PageHeading eyebrow="ACCOUNT" title="我的账户" description="登录验证、个人会话和浏览器显示偏好。" /><Tabs label="个人账户" current={tab} onChange={setTab} items={[{ id: 'identity', label: '账户验证' }, { id: 'sessions', label: '会话' }, { id: 'settings', label: '显示偏好' }]} />
     {tab === 'identity' && <Panel title="当前登录身份"><strong>{session.display_name || session.username}</strong><p className="muted">{session.grove ? 'Grove 账号' : '本机账号'}</p><div className="button-row"><button className="btn btn-secondary" onClick={onFactors}>管理登录验证器</button>{password.data?.available && <button className="btn btn-secondary" onClick={() => setPasswordOpen(true)}>修改 Grove 密码</button>}
-      {recovery.data?.available && <><button className="btn btn-secondary" onClick={() => setRecoveryOpen(true)}>{recovery.data.configured ? '重新生成账号恢复码' : '生成账号恢复码'}</button>
-      {!recovery.data.device_bound && <button className="btn btn-secondary" disabled={!recovery.data.configured} onClick={() => setDeviceOpen(true)}>绑定登录设备</button>}</>}</div>
-      {recovery.data?.available && !recovery.data.device_bound && !recovery.data.configured && <p className="muted">绑定前请生成并保存账号恢复码。</p>}</Panel>}
+      {recovery.data?.available && <button className="btn btn-secondary" onClick={() => setRecoveryOpen(true)}>{recovery.data.configured ? '重新生成账号恢复码' : '生成账号恢复码'}</button>}</div></Panel>}
     {tab === 'sessions' && <Sessions session={session} onUnauthorized={onUnauthorized} />}{tab === 'settings' && <SettingsPage onSave={onSave} />}
     {recoveryOpen && <GroveAccountDialog action="recovery-code" deviceBound={recovery.data?.device_bound} session={session} onClose={() => setRecoveryOpen(false)} onUnauthorized={onUnauthorized} />}
-    {deviceOpen && <GroveAccountDialog action="bind-device" session={session} onClose={() => setDeviceOpen(false)} onUnauthorized={onUnauthorized} />}
     {passwordOpen && <GrovePasswordDialog session={session} onUnauthorized={onUnauthorized} onClose={() => setPasswordOpen(false)} />}
   </>
 }

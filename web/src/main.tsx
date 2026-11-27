@@ -151,6 +151,8 @@ function App() {
   return <ConsoleData key={session.username} session={session} onUnauthorized={expireSession} preferences={preferences} webBuild={webBuild}>
     <ConsoleLayout page={page} onSignOut={() => void signOut()} signingOut={pending}>
       {error && <Notice tone="amber">{error}</Notice>}
+      {session.grove_management_ready === false && session.role === 'node_admin' &&
+        <Notice tone="amber">Grove 多数投票节点暂未确认本次登录，远程管理暂不可用。</Notice>}
       <ConsolePage route={{ ...route, page }} onFactors={() => void openFactors()} onSave={save} />
     </ConsoleLayout>
   </ConsoleData>

@@ -4,7 +4,7 @@ export class ApiError extends Error {
   }
 }
 
-export type Session = { username: string; csrf_token: string; role?: 'node_admin' | 'remote_operator'; grove?: boolean; display_name?: string }
+export type Session = { username: string; csrf_token: string; role?: 'node_admin' | 'remote_operator'; grove?: boolean; display_name?: string; grove_management_ready?: boolean }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/v1${path}`, { ...init, credentials: 'same-origin', cache: 'no-store' })

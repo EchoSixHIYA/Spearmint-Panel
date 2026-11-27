@@ -1,5 +1,6 @@
 """Verify Grove accounts at an explicitly enrolled member panel."""
 from collections.abc import Callable
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import re
@@ -233,7 +234,8 @@ def password_verifier(state: State, user_id: str, sealed: bytes) -> str:
     return json.loads(parse_b64(change['record'], 2048))['password_hash']
 
 
-def login(state: State, username: str, password: str, code: str | None, address: str) -> tuple[str, str] | None:
+@contextmanager
+def verified_password(state: State, username: str, password: str, code: str | None, address: str):
     from . import grove_accounts
 
     def read_verifier(db):
@@ -275,13 +277,23 @@ def login(state: State, username: str, password: str, code: str | None, address:
         now = int(time.time())
         if not valid or verifier is None or read_verifier(db) != verifier:
             auth.auth_rejection(db, None, address, 'grove.login_rejected', 'VERIFIER_INVALID')
-            return None
+            yield db, None, False
+            return
         if totp is not None:
             step = factors.matching_step(totp, code or '', now, verifier['last_step'])
             if step is None:
                 auth.auth_rejection(db, None, address, 'grove.login_rejected', 'FACTOR_INVALID')
-                return None
+                yield db, None, False
+                return
             db.execute('UPDATE grove_login_verifier SET last_step=? WHERE user_id=?', (step, verifier['user_id']))
+        yield db, verifier, totp is not None
+
+
+def login(state: State, username: str, password: str, code: str | None, address: str) -> tuple[str, str] | None:
+    with verified_password(state, username, password, code, address) as (db, verifier, has_factor):
+        if verifier is None:
+            return None
+        now = int(time.time())
         realm = db.execute('SELECT id FROM grove_realm').fetchone()
         linked = db.execute('SELECT * FROM grove_account WHERE user_id=?', (verifier['user_id'],)).fetchone()
         if linked and verifier['epoch'] < linked['identity_epoch']:
@@ -292,14 +304,14 @@ def login(state: State, username: str, password: str, code: str | None, address:
                           VALUES (?,?,?,?,?)''', (account_id, '@' + verifier['user_id'], 'grove-only', verifier['effective_role'], account_id))
         account = db.execute('SELECT * FROM panel_account WHERE id=?', (account_id,)).fetchone()
         if linked and (linked['valid_until'] == -1 or linked['identity_epoch'] != verifier['epoch'] or account['role'] != verifier['effective_role']
-                       or not account['enabled'] or bool(account['require_mfa']) != (totp is not None)):
+                       or not account['enabled'] or bool(account['require_mfa']) != has_factor):
             factors.revoke_account_sessions(db, account_id)
         db.execute('UPDATE panel_account SET enabled=1,role=?,require_mfa=? WHERE id=?',
-                   (verifier['effective_role'], int(totp is not None), account_id))
+                   (verifier['effective_role'], int(has_factor), account_id))
         db.execute('''INSERT INTO grove_account VALUES (?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
                       display_name=excluded.display_name,identity_epoch=excluded.identity_epoch,valid_until=0''',
                    (account_id, verifier['user_id'], username, verifier['epoch'], 0))
         db.execute('DELETE FROM login_attempt WHERE address=? AND account_key=?', (address, auth.digest(username)))
         account = auth.account_for(db, account['username'])
         audit(db, account['operation_actor'], address, 'grove.login', verifier['user_id'])
-        return auth.issue_session(db, account, address, now, mfa_at=now if totp else None, method='grove-member', grove_replica=True)
+        return auth.issue_session(db, account, address, now, mfa_at=now if has_factor else None, method='grove-member', grove_replica=True)

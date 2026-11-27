@@ -1,10 +1,4 @@
-"""Grove administrative delegations signed by a user-operated key.
-
-Each user's public key must be approved at the local consoles of a majority of
-the current voters. Neither a Grove password nor a node key can enroll a
-delegate over RPC. A signed delegation explicitly lets its source panel act
-within the selected scope until it expires.
-"""
+"""Validate Grove login sessions and compatibility grants at the receiving node."""
 from contextlib import suppress
 from hashlib import sha256
 import json
@@ -26,6 +20,7 @@ GRANT = 'administrator-delegation'
 LIFETIME = 300
 SEED_RELAY = 'grove-seed-session-relay'
 SEED_DURATION = 15 * 60
+LOGIN_VOTE = 'grove-password-session-vote'
 SERVICE_CONTROL = 'service-control'
 SERVICE_SIGNIN = [SERVICE_CONTROL, 'signin']
 ADMIN_SIGNIN = sorted((KINDS - {'join'}) | {SERVICE_CONTROL})
@@ -33,7 +28,7 @@ ACCOUNT_SIGNIN = ['self', 'signin']
 SERVICE_WORKSPACE = {'detail', 'group-run'}
 LIMIT = 32 * 1024
 ERROR = 'GROVE_USER_AUTHORIZATION_REQUIRED'
-MESSAGE = '请使用 Grove 登录设备重新登录。'
+MESSAGE = '当前 Grove 会话缺少管理权限，请在投票节点完成同步后重新登录。'
 _grants = {}
 _lock = Lock()
 
@@ -172,17 +167,18 @@ def verify_seed_relay(db, payload, grant, scope, now):
             or type(issued) is not int or type(expires) is not int
             or not 0 < expires - issued <= SEED_DURATION
             or expires > grant['session_until'] or not issued - grove.CLOCK_SKEW <= now < expires
-            or binding['proof'] != sha256(grove.encoded({k: payload[k] for k in ('grant', 'approvals')})).hexdigest()):
+            or binding['proof'] != sha256(grove.encoded({k: value for k, value in payload.items() if k != 'seed_relay'})).hexdigest()):
         raise ValueError
     return binding['executor']
 
 
 def verify(db, payload, source, scope, *, owner=None, at=None, delegated=False):
-    """Validate a device signature for the specified source and permission."""
+    """Validate the account, session proof, source, and requested permission."""
     from .peer.grove_service_admin import admin_revision, parse_identity
 
     try:
-        if not isinstance(payload, dict) or payload.keys() not in ({'grant', 'approvals'}, {'grant', 'approvals', 'seed_relay'}):
+        if not isinstance(payload, dict) or (
+                payload.keys() - {'seed_relay'} not in ({'grant', 'approvals'}, {'grant', 'login_votes'})):
             raise ValueError
         location, anchor = context(db)
         grant = unsigned(payload['grant'])
@@ -229,6 +225,12 @@ def verify(db, payload, source, scope, *, owner=None, at=None, delegated=False):
             raise ValueError
         if identity != admin_revision(db, anchor['realm_id'], identity[1], require_admin=any(item not in {'self', 'signin'} for item in scopes)):
             raise PeerError(ERROR, '账号权限已变化，请重新登录。')
+        if 'login_votes' in payload:
+            if ('session_until' not in grant or scope == 'signin'
+                    or grove_accounts.device_key(db, identity[1]) is not None
+                    or len(verified_login_votes(anchor, grant, payload['login_votes'])) <= len(anchor['voters']) // 2):
+                raise ValueError
+            return identity
         approvals = payload['approvals']
         if pinned_key := grove_accounts.device_key(db, identity[1]):
             grove.verified(GRANT, payload['grant'], parse_b64(pinned_key, 32), 4096)
@@ -254,6 +256,25 @@ def verify(db, payload, source, scope, *, owner=None, at=None, delegated=False):
 
 def issue(private_key: Ed25519PrivateKey, challenge: dict, approvals: list[dict]) -> dict:
     return {'grant': grove.signed(GRANT, challenge, private_key), 'approvals': approvals}
+
+
+def login_vote_data(grant):
+    return {'challenge': sha256(grove.encoded(grant)).hexdigest()}
+
+
+def verified_login_votes(anchor, grant, votes):
+    if not isinstance(votes, list) or len(votes) > len(anchor['voters']):
+        return {}
+    expected = login_vote_data(grant)
+    result = {}
+    for envelope in votes:
+        try:
+            node, data = grove_voters.verified_node(LOGIN_VOTE, envelope)
+            if node in anchor['voters'] and data == {**expected, 'public_key': data['public_key']}:
+                result[node] = envelope
+        except (KeyError, TypeError, ValueError, PeerError):
+            continue
+    return result
 
 
 def rolling_update_challenge(challenge: dict) -> dict | None:

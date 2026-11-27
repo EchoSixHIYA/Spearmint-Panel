@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from ..auth import Actor
 from .. import auth, grove, grove_accounts, grove_admission, grove_authorization, grove_availability, grove_continuity, grove_identity_changes, grove_login, grove_metadata, grove_password, grove_revocation, grove_roles, grove_web_join, seed_admission
+from .. import grove_password_session
 from ..build_info import (DEPLOYMENT_DETAILS_METHOD, DEPLOYMENT_DIRECTORY_METHOD, DEPLOYMENT_HOST_METHOD, DEPLOYMENT_METHOD,
                           DEPLOYMENT_PACKAGE_METHOD, DEPLOYMENT_WEB_METHOD, DeploymentStatus)
 from ..catalog import Service, get_service
@@ -474,6 +475,8 @@ class PeerServices:
             return await self.work(grove_pairing.attest,self.state,self.mesh_enrollment_policy,pair,params,rpc=True)
         if method in {grove_login.METHOD, grove_login.STANDBY_METHOD, grove_login.RECOVERY_METHOD}:
             return await self.work(self.grove_login_reply, pair, params, method, rpc=True)
+        if method == grove_password_session.METHOD:
+            return await self.work(grove_password_session.receive, self.state, pair, params, rpc=True)
         if method == grove_web_join.METHOD:
             raise PeerError('DENIED', 'The Grove issuer must verify the administrator directly')
         if method == grove_web_join.INVITATION_METHOD:
