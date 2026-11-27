@@ -12,7 +12,14 @@ MAX_MEMBERS = 32
 PRIVATE_NETWORKS = tuple(map(ip_network, ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")))
 MEMBER_QUERY = """
     SELECT peer.*, mesh_profile.bind_ip, mesh_profile.listen_port, mesh_profile.ca_pem,
-           mesh_profile.local_pem, peer_neighbor.source_ip, peer_neighbor.port
+           mesh_profile.local_pem, peer_neighbor.source_ip, peer_neighbor.port,
+           CASE WHEN peer.ingress_only=1 AND peer_neighbor.source_ip IS NOT NULL THEN COALESCE((
+               SELECT event='mesh.enrollment_registered' AND source=peer_neighbor.source_ip
+               FROM audit WHERE target=peer.node_id AND event IN (
+                   'mesh.enrollment_registered', 'mesh.neighbor.configured', 'mesh.neighbor.public_configured'
+               )
+               ORDER BY id DESC LIMIT 1
+           ), 0) ELSE 0 END AS source_observed
     FROM peer JOIN mesh_profile USING (mesh_id) LEFT JOIN peer_neighbor USING (node_id)
 """
 
@@ -57,12 +64,17 @@ class Pair:
     legacy: bool = True
     routed: bool = False
     ingress_only: bool = False
+    source_observed: bool = False
+
+    @property
+    def fixed_source_ip(self) -> str | None:
+        return None if self.source_observed else self.source_ip
 
     def public_data(self) -> dict:
         return {
             "node_id": self.node_id, "mesh_id": self.mesh_id, "enabled": bool(self.enabled),
-            "bind_ip": self.bind_ip, "listen_port": self.listen_port, "source_ip": self.source_ip,
-            "host": self.host, "port": self.port, "fingerprint": self.fingerprint,
+            "bind_ip": self.bind_ip, "listen_port": self.listen_port, "source_ip": self.fixed_source_ip,
+            "host": self.host, "port": self.port if self.fixed_source_ip else None, "fingerprint": self.fingerprint,
             "legacy": self.legacy, "routed": self.routed,
         }
 
@@ -94,7 +106,7 @@ def check_port(port: int) -> None:
 
 def read_member(row: sqlite3.Row) -> Pair:
     fields = {name: row[name] for name in Pair.__dataclass_fields__}
-    for name in ("enabled", "legacy", "routed", "ingress_only"):
+    for name in ("enabled", "legacy", "routed", "ingress_only", "source_observed"):
         fields[name] = bool(fields[name])
     return Pair(**fields)
 

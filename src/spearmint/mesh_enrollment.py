@@ -261,7 +261,7 @@ def register(state: State, policy: Policy, data: dict, pem: bytes, source: str):
             raise PeerError('CONFLICT', 'A different Mesh member record already exists')
         if quarantine.contains(db, node):
             raise PeerError('DENIED', 'The node is locally quarantined')
-        if prior and prior.source_ip == address:
+        if prior and (prior.fixed_source_ip is not None or prior.source_ip == address):
             return
         if not prior:
             if db.execute('SELECT count(*) FROM peer').fetchone()[0] >= MAX_MEMBERS:
@@ -270,6 +270,7 @@ def register(state: State, policy: Policy, data: dict, pem: bytes, source: str):
                           VALUES (?,?,?,?,?,lower(hex(randomblob(16))),1,1,1)''',
                        (node, policy.mesh, subject_name(node), fingerprint(leaf), pem))
             db.execute('INSERT INTO peer_directory(peer_id) VALUES (?)', (node,))
+        # The request's source is an observation, not a fixed dial destination.
         db.execute('''INSERT INTO peer_neighbor (node_id,source_ip,port) VALUES (?,?,8766)
                       ON CONFLICT(node_id) DO UPDATE SET source_ip=excluded.source_ip''', (node, address))
         audit(db, 'grove-majority', address, 'mesh.enrollment_registered', node, reason=policy.id)

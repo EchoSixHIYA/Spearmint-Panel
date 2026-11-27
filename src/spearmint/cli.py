@@ -667,6 +667,8 @@ def main() -> int:
     host_access.add_argument('--user', help='Dedicated panel OS account to authorize (enable requires root)')
     frp_parser(subparsers.add_parser("frp", help="Manage local FRP mappings"))
     peer_parser(subparsers.add_parser("peer", help="Manage the authenticated Peer link"))
+    if WINDOWS:
+        subparsers.add_parser('check-mesh-firewall', help='Check Windows inbound rules for the configured Mesh listener')
     configure_approve(subparsers.add_parser("approve", help="Sign an operation challenge"))
     subparsers.add_parser('init-grove-device', help='Create a local Grove device key').add_argument('directory', type=Path)
     grant = subparsers.add_parser('sign-grove-authorization', help='Sign a Grove authorization on the independent user device')
@@ -853,6 +855,9 @@ def main() -> int:
                     print(f'SPEARMINT_SEED_NODE_ID={state.identity()[0]} {setup}')
         elif args.command == 'seed-enrollment':
             print(json.dumps(seed_admission.cli(state, config, args.action)))
+        elif args.command == 'check-mesh-firewall':
+            from .windows_mesh_firewall import check
+            print(json.dumps(check(state, Path(sys.executable))))
         elif args.command == 'grove':
             if args.grove_command == 'approve-administrator-key':
                 state.verify()

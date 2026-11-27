@@ -1485,7 +1485,7 @@ class PeerServices:
             if origin:
                 entry['display_host'] = origin_ip or pair.host
             else:
-                entry['display_host'] = automatic[0] if automatic else pair.source_ip or pair.host
+                entry['display_host'] = automatic[0] if automatic else pair.fixed_source_ip or pair.host
             entry['local_reputation'] = self.reputation.status(node)
             if entry.get('local_quarantine'):
                 continue

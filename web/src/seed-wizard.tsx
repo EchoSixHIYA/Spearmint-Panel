@@ -12,6 +12,7 @@ type Directory = { parent: string | null; writable: boolean; free: number | null
 type SeedView = { status: string; fingerprint?: string; platform?: string; package?: { name: string; size: number; commit: string; host_services?: number; docker_authorization?: number };
   path?: string; directory?: Directory; install?: string; state?: string; origin?: string; node_id?: string; error?: string
   failed_stage?: string; failure_detail?: string; failure_phase?: string; failure_exit?: number; host_services_supported?: boolean; docker_authorization_supported?: boolean;
+  mesh_firewall?: { status: string; address?: string; port?: number };
   voting_supported?: boolean; voting_requested?: boolean; voter_job?: string; voter_status?: string; voter_reason?: string }
 
 const progress: Record<string, string> = {
@@ -209,6 +210,9 @@ export function SeedWizard({ follow, sourceId }: { follow: (origin: string, node
         关闭会对整台设备生效。完成后点击「开始新播种」。
       </Notice>}
       {error && <p className="error" role="alert">{error}</p>}
+      {view?.mesh_firewall?.status === 'rule_unconfirmed' && <Notice tone="amber">
+        Windows 防火墙未找到匹配 Mesh 监听地址 {view.mesh_firewall.address} 和 TCP {view.mesh_firewall.port} 的入站允许规则。请核对目标机的局域网入站规则。
+      </Notice>}
       {view?.status === 'joined' && <Notice title="Spearmint 已启动并加入 Grove">
         {view.voting_requested && <p>{voters.data?.voters.includes(view.node_id || '') ? '已成为投票节点。' : view.voter_reason || '正在同步权限并申请投票资格；完成后会自动更新，无需手动配对。'}</p>}
         {view.origin && <button className="btn btn-secondary" onClick={() => follow(view.origin!, view.node_id)}>查看 Mesh 接入状态</button>}

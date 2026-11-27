@@ -143,6 +143,37 @@ function Get-PanelListener([string]$Executable) {
         Select-Object -First 1
 }
 
+function Confirm-MeshFirewall([string]$Executable) {
+    try {
+        $result = & $Executable --state-dir $StateDirectory --origin $Origin check-mesh-firewall
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Firewall check could not run.'
+        }
+        $firewall = $result | ConvertFrom-Json
+        if ($firewall.status -eq 'check_unavailable' -and $firewall.address -and $firewall.port) {
+            $port = [string]$firewall.port
+            $filters = Get-NetFirewallPortFilter -PolicyStore ActiveStore -Protocol TCP,Any |
+                Where-Object { $_.LocalPort -contains $port -or $_.LocalPort -contains 'Any' }
+            $inboundRules = @($filters | Get-NetFirewallRule |
+                Where-Object { $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' })
+            $apps = @($inboundRules | Get-NetFirewallApplicationFilter |
+                Where-Object { [Environment]::ExpandEnvironmentVariables([string]$_.Program) -in 'Any', $Executable })
+            $matchingRule = $inboundRules | Where-Object { $_.InstanceID -in $apps.InstanceID } |
+                Get-NetFirewallAddressFilter | Where-Object {
+                    $_.LocalAddress -contains 'Any' -or $_.LocalAddress -contains $firewall.address
+                } | Select-Object -First 1
+            $firewall.status = if ($matchingRule) { 'rule_found' } else { 'rule_unconfirmed' }
+        }
+        if ($firewall.status -eq 'rule_unconfirmed') {
+            Write-Warning "No matching Windows Firewall allow rule found for the Mesh listener $($firewall.address) TCP $($firewall.port). Check the rule for the intended network."
+        } elseif ($firewall.status -eq 'check_unavailable') {
+            Write-Warning 'Could not inspect Windows Firewall rules for the Mesh listener.'
+        }
+    } catch {
+        Write-Warning 'Could not inspect Windows Firewall rules for the Mesh listener.'
+    }
+}
+
 function Assert-PanelPortFree {
     if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
         Where-Object { $_.LocalAddress -in @($Bind, '0.0.0.0', '::') }) {
@@ -670,6 +701,7 @@ try {
         }
         Confirm-StagedPackage $release
         if ($CheckUpgrade) {
+            Confirm-MeshFirewall $binary
             Write-Output "Upgrade checks passed: $($previousManifest.commit) -> $($manifest.commit)"
             $receipt = @{
                 version = 1
@@ -689,6 +721,7 @@ try {
             return
         }
         if ($KeepStopped -and $previousAction.Execute -eq $binary) {
+            Confirm-MeshFirewall $binary
             Write-Output "Already installed and stopped: $release"
             return
         }
@@ -774,6 +807,9 @@ try {
             throw $failure
         }
         Write-Output "Scheduled task: $TaskName"
+    }
+    if (-not $StageOnly) {
+        Confirm-MeshFirewall $binary
     }
     Write-Output "Installed: $release"
     Write-Output "Node state: $StateDirectory"

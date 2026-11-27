@@ -201,13 +201,13 @@ class PeerManager:
                 return None
             if pair.ingress_only and not db.execute('SELECT 1 FROM grove_member WHERE node_id=? AND enabled=1', (node_id,)).fetchone():
                 return None
-            if pair.source_ip == ip:
+            if pair.source_ip == ip and grove_address is None:
                 return pair
             if not pair.legacy and db.execute("SELECT 1 FROM mesh_profile WHERE discovery=1").fetchone():
                 networks = db.execute("SELECT network FROM peer_network WHERE node_id=?", (node_id,))
                 if any(ip_address(ip) in ip_network(row["network"]) for row in networks):
                     return pair
-            if (self.grove_endpoints is not None and not pair.legacy and pair.source_ip is None
+            if (self.grove_endpoints is not None and not pair.legacy and pair.fixed_source_ip is None
                     and not db.execute('SELECT 1 FROM peer_network WHERE node_id=?', (node_id,)).fetchone()):
                 trust = trusted_members(db, self.local_id, operational=True, transport=True)
                 origin = trust.origins.get(node_id) if trust else None
@@ -237,7 +237,7 @@ class PeerManager:
             trust = trusted_members(db, self.local_id, operational=True, transport=True) if self.grove_endpoints is not None else None
             explicit_networks = {row['node_id'] for row in db.execute('SELECT DISTINCT node_id FROM peer_network')} if trust else set()
             automatic = {node for node, pair in pairs.items() if trust and node in trust.origins and pair.enabled
-                         and not pair.legacy and pair.source_ip is None and node not in explicit_networks}
+                         and not pair.legacy and pair.fixed_source_ip is None and node not in explicit_networks}
             return pairs, *network_view(db, pairs), bool(profile and profile["forwarding"]), trust, automatic, quarantines
 
     def admit(self, pairs: dict[str, Pair], validated: dict[str, tuple[Pair, float]]) -> dict[str, Pair]:
@@ -456,7 +456,7 @@ class PeerManager:
         previous = self.neighbors.get(node)
         if previous and (pair.legacy or previous.rank <= rank):
             return
-        if previous is None and self.scheduler and not self.scheduler.accept(pair):
+        if previous is None and self.scheduler and not self.scheduler.accept(pair, inbound=expected is None):
             raise ProtocolError('Automatic neighbor trial or protected capacity is occupied')
         if previous is None and len(self.neighbors) >= NEIGHBORS:
             raise ProtocolError("Neighbor capacity reached")
@@ -573,7 +573,7 @@ class PeerManager:
                    for pair in self.admitted.values())
 
     def established_source(self, ip: str) -> bool:
-        return (any(pair.source_ip == ip for pair in self.admitted.values())
+        return (any(pair.fixed_source_ip == ip for pair in self.admitted.values())
                 or any(link.address == ip for link in self.neighbors.values()))
 
     async def listen(self, listener: socket.socket, tls) -> None:
@@ -628,8 +628,9 @@ class PeerManager:
 
         while self.admitted.get(pair.node_id) == pair:
             candidates = self.endpoints.get(pair.node_id, ())
-            if pair.source_ip is not None and pair.port is not None:
-                candidates = ((pair.source_ip, pair.port),) + tuple(item for item in candidates if item != (pair.source_ip, pair.port))
+            if pair.fixed_source_ip is not None and pair.port is not None:
+                fixed = (pair.fixed_source_ip, pair.port)
+                candidates = (fixed,) + tuple(item for item in candidates if item != fixed)
             if (not candidates or pair.node_id in self.neighbors or self.handshakes >= HANDSHAKES
                     or self.outbound_handshakes >= DIRECTION_HANDSHAKES):
                 await asyncio.sleep(0.5)

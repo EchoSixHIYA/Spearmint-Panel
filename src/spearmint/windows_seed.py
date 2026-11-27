@@ -249,7 +249,12 @@ def enroll(options: dict) -> dict:
     action = options['action']
     if action not in {'request', 'finish', 'status'}:
         raise ValueError('Invalid enrollment action')
-    return seed_admission.cli(state, config, action, payload=options.get('payload'))
+    result = seed_admission.cli(state, config, action, payload=options.get('payload'))
+    if action == 'status' and 'programs' in options and re.fullmatch(r'[0-9a-f]{40}', options.get('commit', '')):
+        from .windows_mesh_firewall import check
+        binary = fixed_path(options['programs']) / 'releases' / options['commit'] / 'spearmint.exe'
+        result['mesh_firewall'] = check(state, binary)
+    return result
 
 
 def command(bundle: Path, args: list[str]) -> int:

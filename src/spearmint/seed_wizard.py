@@ -92,6 +92,7 @@ class Job:
     failure_detail: str | None = None
     failure_phase: str | None = None
     failure_exit: int | None = None
+    mesh_firewall: dict | None = None
     username: str = ''
     host_password: str = field(default='', repr=False)
     voting_requested: bool = False
@@ -113,7 +114,8 @@ class Job:
                 'path': self.current, 'directory': self.directory,
                 'install': self.install, 'state': self.state, 'origin': self.origin, 'node_id': self.node,
                 'error': self.error, 'failed_stage': self.failed_stage, 'failure_detail': self.failure_detail,
-                'failure_phase': self.failure_phase, 'failure_exit': self.failure_exit, 'host_services_supported': True,
+                'failure_phase': self.failure_phase, 'failure_exit': self.failure_exit, 'mesh_firewall': self.mesh_firewall,
+                'host_services_supported': True,
                 'docker_authorization_supported': True,
                 'voting_supported': True, 'voting_requested': self.voting_requested, 'voter_job': self.voter_job,
                 'voter_status': self.voter_status, 'voter_reason': self.voter_reason}
@@ -446,12 +448,16 @@ class SeedWizard:
             if windows:
                 answer = job.connection.windows_request('enroll', {
                     'state': job.state, 'origin': job.origin, 'action': action, 'payload': payload,
+                    'programs': job.install, 'commit': job.package.metadata['commit'],
                 })
             else:
                 arguments = [str(executable), '--state-dir', job.state, '--origin', job.origin, 'seed-enrollment', action]
                 answer = json.loads(job.connection.answer(join(arguments), grove.encoded(payload) if payload else b'').decode('utf-8-sig'))
             if answer.get('node_id') != job.node:
                 raise PeerError('SEED_IDENTITY', 'Installed node identity changed during enrollment')
+            if action == 'status' and isinstance(answer.get('mesh_firewall'), dict):
+                with self.lock:
+                    job.mesh_firewall = answer['mesh_firewall']
             return answer
 
         response = bootstrap('request', invitation=code)

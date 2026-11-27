@@ -16,6 +16,7 @@ QUALIFY_TIMEOUT = 20
 RETRY = 30
 TRIAL_INTERVAL = 10
 REPLACEMENT_DWELL = 20
+RECOVERY_SLOTS = 2
 
 
 @dataclass
@@ -36,6 +37,7 @@ class Neighbors:
         self.inbound: tuple[str, object] | None = None
         self.until: dict[str, float] = {}
         self.held: dict[str, float] = {}
+        self.recovering: dict[str, float] = {}
         self.tried: dict[str, float] = {}
         self.failures: Counter[str] = Counter()
         self.counts: Counter[str] = Counter()
@@ -45,13 +47,19 @@ class Neighbors:
 
     @staticmethod
     def fixed(pair: 'Pair') -> bool:
-        return pair.legacy or pair.source_ip is not None
+        return pair.legacy or pair.fixed_source_ip is not None
+
+    def steady_target(self) -> int:
+        fixed = sum(self.fixed(link.pair) for link in self.manager.neighbors.values())
+        return min(LIMIT, max(self.target, fixed + self.minimum))
 
     def protections(self) -> dict[str, set[str]]:
         result = {node: set(reasons) for node, reasons in self.protected().items()}
         for node, link in self.manager.neighbors.items():
             if self.fixed(link.pair):
                 result.setdefault(node, set()).add('fixed')
+            if self.recovering.get(node, 0) > self.clock():
+                result.setdefault(node, set()).add('recovering')
             if link.session.pending or link.session.handling or link.session.write_bytes:
                 result.setdefault(node, set()).add('in_flight_rpc')
         return result
@@ -69,7 +77,7 @@ class Neighbors:
         if size >= LIMIT:
             self.reason = 'physical_limit'
             return False
-        if size < self.target:
+        if size < self.steady_target():
             return True
         if self.clock() < self.next_trial or self.clock() - self.last_replacement < REPLACEMENT_DWELL:
             self.reason = 'replacement_dwell'
@@ -115,18 +123,12 @@ class Neighbors:
         return True
 
     def incoming(self, address: str):
-        """Reserve before TLS when only dynamic admission could match the source."""
-        if any(pair.source_ip == address for pair in self.manager.admitted.values() if self.fixed(pair)):
+        """Bound unknown-source handshakes independently of steady neighbors."""
+        if any(pair.fixed_source_ip == address for pair in self.manager.admitted.values()):
             return lambda: None
         if any(link.address == address for link in self.manager.neighbors.values()):
             return lambda: None  # A duplicate replaces the same logical neighbor slot.
         if self.inbound is not None:
-            return None
-        if self.trial is not None:
-            endpoints = self.manager.endpoints.get(self.trial.node, ())
-            if self.trial.link is not None or not any(ip == address for ip, _ in endpoints):
-                return None
-        elif not self.can_trial():
             return None
         token = object()
         self.inbound = address, token
@@ -137,7 +139,7 @@ class Neighbors:
 
         return release
 
-    def accept(self, pair: 'Pair') -> bool:
+    def accept(self, pair: 'Pair', *, inbound: bool = False) -> bool:
         if self.fixed(pair):
             if len(self.manager.neighbors) < LIMIT:
                 return True
@@ -151,8 +153,16 @@ class Neighbors:
         # Dial retry throttles our worker; peer recovery must not share that ban.
         if self.held.get(pair.node_id, 0) > self.clock():
             return False
+        size = len(self.manager.neighbors)
+        if inbound:
+            if size >= min(LIMIT, self.steady_target() + RECOVERY_SLOTS):
+                self.reason = 'recovery_capacity'
+                return False
+            self.recovering[pair.node_id] = self.clock() + QUALIFY_TIMEOUT
+            self.counts['recoveries'] += 1
+            return True
         if self.trial is not None:
-            return self.trial.node == pair.node_id and len(self.manager.neighbors) < LIMIT
+            return self.trial.node == pair.node_id and size < LIMIT
         if not self.can_trial():
             return False
         self.reserve(pair.node_id)
@@ -184,6 +194,7 @@ class Neighbors:
         current = self.manager.neighbors.get(link.pair.node_id)
         if current is not None and current is not link:
             return
+        self.recovering.pop(link.pair.node_id, None)
         if self.trial and self.trial.link is link:
             self.trial = None
         self.failed(link.pair.node_id)
@@ -231,6 +242,10 @@ class Neighbors:
         for mapping in (self.until, self.held, self.tried, self.failures):
             for node in mapping.keys() - self.manager.pairs.keys():
                 mapping.pop(node)
+        for node, deadline in list(self.recovering.items()):
+            if deadline <= now or node not in self.manager.neighbors:
+                self.recovering.pop(node)
+        target = self.steady_target()
         trial = self.trial
         if trial is not None:
             if trial.node not in self.manager.admitted:
@@ -243,7 +258,7 @@ class Neighbors:
                     self.lost(link)
                 else:
                     qualified = self.qualified(link)
-                    if qualified and len(self.manager.neighbors) <= self.target:
+                    if qualified and len(self.manager.neighbors) <= target:
                         self.trial = None
                         self.reason = 'minimum_ready' if len(self.manager.neighbors) >= self.minimum else 'filling_minimum'
                         self.counts['qualified'] += 1
@@ -267,7 +282,7 @@ class Neighbors:
                             self.counts['failed_trials'] += 1
                         else:
                             self.reason = 'trial_protected_waiting'
-        if self.trial is None and len(self.manager.neighbors) > self.target:
+        if self.trial is None and len(self.manager.neighbors) > target:
             candidates = self.victims()
             if candidates:
                 self.retire(max(candidates, key=self.quality), 'steady_target')

@@ -16,6 +16,7 @@ from spearmint.peer.grove_endpoints import GroveEndpoints
 from spearmint.peer.manager import PeerManager
 from spearmint.peer.protocol import encode, receive
 from spearmint.peer.session import close_stream
+from spearmint.state import audit
 
 
 class GroveIngressTest(unittest.TestCase):
@@ -41,6 +42,10 @@ class GroveIngressTest(unittest.TestCase):
             pairing.configure_mesh(server, mesh_id, '192.168.20.10', 8766, ca_pem, server_cert.public_bytes(Encoding.PEM))
             pairing.add_member(server, client_id, client_host, fingerprint(client_cert), client_cert.public_bytes(Encoding.PEM))
             pairing.set_enabled(server, True, client_id)
+            with server.connect(write=True) as db:
+                db.execute('UPDATE peer SET ingress_only=1 WHERE node_id=?', (client_id,))
+                db.execute('INSERT INTO peer_neighbor VALUES (?,?,?)', (client_id, '192.168.22.2', 8766))
+                audit(db, 'grove-majority', '192.168.22.2', 'mesh.enrollment_registered', client_id)
             manager = PeerManager(server, server_id, dial_enabled=False)
             manager.grove_endpoints = GroveEndpoints(server_id, server.signing_key())
             (manager.pairs, manager.discovery_enabled, manager.networks, manager.endpoints, manager.forwarding_enabled,
@@ -49,10 +54,14 @@ class GroveIngressTest(unittest.TestCase):
             manager.admitted = manager.admit(manager.pairs, {})
             self.assertIn(client_id, manager.automatic_members)
             self.assertFalse(manager.endpoints.get(client_id))
+            self.assertIsNone(manager.admitted[client_id].fixed_source_ip)
             server_tls, _ = manager.contexts(manager.admitted[client_id])
             client_tls = tls_context(client.signing_key(), ca_pem, client_cert.public_bytes(Encoding.PEM),
                                      client.directory, server=False)
             asyncio.run(self.exchange(manager, client_id, mesh_id, server_tls, client_tls, server_host))
+            pairing.set_neighbor(server, client_id, '192.168.22.2')
+            self.assertNotIn(client_id, manager.read_members()[-2])
+            self.assertIsNone(manager.read_neighbor(client_id, '192.168.20.20', None))
 
     async def exchange(self, manager, client_id, mesh_id, server_tls, client_tls, server_host):
         with socket.socket() as listener:
